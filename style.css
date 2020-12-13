@@ -42,11 +42,19 @@ body {
     left: calc(50% - 72px);
     clip-path: circle(120px at center);
     animation: dissolve 0.5s ease-in paused 1 forwards;
-    color: #247435;
+}
+
+.landing:hover {
+    /* animation: bob 1s ease-in-out infinite alternate; */
+    cursor: pointer;
 }
 
 @keyframes dissolve {
     100% {clip-path: circle(0px at center);}
+}
+
+@keyframes bob {
+    100% {transform: translateY(5px);}
 }
 
 #main {
