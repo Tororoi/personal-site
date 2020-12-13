@@ -52,8 +52,7 @@ body {
 #main {
     display: flex;
     width: 100vw;
-    height: 100vh;
-    top: -16px;
+    height: 90vh;
     left: 0px;
     opacity: 0;
     animation: fade-in 0.5s ease-in paused 1 forwards;
@@ -63,6 +62,31 @@ body {
     100% {opacity: 1;}
 }
 
+footer {
+    width: 100vw;
+    height: 10vh;
+    top: 90vh;
+    position: fixed;
+}
+
+#logos {
+    width: 100vw;
+    height: 10vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+#icon {
+    font-size: 50px;
+    color: orange;
+    margin: 10px;
+    transition: all 0.5s;
+}
+
+#icon:hover {
+    color: rgb(255, 208, 0);
+}
 /* Left Side */
 
 #left-side {
@@ -114,8 +138,9 @@ body {
 /* Middle */
 
 #middle {
-    margin: 2% 0 0 2%;
+    margin: 4vh 0 0 4vh;
     width: 1px;
+    height: 82vh;
     background-color: orange;
 }
 
@@ -193,3 +218,4 @@ body {
 .project:hover .divider-line {
     width: 15vw;
 }
+
