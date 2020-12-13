@@ -41,7 +41,7 @@ body {
 /* Left Side */
 
 #left-side {
-    width: 45%;
+    width: 49%;
 }
 
 #left-side p {
@@ -55,13 +55,16 @@ body {
 /* Middle */
 
 #middle {
-    width: 10%;
+    margin: 1%;
+    width: 1px;
+    background-color: orange;
 }
 
 /* Right Side */
 
 #right-side {
     width: 45%;
+    margin: 2%;
 }
 
 #project-container {
@@ -76,17 +79,31 @@ body {
     display: flex;
     flex-flow: row wrap;
     align-items: center;
+    height: 13vw;
+    transition: all 0.5s;
+    opacity: 0.5;
+}
+
+.project:hover {
+    opacity: 1;
+    height: 15vw;
+}
+
+.project:hover a img {
+    width: 21vw;
+    height: 14vw;
 }
 
 .project a img {
-    width: 21vw;
-    height: 14vw;
+    width: 18vw;
+    height: 12vw;
+    transition: all 0.5s;
     object-fit: cover;
 }
 
 .divider-line {
     height: 1px;
-    width: 100%;
+    width: 18vw;
     background-color: orange;
     margin: 8px 0;
 }
@@ -95,16 +112,6 @@ body {
     display: flex;
     flex-flow: column wrap;
     align-items: flex-start;
-    opacity: 1;
-    border-radius: 10px;
-    width: 40%;
-    height: 60%;
-    /* width: 600px;
-    height: 450px; */
-    margin-top: 5%;
-    margin-bottom: 5%;
-    margin-left: calc(5% + 8px);
-    margin-right: calc(5% - 8px);
+    margin: 1vw;
     align-self: center;
-    transition: all 1s;
 }
