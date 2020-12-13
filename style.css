@@ -67,6 +67,9 @@ body {
 
 #left-side {
     width: 50%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
 }
 
 #left-side p {
@@ -75,6 +78,37 @@ body {
 
 #left-side h1 {
     color: Orange;
+}
+
+#about-me {
+    display: flex;
+    flex-flow: column wrap;
+    align-items: flex-start;
+}
+
+#name-section {
+    display: flex;
+    flex-flow: column wrap;
+    align-items: flex-start;
+}
+
+.resume-btn {
+    color: orange;
+    margin-top: 40px;
+    width: 130px;
+    height: 45px;
+    line-height: 45px;
+    font-size: 20px;
+    text-align: center;
+    border-radius: 4px;
+    border: 1px solid orange;
+    transition: all 0.5s;
+    text-decoration: none;
+}
+
+.resume-btn:hover {
+    color: #282c34;
+    background-color: orange;
 }
 
 /* Middle */
