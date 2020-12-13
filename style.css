@@ -11,6 +11,31 @@ body {
     overflow: hidden;
 }
 
+::-webkit-scrollbar {
+    width: 24px;
+}
+
+/* Track */
+::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  
+  /* Handle */
+  ::-webkit-scrollbar-thumb {
+    background: #0d556b;
+    background-clip: content-box;
+    border-radius: 10px;
+    border: 3px solid transparent;
+  }
+  
+  /* Handle on hover */
+  ::-webkit-scrollbar-thumb:hover {
+    background: #297a92;
+    background-clip: content-box;
+    border-radius: 10px;
+    border: 3px solid transparent;
+  }
+
 .landing {
     position: fixed;
     top: calc(50% - 72px);
@@ -41,7 +66,7 @@ body {
 /* Left Side */
 
 #left-side {
-    width: 49%;
+    width: 50%;
 }
 
 #left-side p {
@@ -55,7 +80,7 @@ body {
 /* Middle */
 
 #middle {
-    margin: 1%;
+    margin: 2% 0 0 2%;
     width: 1px;
     background-color: orange;
 }
@@ -63,8 +88,9 @@ body {
 /* Right Side */
 
 #right-side {
-    width: 45%;
+    width: 50%;
     margin: 2%;
+    margin-left: 0;
 }
 
 #project-container {
@@ -72,7 +98,11 @@ body {
     overflow-y: scroll;
     width: 100%;
     height: 100%;
-    position: fixed;
+    /* position: fixed; */
+}
+
+.bottom-space {
+    height: 3vw;
 }
 
 .project {
@@ -80,18 +110,15 @@ body {
     flex-flow: row wrap;
     align-items: center;
     height: 13vw;
+    margin-left: 5%;
     transition: all 0.5s;
     opacity: 0.5;
 }
 
-.project:hover {
-    opacity: 1;
-    height: 15vw;
-}
-
-.project:hover a img {
-    width: 21vw;
-    height: 14vw;
+.project a {
+    color: white;
+    text-decoration: none;
+    font-weight: bold;
 }
 
 .project a img {
@@ -104,6 +131,7 @@ body {
 .divider-line {
     height: 1px;
     width: 18vw;
+    transition: all 0.5s;
     background-color: orange;
     margin: 8px 0;
 }
@@ -114,4 +142,20 @@ body {
     align-items: flex-start;
     margin: 1vw;
     align-self: center;
+}
+
+/* Project Hover */
+
+.project:hover {
+    opacity: 1;
+    height: 15vw;
+}
+
+.project:hover a img {
+    width: 21vw;
+    height: 14vw;
+}
+
+.project:hover .divider-line {
+    width: 15vw;
 }
