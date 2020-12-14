@@ -232,6 +232,10 @@ footer {
     max-width: 15vw;
     text-align: left;
 }
+
+.view-code {
+    transition: all 0.5s;
+}
 /* Project Hover */
 
 .project:hover {
@@ -258,4 +262,8 @@ footer {
 
 .project-description:hover .divider-line {
     background-color: rgb(255, 208, 0);
+}
+
+.view-code:hover {
+    color: rgb(255, 208, 0);
 }
