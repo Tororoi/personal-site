@@ -228,6 +228,10 @@ footer {
     align-self: center;
 }
 
+.desc {
+    max-width: 15vw;
+    text-align: left;
+}
 /* Project Hover */
 
 .project:hover {
