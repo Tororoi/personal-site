@@ -142,149 +142,12 @@ footer {
     /* border: 1px solid orange; */
     transition: all 0.5s;
     text-decoration: none;
-}
 
-/* Pixel Art Border */
-.btn-border {
-    width: 2px;
-    height: 2px;
-    background: orange;
-
-    box-shadow:
-        /* Left Border */
-        -2px -2px orange,
-        -2px -4px orange,
-        -2px -6px orange,
-        -2px -8px orange,
-        -2px -10px orange,
-        -2px -12px orange,
-        -2px -14px orange,
-        -2px -16px orange,
-        -2px -18px orange,
-        -2px -20px orange,
-        -2px -22px orange,
-        -2px -24px orange,
-        -2px -26px orange,
-        -2px -28px orange,
-        -2px -30px orange,
-        -2px -32px orange,
-
-        /* Right Border */
-        96px -2px orange,
-        96px -4px orange,
-        96px -6px orange,
-        96px -8px orange,
-        96px -10px orange,
-        96px -12px orange,
-        96px -14px orange,
-        96px -16px orange,
-        96px -18px orange,
-        96px -20px orange,
-        96px -22px orange,
-        96px -24px orange,
-        96px -26px orange,
-        96px -28px orange,
-        96px -30px orange,
-        96px -32px orange,
-
-        /* Bottom Border */
+    box-shadow: 
         2px 0px orange,
-        4px 0px orange,
-        6px 0px orange,
-        8px 0px orange,
-        10px 0px orange,
-        12px 0px orange,
-        14px 0px orange,
-        16px 0px orange,
-        18px 0px orange,
-        20px 0px orange,
-        22px 0px orange,
-        24px 0px orange,
-        26px 0px orange,
-        28px 0px orange,
-        30px 0px orange,
-        32px 0px orange,
-        34px 0px orange,
-        36px 0px orange,
-        38px 0px orange,
-        40px 0px orange,
-        42px 0px orange,
-        44px 0px orange,
-        46px 0px orange,
-        48px 0px orange,
-        50px 0px orange,
-        52px 0px orange,
-        54px 0px orange,
-        56px 0px orange,
-        58px 0px orange,
-        60px 0px orange,
-        62px 0px orange,
-        64px 0px orange,
-        66px 0px orange,
-        68px 0px orange,
-        70px 0px orange,
-        72px 0px orange,
-        74px 0px orange,
-        76px 0px orange,
-        78px 0px orange,
-        80px 0px orange,
-        82px 0px orange,
-        84px 0px orange,
-        86px 0px orange,
-        88px 0px orange,
-        90px 0px orange,
-        92px 0px orange,
-        94px 0px orange,
-
-        /* Top Border */
-        0px -34px orange,
-        2px -34px orange,
-        4px -34px orange,
-        6px -34px orange,
-        8px -34px orange,
-        10px -34px orange,
-        12px -34px orange,
-        14px -34px orange,
-        16px -34px orange,
-        18px -34px orange,
-        20px -34px orange,
-        22px -34px orange,
-        24px -34px orange,
-        26px -34px orange,
-        28px -34px orange,
-        30px -34px orange,
-        32px -34px orange,
-        34px -34px orange,
-        36px -34px orange,
-        38px -34px orange,
-        40px -34px orange,
-        42px -34px orange,
-        44px -34px orange,
-        46px -34px orange,
-        48px -34px orange,
-        50px -34px orange,
-        52px -34px orange,
-        54px -34px orange,
-        56px -34px orange,
-        58px -34px orange,
-        60px -34px orange,
-        62px -34px orange,
-        64px -34px orange,
-        66px -34px orange,
-        68px -34px orange,
-        70px -34px orange,
-        72px -34px orange,
-        74px -34px orange,
-        76px -34px orange,
-        78px -34px orange,
-        80px -34px orange,
-        82px -34px orange,
-        84px -34px orange,
-        86px -34px orange,
-        88px -34px orange,
-        90px -34px orange,
-        92px -34px orange,
-        94px -34px orange;
+        -2px 0px orange,
+        0px -2px orange,
+        0px 2px orange;
 }
 
 .resume-btn:hover {
@@ -296,7 +159,7 @@ footer {
 
 #middle {
     margin: 4vh 0 0 4vh;
-    width: 1px;
+    width: 2px;
     height: 82vh;
     background-color: orange;
 }
@@ -342,10 +205,15 @@ footer {
     height: 12vw;
     transition: all 0.5s;
     object-fit: cover;
+    box-shadow: 
+    2px 0px orange,
+    -2px 0px orange,
+    0px -2px orange,
+    0px 2px orange;
 }
 
 .divider-line {
-    height: 1px;
+    height: 2px;
     width: 18vw;
     transition: all 0.5s;
     background-color: orange;
@@ -376,3 +244,14 @@ footer {
     width: 15vw;
 }
 
+.project a img:hover {
+    box-shadow: 
+    2px 0px rgb(255, 208, 0),
+    -2px 0px rgb(255, 208, 0),
+    0px -2px rgb(255, 208, 0),
+    0px 2px rgb(255, 208, 0);
+}
+
+.project-description:hover .divider-line {
+    background-color: rgb(255, 208, 0);
+}
