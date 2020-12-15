@@ -398,7 +398,7 @@ footer {
     #main {
         flex-flow: column nowrap;
         overflow: hidden;
-        height: 80vh;
+        height: 82vh;
     }
 
     ::-webkit-scrollbar {
