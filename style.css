@@ -398,7 +398,15 @@ footer {
     #main {
         flex-flow: column nowrap;
         overflow: hidden;
-        height: 82vh;
+        /* height: 82vh; */
+    }
+
+    #left-side {
+    }
+
+    #right-side {
+        margin: 0;
+        height: 62vh;
     }
 
     ::-webkit-scrollbar {
@@ -410,7 +418,8 @@ footer {
         opacity: 1;
         flex-flow: column nowrap;
         align-items: center;
-        margin-bottom: 24px;
+        margin-bottom: 12px;
+        margin-top: 12px;
         margin-left: 0;
     }
 
