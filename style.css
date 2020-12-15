@@ -5,7 +5,7 @@
 
 /* Background */
 body {
-    text-align: center;
+    text-align: left;
     background-color: #282c34;
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
@@ -104,10 +104,11 @@ footer {
 /* Left Side */
 
 #left-side {
-    width: 50%;
+    width: 50vw;
     display: flex;
     justify-content: center;
     align-items: center;
+    transition: all 0.5s;
 }
 
 #left-side p {
@@ -122,6 +123,7 @@ footer {
     display: flex;
     flex-flow: column wrap;
     align-items: flex-start;
+    justify-content: flex-start;
 }
 
 #name-section {
@@ -158,7 +160,7 @@ footer {
 /* Middle */
 
 #middle {
-    margin: 4vh 0 0 4vh;
+    margin: 4vh 0 4vh 0;
     width: 2px;
     height: 82vh;
     background-color: orange;
@@ -167,9 +169,9 @@ footer {
 /* Right Side */
 
 #right-side {
-    width: 50%;
-    margin: 2%;
-    margin-left: 0;
+    width: 50vw;
+    margin: 2vw 0 2vw 0;
+    /* transition: all 0.5s; */
 }
 
 #project-container {
@@ -186,7 +188,7 @@ footer {
 
 .project {
     display: flex;
-    flex-flow: row wrap;
+    flex-flow: row nowrap;
     align-items: center;
     height: 13vw;
     margin-left: 5%;
@@ -214,7 +216,7 @@ footer {
 
 .divider-line {
     height: 2px;
-    width: 18vw;
+    width: 21vw;
     transition: all 0.5s;
     background-color: orange;
     margin: 8px 0;
@@ -224,13 +226,15 @@ footer {
     display: flex;
     flex-flow: column wrap;
     align-items: flex-start;
+    transition: all 0.5s;
     margin: 1vw;
     align-self: center;
+    /* outline: 1px solid red; */
 }
 
 .desc {
-    max-width: 15vw;
-    text-align: left;
+    max-width: 18vw;
+    /* text-align: left; */
 }
 
 .view-code {
@@ -249,7 +253,7 @@ footer {
 }
 
 .project:hover .divider-line {
-    width: 15vw;
+    width: 18vw;
 }
 
 .project a img:hover {
@@ -266,4 +270,180 @@ footer {
 
 .view-code:hover {
     color: rgb(255, 208, 0);
+}
+
+/* Change Media */
+
+@media (max-width: 1500px) {
+    #left-side {
+        width: 40vw;
+    }
+
+    #right-side {
+        width: 60vw;
+    }
+
+    .project {
+        height: 15vw;
+    }
+
+    .project a img {
+        width: 21vw;
+        height: 14vw;
+    }
+    
+    .divider-line {
+        width: 28vw;
+    }
+
+    .project-description {
+        /* font-size: 12px; */
+    }
+    
+    .desc {
+        max-width: 25vw;
+    }
+    /* Project Hover */
+    
+    .project:hover {
+        opacity: 1;
+        height: 17vw;
+    }
+    
+    .project:hover a img {
+        width: 24vw;
+        height: 16vw;
+    }
+    
+    .project:hover .divider-line {
+        width: 25vw;
+    }
+}
+
+@media (max-width: 1050px) {
+    #main {
+        flex-flow: column nowrap;
+        overflow: hidden;
+    }
+
+    #left-side {
+        top: 0px;
+        width: 100vw;
+        height: 20vh;
+    }
+
+    #about-me {
+        align-items: center;
+    }
+
+    #left-side p {
+        display: none;
+    }
+
+    .resume-btn {
+        margin: 10px;
+        text-align: center;
+    }
+
+    #middle {
+        margin: 0 4vw 0 4vw;
+        height: 2px;
+        width: 92vw;
+    }
+
+    #right-side {
+        width: 100vw;
+        height: 70vh;
+    }
+
+    .project {
+        height: 30vw;
+    }
+
+    .project a img {
+        width: 42vw;
+        height: 28vw;
+    }
+    
+    .divider-line {
+        width: 42vw;
+    }
+
+    .project-description {
+        /* font-size: 12px; */
+    }
+    
+    .desc {
+        max-width: 36vw;
+    }
+    /* Project Hover */
+    
+    .project:hover {
+        opacity: 1;
+        height: 34vw;
+    }
+    
+    .project:hover a img {
+        width: 48vw;
+        height: 32vw;
+    }
+    
+    .project:hover .divider-line {
+        width: 36vw;
+    }
+}
+
+@media (max-width: 600px) {
+
+    ::-webkit-scrollbar {
+        display: none;
+    }
+
+    .project {
+        height: auto;
+        opacity: 1;
+        flex-flow: column nowrap;
+        align-items: center;
+        margin-bottom: 24px;
+    }
+
+    .project a img {
+        width: 75vw;
+        height: 50vw;
+    }
+    
+    .divider-line {
+        width: 75vw;
+    }
+
+    .project-description {
+        /* font-size: 12px; */
+    }
+    
+    .desc {
+        /* max-width: 36vw; */
+        display: none;
+    }
+
+    .language {
+        display: none;
+    }
+
+    br {
+        display: none;
+    }
+    /* Project Hover */
+    
+    .project:hover {
+        height: auto;
+    }
+    
+    .project:hover a img {
+        width: 90vw;
+        height: 60vw;
+    }
+    
+    .project:hover .divider-line {
+        width: 90vw;
+    }
 }
