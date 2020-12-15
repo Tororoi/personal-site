@@ -79,7 +79,7 @@ body {
 footer {
     width: 100vw;
     height: 10vh;
-    top: 90vh;
+    bottom: 0;
     position: fixed;
 }
 
@@ -405,6 +405,7 @@ footer {
         flex-flow: column nowrap;
         align-items: center;
         margin-bottom: 24px;
+        margin-left: 0;
     }
 
     .project a img {
