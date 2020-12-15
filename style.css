@@ -395,6 +395,12 @@ footer {
 
 @media (max-width: 600px) {
 
+    #main {
+        flex-flow: column nowrap;
+        overflow: hidden;
+        height: 85vh;
+    }
+
     ::-webkit-scrollbar {
         display: none;
     }
