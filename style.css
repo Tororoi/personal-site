@@ -358,7 +358,7 @@ footer {
 
     #right-side {
         width: 100vw;
-        height: 70vh;
+        height: 62vh;
     }
 
     .project {
@@ -401,8 +401,8 @@ footer {
 @media (max-width: 600px) {
 
     #main {
-        flex-flow: column nowrap;
-        overflow: hidden;
+        /* flex-flow: column nowrap;
+        overflow: hidden; */
         /* height: 82vh; */
     }
 
