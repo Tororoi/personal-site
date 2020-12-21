@@ -92,6 +92,8 @@ footer {
 }
 
 #icon {
+    display: inline-block;
+    position: relative;
     font-size: 50px;
     color: orange;
     margin: 10px;
@@ -101,6 +103,29 @@ footer {
 #icon:hover {
     color: rgb(255, 208, 0);
 }
+
+.tooltip {
+    visibility: hidden;
+    position: absolute;
+    z-index: 1;
+    color: white;
+    text-align: center;
+    width: 70px;
+    font-family: "04Font";
+    font-size: 16px;
+    /* border-radius: 6px; */
+    padding: 5px 0;
+    transform: translateY(-20px);
+    /* box-shadow: 
+    2px 0px orange,
+    -2px 0px orange,
+    0px -2px orange,
+    0px 2px orange; */
+}
+
+#logos a:hover .tooltip {
+    visibility: visible;
+  }
 /* Left Side */
 
 #left-side {
