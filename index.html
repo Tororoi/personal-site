@@ -4,157 +4,216 @@
     <meta charset="utf-8" />
     <link rel="icon" href="./public/Blackburnian.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta property="og:site_name" content="Thomas Cantwell's Portfolio">
-    <meta property="og:image" content="./public/site_thumb.png">
-    <meta property="og:description" content="Portfolio site showcasing Thomas Cantwell's coding projects.">
-    <link href="all.css" rel="stylesheet">
-    <link rel="stylesheet" href="style.css">
+    <meta property="og:site_name" content="Thomas Cantwell's Portfolio" />
+    <meta property="og:image" content="./public/site_thumb.png" />
+    <meta
+      property="og:description"
+      content="Portfolio site showcasing Thomas Cantwell's coding projects."
+    />
+    <link href="all.css" rel="stylesheet" />
+    <link rel="stylesheet" href="style.css" />
     <script defer src="all.js"></script>
     <script defer src="index.js"></script>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
-    <img class="landing" src="./public/Blackburnian.png">
+    <img class="landing" src="./public/Blackburnian.png" />
     <div id="main">
-        <div id="left-side">
-            <div id="about-me">
-                <div id="name-section">
-                    <p>Hello, my name is</p>
-                    <h1 id="name">Thomas Cantwell</h1>
-                </div>
-                <p id="introduction">On the right are my current and ongoing projects.</p>
-                <a href="./public/Resume.pdf" class="resume-btn" target="_blank">Resume</a>
+      <div id="left-side">
+        <div id="about-me">
+          <div id="name-section">
+            <p>Hello, my name is</p>
+            <h1 id="name">Thomas Cantwell</h1>
+          </div>
+          <p id="introduction">
+            On the right are my current and past personal projects.
+          </p>
+          <a href="./public/Resume.pdf" class="resume-btn" target="_blank"
+            >Resume</a
+          >
+        </div>
+      </div>
+      <div id="middle"></div>
+      <div id="right-side">
+        <div id="project-container">
+          <div class="top-space"></div>
+          <div class="project">
+            <a
+              href="https://pixelvee.netlify.app/"
+              class="project-img"
+              target="_blank"
+            >
+              <img src="./public/undo_thumb.png" />
+            </a>
+            <div class="project-description">
+              <div class="project-title">Pixel V</div>
+              <div class="divider-line"></div>
+              <span class="desc"
+                >Advanced pixel drawing app built around an undo function.</span
+              >
+              <br />
+              <div class="language">- JavaScript</div>
+              <br />
+              <a
+                class="view-code"
+                href="https://github.com/Tororoi/pixel-vee"
+                target="_blank"
+                >View Code</a
+              >
             </div>
-        </div>
-        <div id="middle">
-
-        </div>
-        <div id="right-side">
-            <div id="project-container">
-                <div class="top-space"></div>
-                <div class="project">
-                    <a href="https://pixelvee.netlify.app/" class="project-img" target="_blank">
-                        <img src="./public/undo_thumb.png">
-                    </a>
-                    <div class="project-description">
-                        <div class="project-title">
-                            Pixel V
-                        </div>
-                        <div class="divider-line"></div>
-                        <span class="desc">Advanced pixel drawing app built around an undo function.</span>
-                        <br>
-                        <div class="language">- JavaScript</div>
-                        <br>
-                        <a class="view-code" href="https://github.com/Tororoi/pixel-vee" target="_blank">View Code</a>
-                    </div>
-                </div>
-                <div class="project">
-                    <a href="https://astarpathfinder.netlify.app/" class="project-img" target="_blank">
-                        <img src="./public/path_visualizer.png">
-                    </a>
-                    <div class="project-description">
-                        <div class="project-title">
-                            Pathfinding Visualizer
-                        </div>
-                        <div class="divider-line"></div>
-                        <span class="desc">Watch how various algorithms find the shortest path. Includes random maze generator.</span>
-                        <br>
-                        <div class="language">- JavaScript</div>
-                        <br>
-                        <a class="view-code" href="https://github.com/Tororoi/astar-pathfinding-js" target="_blank">View Code</a>
-                    </div>
-                </div>
-                <div class="project">
-                    <a href="https://www.katywangstudio.com/" class="project-img" target="_blank">
-                        <img src="./public/katy-website_thumb.png">
-                    </a>
-                    <div class="project-description">
-                        <div class="project-title">
-                            Artist Portfolio Site
-                        </div>
-                        <div class="divider-line"></div>
-                        <span class="desc">Portfolio site for Artist Katy Wang.</span>
-                        <br>
-                        <div class="language">- React | Redux | Ruby on Rails</div>
-                        <!-- <div class="language">-Redux</div>
-                        <div class="language">-Ruby on Rails</div> -->
-                        <br>
-                        <a class="view-code" href="https://github.com/Tororoi/katy-website" target="_blank">View Code</a>
-                    </div>
-                </div>
-                <div class="project">
-                    <a href="https://www.pix-tile.com/" class="project-img" target="_blank">
-                        <img src="./public/pixtile_thumb.png">
-                    </a>
-                    <div class="project-description">
-                        <div class="project-title">
-                            Pix Tile
-                        </div>
-                        <div class="divider-line"></div>
-                        <span class="desc">Pixel drawing app designed to help in creating repeating patterns.</span>
-                        <br>
-                        <div class="language">- React | Redux | Ruby on Rails</div>
-                        <!-- <div class="language">-Redux</div>
-                        <div class="language">-Ruby on Rails</div> -->
-                        <br>
-                        <a class="view-code" href="https://github.com/Tororoi/pixel-pattern-maker-frontend" target="_blank">View Code</a>
-                    </div>
-                </div>
-                <div class="project">
-                    <a href="https://cryptic-badlands-26813.herokuapp.com/" class="project-img" target="_blank">
-                        <img src="./public/snailrace_thumb.png">
-                    </a>
-                    <div class="project-description">
-                        <div class="project-title">
-                            Snail Racing Game
-                        </div>
-                        <div class="divider-line"></div>
-                        <span class="desc">Create custom snails and bet on their races.</span>
-                        <br>
-                        <div class="language">- Ruby on Rails</div>
-                        <br>
-                        <a class="view-code" href="https://github.com/Tororoi/snail-race-web" target="_blank">View Code</a>
-                    </div>
-                </div>
-                <div class="project">
-                    <a href="https://codepen.io/tororoi/pen/ExKedbP" class="project-img" target="_blank">
-                        <img src="./public/dungeon_thumb.png">
-                    </a>
-                    <div class="project-description">
-                        <div class="project-title">
-                            Dungeon Maker
-                        </div>
-                        <div class="divider-line"></div>
-                        <span class="desc">Build custom dungeons and then play them.</span>
-                        <br>
-                        <div class="language">- JavaScript</div>
-                        <br>
-                        <a class="view-code" href="https://github.com/Tororoi/dungeon-maker" target="_blank">View Code</a>
-                    </div>
-                </div>
-                <div class="bottom-space"></div>
+          </div>
+          <div class="project">
+            <a
+              href="https://astarpathfinder.netlify.app/"
+              class="project-img"
+              target="_blank"
+            >
+              <img src="./public/path_visualizer.png" />
+            </a>
+            <div class="project-description">
+              <div class="project-title">Pathfinding Visualizer</div>
+              <div class="divider-line"></div>
+              <span class="desc"
+                >Watch how various algorithms find the shortest path. Includes
+                random maze generator.</span
+              >
+              <br />
+              <div class="language">- JavaScript</div>
+              <br />
+              <a
+                class="view-code"
+                href="https://github.com/Tororoi/astar-pathfinding-js"
+                target="_blank"
+                >View Code</a
+              >
             </div>
+          </div>
+          <div class="project">
+            <a
+              href="https://www.katywangstudio.com/"
+              class="project-img"
+              target="_blank"
+            >
+              <img src="./public/katy-website_thumb.png" />
+            </a>
+            <div class="project-description">
+              <div class="project-title">Artist Portfolio Site</div>
+              <div class="divider-line"></div>
+              <span class="desc">Portfolio site for Artist Katy Wang.</span>
+              <br />
+              <div class="language">- React | Redux | Ruby on Rails</div>
+              <!-- <div class="language">-Redux</div>
+                        <div class="language">-Ruby on Rails</div> -->
+              <br />
+              <a
+                class="view-code"
+                href="https://github.com/Tororoi/katy-website"
+                target="_blank"
+                >View Code</a
+              >
+            </div>
+          </div>
+          <div class="project">
+            <a
+              href="https://www.pix-tile.com/"
+              class="project-img"
+              target="_blank"
+            >
+              <img src="./public/pixtile_thumb.png" />
+            </a>
+            <div class="project-description">
+              <div class="project-title">Pix Tile</div>
+              <div class="divider-line"></div>
+              <span class="desc"
+                >Pixel drawing app designed to help in creating repeating
+                patterns.</span
+              >
+              <br />
+              <div class="language">- React | Redux | Ruby on Rails</div>
+              <!-- <div class="language">-Redux</div>
+                        <div class="language">-Ruby on Rails</div> -->
+              <br />
+              <a
+                class="view-code"
+                href="https://github.com/Tororoi/pixel-pattern-maker-frontend"
+                target="_blank"
+                >View Code</a
+              >
+            </div>
+          </div>
+          <div class="project">
+            <a
+              href="https://cryptic-badlands-26813.herokuapp.com/"
+              class="project-img"
+              target="_blank"
+            >
+              <img src="./public/snailrace_thumb.png" />
+            </a>
+            <div class="project-description">
+              <div class="project-title">Snail Racing Game</div>
+              <div class="divider-line"></div>
+              <span class="desc"
+                >Create custom snails and bet on their races.</span
+              >
+              <br />
+              <div class="language">- Ruby on Rails</div>
+              <br />
+              <a
+                class="view-code"
+                href="https://github.com/Tororoi/snail-race-web"
+                target="_blank"
+                >View Code</a
+              >
+            </div>
+          </div>
+          <div class="project">
+            <a
+              href="https://codepen.io/tororoi/pen/ExKedbP"
+              class="project-img"
+              target="_blank"
+            >
+              <img src="./public/dungeon_thumb.png" />
+            </a>
+            <div class="project-description">
+              <div class="project-title">Dungeon Maker</div>
+              <div class="divider-line"></div>
+              <span class="desc"
+                >Build custom dungeons and then play them.</span
+              >
+              <br />
+              <div class="language">- JavaScript</div>
+              <br />
+              <a
+                class="view-code"
+                href="https://github.com/Tororoi/dungeon-maker"
+                target="_blank"
+                >View Code</a
+              >
+            </div>
+          </div>
+          <div class="bottom-space"></div>
         </div>
+      </div>
     </div>
     <footer>
-        <div id="logos">
-            <a href="https://www.linkedin.com/in/thomas-cantwell/" target="_blank">
-                <span class="tooltip">LinkedIn</span>
-                <i class="fab fa-linkedin-in" id="icon"></i>
-            </a>
-            <a href="https://github.com/Tororoi" target="_blank">
-                <span class="tooltip">GitHub</span>
-                <i class="fab fa-github" id="icon"></i>
-            </a>
-            <a href="https://codepen.io/your-work/" target="_blank">
-                <span class="tooltip">Codepen</span>
-                <i class="fab fa-codepen" id="icon"></i>
-            </a>
-            <a href="https://cantwell-tom.medium.com/" target="_blank">
-                <span class="tooltip">Blog</span>
-                <i class="fab fa-medium" id="icon"></i>
-            </a>
-        </div>
+      <div id="logos">
+        <a href="https://www.linkedin.com/in/thomas-cantwell/" target="_blank">
+          <span class="tooltip">LinkedIn</span>
+          <i class="fab fa-linkedin-in" id="icon"></i>
+        </a>
+        <a href="https://github.com/Tororoi" target="_blank">
+          <span class="tooltip">GitHub</span>
+          <i class="fab fa-github" id="icon"></i>
+        </a>
+        <a href="https://codepen.io/your-work/" target="_blank">
+          <span class="tooltip">Codepen</span>
+          <i class="fab fa-codepen" id="icon"></i>
+        </a>
+        <a href="https://cantwell-tom.medium.com/" target="_blank">
+          <span class="tooltip">Blog</span>
+          <i class="fab fa-medium" id="icon"></i>
+        </a>
+      </div>
     </footer>
   </body>
 </html>
