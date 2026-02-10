@@ -1,6 +1,6 @@
-import { motion } from 'motion/react';
-import { Link } from 'react-router-dom';
-import styles from './Blog.module.css';
+import { motion } from 'motion/react'
+import { Link } from 'react-router-dom'
+import styles from './Blog.module.css'
 
 export function Blog() {
   return (
@@ -37,5 +37,5 @@ export function Blog() {
         </div>
       </div>
     </main>
-  );
+  )
 }

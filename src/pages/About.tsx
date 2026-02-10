@@ -1,5 +1,5 @@
-import { motion } from 'motion/react';
-import styles from './About.module.css';
+import { motion } from 'motion/react'
+import styles from './About.module.css'
 
 export function About() {
   return (
@@ -92,5 +92,5 @@ export function About() {
         </motion.div>
       </div>
     </main>
-  );
+  )
 }

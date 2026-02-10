@@ -1,7 +1,7 @@
-import { motion } from 'motion/react';
-import { Link } from 'react-router-dom';
-import { ProjectGrid } from '../components/portfolio/ProjectGrid';
-import styles from './Home.module.css';
+import { motion } from 'motion/react'
+import { Link } from 'react-router-dom'
+import { ProjectGrid } from '../components/portfolio/ProjectGrid'
+import styles from './Home.module.css'
 
 export function Home() {
   return (
@@ -96,5 +96,5 @@ export function Home() {
         </div>
       </section>
     </main>
-  );
+  )
 }

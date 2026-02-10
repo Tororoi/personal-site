@@ -1,6 +1,6 @@
-import { motion } from 'motion/react';
-import { ProjectGrid } from '../components/portfolio/ProjectGrid';
-import styles from './Projects.module.css';
+import { motion } from 'motion/react'
+import { ProjectGrid } from '../components/portfolio/ProjectGrid'
+import styles from './Projects.module.css'
 
 export function Projects() {
   return (
@@ -22,5 +22,5 @@ export function Projects() {
         <ProjectGrid />
       </div>
     </main>
-  );
+  )
 }

@@ -1,35 +1,37 @@
-import { motion } from 'motion/react';
-import { useState } from 'react';
-import type { FormEvent } from 'react';
-import styles from './Contact.module.css';
+import { motion } from 'motion/react'
+import { useState } from 'react'
+import type { FormEvent } from 'react'
+import styles from './Contact.module.css'
 
 export function Contact() {
-  const [formStatus, setFormStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
+  const [formStatus, setFormStatus] = useState<
+    'idle' | 'submitting' | 'success' | 'error'
+  >('idle')
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setFormStatus('submitting');
+    e.preventDefault()
+    setFormStatus('submitting')
 
-    const form = e.currentTarget;
-    const formData = new FormData(form);
+    const form = e.currentTarget
+    const formData = new FormData(form)
 
     try {
       const response = await fetch('/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams(formData as any).toString(),
-      });
+      })
 
       if (response.ok) {
-        setFormStatus('success');
-        form.reset();
+        setFormStatus('success')
+        form.reset()
       } else {
-        setFormStatus('error');
+        setFormStatus('error')
       }
     } catch (error) {
-      setFormStatus('error');
+      setFormStatus('error')
     }
-  };
+  }
 
   return (
     <main className={styles.contact}>
@@ -137,5 +139,5 @@ export function Contact() {
         </motion.div>
       </div>
     </main>
-  );
+  )
 }

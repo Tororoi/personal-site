@@ -1,17 +1,17 @@
-import { motion } from 'motion/react';
-import styles from './ProjectCard.module.css';
-import { FaGithub, FaExternalLinkAlt } from 'react-icons/fa';
+import { motion } from 'motion/react'
+import styles from './ProjectCard.module.css'
+import { FaGithub, FaExternalLinkAlt } from 'react-icons/fa'
 
 interface ProjectCardProps {
-  id: string;
-  title: string;
-  description: string;
-  technologies: string[];
-  image: string;
-  liveUrl: string;
-  githubUrl: string;
-  featured?: boolean;
-  index?: number;
+  id: string
+  title: string
+  description: string
+  technologies: string[]
+  image: string
+  liveUrl: string
+  githubUrl: string
+  featured?: boolean
+  index?: number
 }
 
 export function ProjectCard({
@@ -84,5 +84,5 @@ export function ProjectCard({
         </div>
       </div>
     </motion.article>
-  );
+  )
 }

@@ -1,15 +1,15 @@
-import { Routes, Route, useLocation } from 'react-router-dom';
-import { AnimatePresence } from 'motion/react';
-import { Header } from './components/layout/Header';
-import { Footer } from './components/layout/Footer';
-import { Home } from './pages/Home';
-import { Projects } from './pages/Projects';
-import { Blog } from './pages/Blog';
-import { About } from './pages/About';
-import { Contact } from './pages/Contact';
+import { Routes, Route, useLocation } from 'react-router-dom'
+import { AnimatePresence } from 'motion/react'
+import { Header } from './components/layout/Header'
+import { Footer } from './components/layout/Footer'
+import { Home } from './pages/Home'
+import { Projects } from './pages/Projects'
+import { Blog } from './pages/Blog'
+import { About } from './pages/About'
+import { Contact } from './pages/Contact'
 
 function App() {
-  const location = useLocation();
+  const location = useLocation()
 
   return (
     <div className="app">
@@ -28,7 +28,7 @@ function App() {
       </AnimatePresence>
       <Footer />
     </div>
-  );
+  )
 }
 
-export default App;
+export default App

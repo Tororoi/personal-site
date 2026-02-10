@@ -146,7 +146,7 @@ npm run build
    Name: @
    Value: 75.2.60.5
 
-   Type: CNAME  
+   Type: CNAME
    Name: www
    Value: your-site-name.netlify.app
    ```

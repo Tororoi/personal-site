@@ -1,9 +1,9 @@
-import { motion } from 'motion/react';
-import styles from './Footer.module.css';
-import { FaLinkedinIn, FaGithub, FaCodepen, FaMedium } from 'react-icons/fa';
+import { motion } from 'motion/react'
+import styles from './Footer.module.css'
+import { FaLinkedinIn, FaGithub, FaCodepen, FaMedium } from 'react-icons/fa'
 
 export function Footer() {
-  const currentYear = new Date().getFullYear();
+  const currentYear = new Date().getFullYear()
 
   const socialLinks = [
     {
@@ -26,7 +26,7 @@ export function Footer() {
       url: 'https://cantwell-tom.medium.com/',
       icon: FaMedium,
     },
-  ];
+  ]
 
   return (
     <footer className={styles.footer}>
@@ -40,7 +40,7 @@ export function Footer() {
             transition={{ duration: 0.5 }}
           >
             {socialLinks.map((link, index) => {
-              const Icon = link.icon;
+              const Icon = link.icon
               return (
                 <motion.a
                   key={link.name}
@@ -59,7 +59,7 @@ export function Footer() {
                   <Icon />
                   <span className={styles.tooltip}>{link.name}</span>
                 </motion.a>
-              );
+              )
             })}
           </motion.div>
 
@@ -75,5 +75,5 @@ export function Footer() {
         </div>
       </div>
     </footer>
-  );
+  )
 }

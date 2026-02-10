@@ -105,10 +105,10 @@
   .navList {
     display: none;
   }
-  
+
   .nav {
     justify-content: space-between;
   }
-  
+
   /* TODO: Add mobile menu toggle */
 }

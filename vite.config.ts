@@ -7,10 +7,13 @@ import rehypeHighlight from 'rehype-highlight'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [
-    { enforce: 'pre', ...mdx({
-      remarkPlugins: [remarkGfm],
-      rehypePlugins: [rehypeHighlight],
-    })},
+    {
+      enforce: 'pre',
+      ...mdx({
+        remarkPlugins: [remarkGfm],
+        rehypePlugins: [rehypeHighlight],
+      }),
+    },
     react({ include: /\.(jsx|js|mdx|md|tsx|ts)$/ }),
   ],
 })

@@ -87,11 +87,11 @@
   .footer {
     padding: var(--space-2xl) 0 var(--space-lg);
   }
-  
+
   .socialLinks {
     gap: var(--space-md);
   }
-  
+
   .socialLink {
     width: 40px;
     height: 40px;

@@ -1,19 +1,19 @@
-import { Link } from 'react-router-dom';
-import { motion } from 'motion/react';
-import styles from './Header.module.css';
-import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom'
+import { motion } from 'motion/react'
+import styles from './Header.module.css'
+import { useState, useEffect } from 'react'
 
 export function Header() {
-  const [scrolled, setScrolled] = useState(false);
+  const [scrolled, setScrolled] = useState(false)
 
   useEffect(() => {
     const handleScroll = () => {
-      setScrolled(window.scrollY > 50);
-    };
+      setScrolled(window.scrollY > 50)
+    }
 
-    window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, []);
+    window.addEventListener('scroll', handleScroll)
+    return () => window.removeEventListener('scroll', handleScroll)
+  }, [])
 
   return (
     <motion.header
@@ -67,5 +67,5 @@ export function Header() {
         </nav>
       </div>
     </motion.header>
-  );
+  )
 }
