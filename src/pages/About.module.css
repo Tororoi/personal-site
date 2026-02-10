@@ -1,0 +1,109 @@
+.about {
+  padding-top: calc(80px + var(--space-4xl));
+  padding-bottom: var(--space-4xl);
+  min-height: 100vh;
+}
+
+.title {
+  font-size: var(--font-size-4xl);
+  font-weight: var(--font-weight-bold);
+  text-align: center;
+  margin-bottom: var(--space-3xl);
+  background: linear-gradient(
+    135deg,
+    var(--color-gradient-start),
+    var(--color-gradient-mid),
+    var(--color-gradient-end)
+  );
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.content {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+.section {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--blur-lg));
+  -webkit-backdrop-filter: blur(var(--blur-lg));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-2xl);
+  padding: var(--space-3xl);
+  margin-bottom: var(--space-2xl);
+  box-shadow: var(--shadow-lg);
+}
+
+.section h2 {
+  font-size: var(--font-size-2xl);
+  margin-bottom: var(--space-lg);
+  color: var(--color-text-primary);
+}
+
+.section h3 {
+  font-size: var(--font-size-lg);
+  margin-bottom: var(--space-md);
+  color: var(--color-accent-primary);
+}
+
+.section p {
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-relaxed);
+  color: var(--color-text-secondary);
+}
+
+.skills {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: var(--space-xl);
+  margin-top: var(--space-lg);
+}
+
+.skillCategory {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+}
+
+.skillCategory ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.skillCategory li {
+  padding: var(--space-sm) 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-base);
+  position: relative;
+  padding-left: var(--space-lg);
+}
+
+.skillCategory li::before {
+  content: '▹';
+  position: absolute;
+  left: 0;
+  color: var(--color-accent-primary);
+  font-size: var(--font-size-lg);
+}
+
+@media (max-width: 768px) {
+  .about {
+    padding-top: calc(60px + var(--space-2xl));
+  }
+
+  .title {
+    font-size: var(--font-size-3xl);
+  }
+
+  .section {
+    padding: var(--space-2xl);
+  }
+
+  .skills {
+    grid-template-columns: 1fr;
+  }
+}

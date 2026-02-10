@@ -1,0 +1,92 @@
+---
+title: "Welcome to My New Blog"
+slug: "welcome-to-my-new-blog"
+date: "2026-02-09"
+excerpt: "Introducing my new portfolio and blog built with React, TypeScript, and modern web technologies."
+tags: ["web development", "react", "portfolio"]
+author: "Thomas Cantwell"
+image: "/images/projects/site_thumb.png"
+featured: true
+---
+
+# Welcome to My New Blog
+
+I'm excited to announce the launch of my redesigned portfolio and blog! This site represents a complete rebuild from the ground up, leveraging modern web technologies to create a fast, beautiful, and accessible experience.
+
+## What's New?
+
+### Modern Tech Stack
+
+The site is now built with:
+
+- **React 19** - The latest version of React with improved performance
+- **TypeScript** - For type safety and better developer experience
+- **Vite** - Lightning-fast build tool and dev server
+- **Framer Motion** - Smooth animations and transitions
+- **MDX** - Write blog posts with React components embedded
+
+### Glassmorphism Design
+
+I've adopted a modern glassmorphism aesthetic with:
+
+- Frosted glass effects using `backdrop-filter`
+- Ambient gradient backgrounds
+- Smooth animations and micro-interactions
+- Responsive design that works on all devices
+
+### Custom Blog Integration
+
+Instead of linking to Medium, I now have a custom blog integrated directly into the site. This gives me:
+
+- Full control over the design and functionality
+- Better SEO and performance
+- The ability to embed interactive demos
+- Markdown and React component support via MDX
+
+## What's Coming Next?
+
+I have several features planned for future updates:
+
+1. **Search functionality** - Find blog posts and projects easily
+2. **Tag filtering** - Browse content by technology or topic
+3. **Dark/light mode toggle** - While the dark theme looks great, some prefer light mode
+4. **More blog posts** - Regular content about web development, tutorials, and project insights
+5. **Newsletter** - Stay updated with my latest work
+
+## Technical Highlights
+
+Here's a code example showing how I'm using TypeScript with React:
+
+\`\`\`typescript
+interface ProjectCardProps {
+  id: string;
+  title: string;
+  description: string;
+  technologies: string[];
+  image: string;
+  liveUrl: string;
+  githubUrl: string;
+}
+
+export function ProjectCard({ title, description, technologies }: ProjectCardProps) {
+  return (
+    <article className="project-card">
+      <h3>{title}</h3>
+      <p>{description}</p>
+      <div className="technologies">
+        {technologies.map((tech) => (
+          <span key={tech}>{tech}</span>
+        ))}
+      </div>
+    </article>
+  );
+}
+\`\`\`
+
+The site is deployed on Netlify with automatic deployments from the `staging` branch, making updates seamless.
+
+## Get In Touch
+
+I'd love to hear your feedback on the new site! Feel free to [reach out](/contact) or connect with me on [GitHub](https://github.com/Tororoi) or [LinkedIn](https://www.linkedin.com/in/thomas-cantwell/).
+
+Thanks for visiting, and stay tuned for more content!
