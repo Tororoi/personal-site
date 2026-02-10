@@ -39,10 +39,6 @@
   transition: transform var(--transition-slow);
 }
 
-.card:hover .image {
-  transform: scale(1.05);
-}
-
 .overlay {
   position: absolute;
   top: 0;

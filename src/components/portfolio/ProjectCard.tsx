@@ -30,7 +30,6 @@ export function ProjectCard({
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, margin: '-100px' }}
       transition={{ delay: index * 0.1, duration: 0.5 }}
-      whileHover={{ y: -8 }}
     >
       <a
         href={liveUrl}
