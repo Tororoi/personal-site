@@ -1,0 +1,114 @@
+.header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--z-sticky);
+  padding: var(--space-lg) 0;
+  transition: all var(--transition-base);
+}
+
+.header.scrolled {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--blur-lg));
+  -webkit-backdrop-filter: blur(var(--blur-lg));
+  border-bottom: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-md) 0;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xl);
+}
+
+.logo {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-bold);
+  text-decoration: none;
+  transition: transform var(--transition-base);
+}
+
+.logo:hover {
+  transform: scale(1.05);
+}
+
+.navList {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xl);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  flex: 1;
+  justify-content: center;
+}
+
+.navLink {
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-medium);
+  font-size: var(--font-size-base);
+  text-decoration: none;
+  position: relative;
+  padding: var(--space-sm) 0;
+  transition: color var(--transition-base);
+}
+
+.navLink::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--color-gradient-start),
+    var(--color-gradient-end)
+  );
+  transition: width var(--transition-base);
+}
+
+.navLink:hover {
+  color: var(--color-text-primary);
+}
+
+.navLink:hover::after {
+  width: 100%;
+}
+
+.resumeBtn {
+  padding: var(--space-sm) var(--space-lg);
+  background: linear-gradient(
+    135deg,
+    var(--color-gradient-start),
+    var(--color-gradient-end)
+  );
+  color: var(--color-text-primary);
+  border-radius: var(--radius-full);
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-sm);
+  text-decoration: none;
+  transition: all var(--transition-base);
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
+}
+
+.resumeBtn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 30px rgba(99, 102, 241, 0.5);
+}
+
+/* Mobile Navigation */
+@media (max-width: 768px) {
+  .navList {
+    display: none;
+  }
+
+  .nav {
+    justify-content: space-between;
+  }
+
+  /* TODO: Add mobile menu toggle */
+}

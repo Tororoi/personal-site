@@ -1,0 +1,100 @@
+.footer {
+  margin-top: var(--space-4xl);
+  padding: var(--space-3xl) 0 var(--space-xl);
+  border-top: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--blur-md));
+  -webkit-backdrop-filter: blur(var(--blur-md));
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-xl);
+}
+
+.socialLinks {
+  display: flex;
+  gap: var(--space-lg);
+  align-items: center;
+}
+
+.socialLink {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-full);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-lg);
+  transition: all var(--transition-base);
+  cursor: pointer;
+}
+
+.socialLink:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--color-accent-primary);
+  color: var(--color-accent-primary);
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
+}
+
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + var(--space-sm));
+  left: 50%;
+  transform: translateX(-50%) scale(0);
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: all var(--transition-fast);
+}
+
+.tooltip::after {
+  content: '';
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+  border-top-color: var(--color-bg-tertiary);
+}
+
+.socialLink:hover .tooltip {
+  opacity: 1;
+  transform: translateX(-50%) scale(1);
+}
+
+.copyright {
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+  text-align: center;
+  margin: 0;
+}
+
+@media (max-width: 640px) {
+  .footer {
+    padding: var(--space-2xl) 0 var(--space-lg);
+  }
+
+  .socialLinks {
+    gap: var(--space-md);
+  }
+
+  .socialLink {
+    width: 40px;
+    height: 40px;
+    font-size: var(--font-size-base);
+  }
+}

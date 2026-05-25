@@ -1,0 +1,62 @@
+[
+  {
+    "id": "pixel-v",
+    "title": "Pixel V",
+    "description": "Advanced pixel drawing app built around an undo function.",
+    "technologies": ["JavaScript"],
+    "image": "/images/projects/undo_thumb.png",
+    "liveUrl": "https://pixelvee.netlify.app/",
+    "githubUrl": "https://github.com/Tororoi/pixel-vee",
+    "featured": true
+  },
+  {
+    "id": "pathfinding-visualizer",
+    "title": "Pathfinding Visualizer",
+    "description": "Watch how various algorithms find the shortest path. Includes random maze generator.",
+    "technologies": ["JavaScript"],
+    "image": "/images/projects/path_visualizer.png",
+    "liveUrl": "https://astarpathfinder.netlify.app/",
+    "githubUrl": "https://github.com/Tororoi/astar-pathfinding-js",
+    "featured": true
+  },
+  {
+    "id": "artist-portfolio",
+    "title": "Artist Portfolio Site",
+    "description": "Portfolio site for Artist Katy Wang.",
+    "technologies": ["React", "Redux", "Ruby on Rails"],
+    "image": "/images/projects/katy-website_thumb.png",
+    "liveUrl": "https://www.katywangstudio.com/",
+    "githubUrl": "https://github.com/Tororoi/katy-website",
+    "featured": true
+  },
+  {
+    "id": "pix-tile",
+    "title": "Pix Tile",
+    "description": "Pixel drawing app designed to help in creating repeating patterns.",
+    "technologies": ["React", "Redux", "Ruby on Rails"],
+    "image": "/images/projects/pixtile_thumb.png",
+    "liveUrl": "https://www.pix-tile.com/",
+    "githubUrl": "https://github.com/Tororoi/pixel-pattern-maker-frontend",
+    "featured": true
+  },
+  {
+    "id": "snail-racing",
+    "title": "Snail Racing Game",
+    "description": "Create custom snails and bet on their races.",
+    "technologies": ["Ruby on Rails"],
+    "image": "/images/projects/snailrace_thumb.png",
+    "liveUrl": "https://github.com/Tororoi/snail-race-web",
+    "githubUrl": "https://github.com/Tororoi/snail-race-web",
+    "featured": false
+  },
+  {
+    "id": "dungeon-maker",
+    "title": "Dungeon Maker",
+    "description": "Build custom dungeons and then play them.",
+    "technologies": ["JavaScript"],
+    "image": "/images/projects/dungeon_thumb.png",
+    "liveUrl": "https://codepen.io/tororoi/pen/ExKedbP",
+    "githubUrl": "https://github.com/Tororoi/dungeon-maker",
+    "featured": false
+  }
+]
