@@ -200,16 +200,31 @@ void applyWhitecaps(inout vec3 p, vec2 worldXZ, float t) {
 uniform float uChurnStart; // J below this: churn begins
 uniform float uChurnFull;  // J below this: full churn
 uniform float uChurnAmp;   // meters of turbulent displacement at full churn
+uniform vec2 uWind;            // live wind vector, m/s, gust-modulated
+uniform float uChurnWindAniso; // per m/s: how much the downwind seethe component amplifies
+uniform float uChurnWindPush;  // per m/s: steady downwind smear of churned water
 
 // Returns churn 0..1 and roughens p in place where the surface is breaking.
 // The sine frequencies sit below the mesh quad size on purpose: they alias
 // into incoherent vertex seethe, which is exactly what boiling water needs.
+// Wind makes the seethe directional: broken water is thrown downwind, so
+// the turbulence component along the wind amplifies and the whole churned
+// mass smears in the wind direction.
 float applyChurn(inout vec3 p, vec2 worldXZ, float t, float jacobian) {
 	float churn = 1.0 - smoothstep(uChurnFull, uChurnStart, jacobian);
 	if (churn > 0.001) {
 		float n1 = sin(worldXZ.x * 13.7 + t * 21.0) * sin(worldXZ.y * 11.3 - t * 17.0);
 		float n2 = sin(worldXZ.x * 7.9 - t * 25.0 + 3.1) * sin(worldXZ.y * 15.1 + t * 19.0);
-		p += vec3(n1 * 0.6, 0.4 + abs(n2), n2 * 0.6) * (uChurnAmp * churn);
+		vec3 turb = vec3(n1 * 0.6, 0.4 + abs(n2), n2 * 0.6);
+		float windSpeed = length(uWind);
+		if (windSpeed > 0.001) {
+			vec2 windDir = uWind / windSpeed;
+			// Seethe component already aligned with the wind, amplified
+			// downwind; plus a steady smear that leans the churn off the crest.
+			float along = turb.x * windDir.x + turb.z * windDir.y;
+			turb.xz += windDir * (abs(along) * uChurnWindAniso + uChurnWindPush) * windSpeed;
+		}
+		p += turb * (uChurnAmp * churn);
 	}
 	return churn;
 }`

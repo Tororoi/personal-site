@@ -8,7 +8,8 @@
 		MAX_EVENTS,
 		sampleOcean,
 		update as updateWhitecaps,
-		whitecapsGlsl
+		whitecapsGlsl,
+		windVector
 	} from './whitecaps';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
@@ -80,7 +81,14 @@
 		// marks "steep", churn marks "breaking right now".
 		uChurnStart: { value: 0.28 },
 		uChurnFull: { value: -0.15 },
-		uChurnAmp: { value: 0.22 }
+		uChurnAmp: { value: 0.22 },
+		// Wind's grip on the churn: uWind is refreshed each frame (gusts
+		// included). Aniso amplifies the downwind seethe component; push
+		// smears the churned mass downwind. Both are per m/s of wind, so
+		// calm's 2 m/s barely registers and storm's 18 m/s throws water.
+		uWind: { value: new THREE.Vector2() },
+		uChurnWindAniso: { value: 0.04 },
+		uChurnWindPush: { value: 0.15 }
 	};
 
 	const waterMaterial = new THREE.ShaderMaterial({
@@ -206,6 +214,9 @@ void main() {
 			const env = computeEnv(game.time / DAY_SECONDS);
 
 			waterUniforms.uTime.value = waveTime;
+
+			const wind = windVector(waveTime);
+			waterUniforms.uWind.value.set(wind.x, wind.z);
 
 			// Mirror the event array into the shader uniforms.
 			for (let i = 0; i < MAX_EVENTS; i++) {
