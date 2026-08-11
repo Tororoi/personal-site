@@ -8,9 +8,21 @@
 </svelte:head>
 
 <div class="wrap">
-	<a class="download" href="/Resume.pdf" target="_blank" download="Thomas Cantwell Resume.pdf"
-		>↓ DOWNLOAD PDF</a
-	>
+	<aside>
+		<a class="btn-solid" href="/Resume.pdf" target="_blank" download="Thomas Cantwell Resume.pdf"
+			>↓ DOWNLOAD PDF</a
+		>
+		<a class="btn-outline" href="/Resume.docx" download="Thomas Cantwell Resume.docx"
+			>↓ DOWNLOAD DOCX</a
+		>
+
+		<div class="contact">
+			<span class="contact-label">CONTACT</span>
+			<a href="mailto:cantwell.tom@gmail.com">cantwell.tom@gmail.com</a>
+			<a href="tel:+16503875366">(650) 387-5366</a>
+			<span class="contact-place">Palo Alto, CA</span>
+		</div>
+	</aside>
 
 	<main>
 		<div class="paper">
@@ -136,41 +148,92 @@
 
 <style>
 	.wrap {
-		/* Single column at every width; the paper keeps its letter-page proportions. */
-		--paper-width: 824px;
-		/* Sticks flush under the nav, which is sticky on this page. */
-		--nav-height: 85px;
-
 		display: flex;
-		flex-direction: column;
-		gap: 20px;
-		max-width: calc(var(--paper-width) + 2 * var(--gutter));
+		gap: 40px;
+		max-width: 1180px;
 		width: 100%;
 		margin: 0 auto;
 		padding: 40px var(--gutter) 96px;
+		align-items: flex-start;
 	}
 
-	.download {
+	/* Actions, not navigation: the document is too short to need an index. */
+	aside {
+		flex: none;
+		width: 220px;
 		position: sticky;
-		top: var(--nav-height);
-		z-index: 5;
-		text-align: center;
-		color: var(--bg);
-		background: var(--accent);
-		padding: 13px 0;
+		top: 104px;
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
 		font-family: var(--font-mono);
 		font-size: 12px;
 		letter-spacing: 0.1em;
+	}
+
+	.btn-solid,
+	.btn-outline {
+		text-align: center;
+		padding: 13px 0;
 		font-weight: 700;
+	}
+
+	.btn-solid {
+		color: var(--bg);
+		background: var(--accent);
 		transition: background 0.15s;
 	}
 
-	.download:hover {
+	.btn-solid:hover {
 		background: var(--accent-hi);
 		color: var(--bg);
 	}
 
+	.btn-outline {
+		color: var(--text);
+		border: 1px solid var(--border-btn);
+		transition:
+			color 0.15s,
+			border-color 0.15s;
+	}
+
+	.btn-outline:hover {
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+
+	/* The paper mirrors the PDF, so its contact line is inert text. This one is actionable. */
+	.contact {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		margin-top: 12px;
+		padding-top: 20px;
+		border-top: 1px solid var(--hairline);
+		line-height: 1.4;
+	}
+
+	.contact-label {
+		color: var(--muted);
+		margin-bottom: 2px;
+	}
+
+	.contact a {
+		color: var(--text);
+		word-break: break-word;
+		transition: color 0.15s;
+	}
+
+	.contact a:hover {
+		color: var(--accent);
+	}
+
+	.contact-place {
+		color: var(--muted);
+	}
+
 	main {
+		flex: 1;
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
@@ -291,10 +354,16 @@
 
 	@media (max-width: 719px) {
 		.wrap {
-			--nav-height: 65px;
-
-			max-width: none;
+			flex-direction: column;
+			gap: 20px;
 			padding: 20px 16px 64px;
+			align-items: stretch;
+		}
+
+		/* Stacks above the paper and scrolls away: nothing pinned over a small viewport. */
+		aside {
+			width: 100%;
+			position: static;
 		}
 
 		.paper {

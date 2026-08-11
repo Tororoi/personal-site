@@ -39,10 +39,13 @@ route generates its own prerender entries.
 - Copy rule: no em dashes, in site copy or blog content.
 - The resume page reproduces `static/Resume.pdf` word for word, except that the web version
   shows `Palo Alto, CA` in place of the full street address.
-- The resume is a single column at every width: the document is only about two screens tall,
-  which is too short to justify a section index, so the sidebar was dropped and the download
-  button became a sticky bar above the paper. It sticks flush under the nav, whose height is
-  the `--nav-height` value in `src/routes/resume/+page.svelte`.
+- The resume sidebar holds actions, not navigation. The document is only about two screens
+  tall, too short for a section index, so the column is the two downloads (PDF solid, DOCX
+  outline) plus a linked contact block. It sticks on desktop and stacks above the paper on
+  mobile. The paper's own contact line stays inert because it mirrors the PDF; the sidebar
+  is the actionable copy.
+- `static/Resume.pdf` and `static/Resume.docx` are the same resume in two formats and must
+  be regenerated together. A stale docx next to a fresh PDF is the failure mode to watch.
 
 ## Still to build
 
