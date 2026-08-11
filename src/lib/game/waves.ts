@@ -207,8 +207,8 @@ export const SEA_PRESETS = {
    */
   storm: {
     seed: 4242,
-    windAngle: 0.42,
-    windSpeed: 58,
+    windAngle: 0.12,
+    windSpeed: 48,
     chop: 4.6,
     bands: [
       // Dominant storm wind sea: big, steep, and disorganized.

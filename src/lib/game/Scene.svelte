@@ -9,6 +9,7 @@
 		sampleOcean,
 		update as updateWhitecaps,
 		whitecapsGlsl,
+		windTravel,
 		windVector
 	} from './whitecaps';
 	import { computeEnv, DAY_SECONDS } from './env';
@@ -88,7 +89,23 @@
 		// calm's 2 m/s barely registers and storm's 18 m/s throws water.
 		uWind: { value: new THREE.Vector2() },
 		uChurnWindAniso: { value: 0.04 },
-		uChurnWindPush: { value: 0.15 }
+		uChurnWindPush: { value: 0.18 },
+		// Wind grip varies in space: sheltered below -0.4m (troughs), fully
+		// exposed above 1m (crests); traveling gust patches briefly more than
+		// double the grip (1 + uGustBoost) as they sweep downwind.
+		uWindShelter: { value: new THREE.Vector2(-2.5, -1.0) },
+		uGustBoost: { value: 0.2 },
+		uWindTravel: { value: new THREE.Vector2() },
+		// Gust pacing. uGustSize scales the patches (2 = twice as large, and
+		// correspondingly rarer since fewer fit in the field); uGustRate is
+		// how fast they sweep, as a fraction of wind speed (1 = ride the
+		// wind; storm's 18 m/s crosses the view in ~3s at rate 1, ~7s at 0.45).
+		uGustSize: { value: 1.6 },
+		uGustRate: { value: 0.5 },
+		// Max heading deviation a gust patch can carry, radians. Each patch
+		// samples its own veer from a decorrelated field: ~0.4 = up to ~23
+		// degrees off the global wind, either side.
+		uGustVeer: { value: 0.4 }
 	};
 
 	const waterMaterial = new THREE.ShaderMaterial({
@@ -217,6 +234,7 @@ void main() {
 
 			const wind = windVector(waveTime);
 			waterUniforms.uWind.value.set(wind.x, wind.z);
+			waterUniforms.uWindTravel.value.set(windTravel.x, windTravel.z);
 
 			// Mirror the event array into the shader uniforms.
 			for (let i = 0; i < MAX_EVENTS; i++) {

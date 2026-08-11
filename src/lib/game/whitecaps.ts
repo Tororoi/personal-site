@@ -60,10 +60,27 @@ export function gust(t: number): number {
   return 1 + 0.25 * Math.sin(t * 0.31) + 0.15 * Math.sin(t * 0.73 + 2.1)
 }
 
-export function windVector(t: number): { x: number; z: number } {
-  const g = windSpeed * gust(t)
-  return { x: Math.cos(windAngle) * g, z: Math.sin(windAngle) * g }
+/**
+ * Slow multi-sine heading wander, ~plus/minus 20 degrees around windAngle
+ * over the course of a minute or two. Deterministic in waveTime.
+ */
+function windWander(t: number): number {
+  return 0.22 * Math.sin(t * 0.111) + 0.13 * Math.sin(t * 0.043 + 1.7)
 }
+
+export function windVector(t: number): { x: number; z: number } {
+  const a = windAngle + windWander(t)
+  const g = windSpeed * gust(t)
+  return { x: Math.cos(a) * g, z: Math.sin(a) * g }
+}
+
+/**
+ * Integrated wind displacement, meters: the distance "wind particles" have
+ * traveled. The gust-patch field advects by THIS rather than wind * t, so
+ * gust and wander changes shift patches smoothly instead of teleporting
+ * them. Accumulated in update(), uploaded as a uniform each frame.
+ */
+export const windTravel = { x: 0, z: 0 }
 
 // ---------- Event lifecycle ----------
 
@@ -142,6 +159,10 @@ function spawn(t: number, x: number, z: number, height: number) {
 
 /** Step events: expire finished breaks, periodic instability scan. */
 export function update(dt: number, t: number) {
+  const wind = windVector(t)
+  windTravel.x += wind.x * dt
+  windTravel.z += wind.z * dt
+
   for (const e of events) {
     if (e.sigma !== 0 && t - e.birth > e.breakDuration) e.sigma = 0
   }
@@ -200,16 +221,26 @@ void applyWhitecaps(inout vec3 p, vec2 worldXZ, float t) {
 uniform float uChurnStart; // J below this: churn begins
 uniform float uChurnFull;  // J below this: full churn
 uniform float uChurnAmp;   // meters of turbulent displacement at full churn
-uniform vec2 uWind;            // live wind vector, m/s, gust-modulated
+uniform vec2 uWind;            // live wind vector, m/s, gust- and wander-modulated
 uniform float uChurnWindAniso; // per m/s: how much the downwind seethe component amplifies
 uniform float uChurnWindPush;  // per m/s: steady downwind smear of churned water
+uniform vec2 uWindShelter;     // heights (m): below x sheltered from wind, above y fully exposed
+uniform float uGustBoost;      // extra wind grip inside a traveling gust patch
+uniform vec2 uWindTravel;      // integrated wind displacement; advects the gust field
+uniform float uGustSize;       // patch scale: 2 = patches twice as large (and half as frequent)
+uniform float uGustRate;       // sweep speed: 1 = patches ride at full wind speed, 0.5 = half
+uniform float uGustVeer;       // radians: max heading deviation a gust patch can carry
 
 // Returns churn 0..1 and roughens p in place where the surface is breaking.
 // The sine frequencies sit below the mesh quad size on purpose: they alias
 // into incoherent vertex seethe, which is exactly what boiling water needs.
 // Wind makes the seethe directional: broken water is thrown downwind, so
 // the turbulence component along the wind amplifies and the whole churned
-// mass smears in the wind direction.
+// mass smears in the wind direction. The wind's grip varies in space:
+//   - Sheltering: water low in a trough hides from the wind; exposed
+//     crests take the full push (uWindShelter ramp on height).
+//   - Gust patches: a blobby field advected with the wind; inside a patch
+//     the grip is briefly uGustBoost times stronger as it sweeps through.
 float applyChurn(inout vec3 p, vec2 worldXZ, float t, float jacobian) {
 	float churn = 1.0 - smoothstep(uChurnFull, uChurnStart, jacobian);
 	if (churn > 0.001) {
@@ -219,10 +250,22 @@ float applyChurn(inout vec3 p, vec2 worldXZ, float t, float jacobian) {
 		float windSpeed = length(uWind);
 		if (windSpeed > 0.001) {
 			vec2 windDir = uWind / windSpeed;
-			// Seethe component already aligned with the wind, amplified
-			// downwind; plus a steady smear that leans the churn off the crest.
-			float along = turb.x * windDir.x + turb.z * windDir.y;
-			turb.xz += windDir * (abs(along) * uChurnWindAniso + uChurnWindPush) * windSpeed;
+			float exposure = smoothstep(uWindShelter.x, uWindShelter.y, p.y);
+			vec2 q = (worldXZ - uWindTravel * uGustRate) / uGustSize;
+			float blob = sin(q.x * 0.13 + q.y * 0.071) * sin(q.x * 0.043 - q.y * 0.117 + 2.0);
+			float gustPatch = smoothstep(0.3, 0.9, blob);
+			// Each patch carries its own heading deviation: a decorrelated
+			// smooth field in the same advected frame picks a veer angle, so
+			// one gust shoves the churn a little left of the wind, the next a
+			// little right, fading to the global heading at patch edges.
+			float veerField = sin(q.x * 0.057 + q.y * 0.101 + 4.7) * sin(q.x * 0.089 - q.y * 0.061 + 1.3);
+			float veer = veerField * uGustVeer * gustPatch;
+			float cv = cos(veer);
+			float sv = sin(veer);
+			vec2 gustDir = vec2(windDir.x * cv - windDir.y * sv, windDir.x * sv + windDir.y * cv);
+			float grip = exposure * (1.0 + uGustBoost * gustPatch);
+			float along = turb.x * gustDir.x + turb.z * gustDir.y;
+			turb.xz += gustDir * (abs(along) * uChurnWindAniso + uChurnWindPush) * windSpeed * grip;
 		}
 		p += turb * (uChurnAmp * churn);
 	}
