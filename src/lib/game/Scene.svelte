@@ -41,11 +41,12 @@
 		// Held at 1 while tuning so the judged sea state is stable; the
 		// weather system will own this multiplier later.
 		uAmp: { value: 1 },
-		// ABSOLUTE height scale, in meters: full line brightness at +2.5m,
-		// dimmest at -2.5m, for EVERY preset. Deliberately not normalized per
-		// preset, so two sea states compare directly: a calm sea correctly
-		// reads as mostly mid-brightness. Raise if a storm preset clips.
-		uHeightScale: { value: 2.25 },
+		// ABSOLUTE height scale, in meters: full line brightness at this
+		// height, dimmest at its negative, for EVERY preset. Deliberately not
+		// normalized per preset, so two sea states compare directly: a calm
+		// sea correctly reads as mostly mid-brightness. Sized so the storm
+		// preset's stacked peaks (~3m+) barely clip.
+		uHeightScale: { value: 3.5 },
 		// The wave field itself: uploaded from the same array the CPU sampler
 		// reads, so the two twins cannot disagree about parameters.
 		uWaveA: { value: waves.map((w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega)) },

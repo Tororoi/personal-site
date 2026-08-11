@@ -144,7 +144,7 @@ export const SEA_PRESETS = {
       },
     ],
   },
-  /** Starting scaffold for tuning: a gentle day. Everything is up for grabs. */
+  /** Signed off: a gentle day, texture carried by ripples. */
   calm: {
     seed: 1897,
     windAngle: 0.42,
@@ -191,10 +191,74 @@ export const SEA_PRESETS = {
       },
     ],
   },
+  /**
+   * Starting scaffold for tuning: a storm. Everything is up for grabs.
+   * Storm seas are young and wind-driven: the wind sea dominates instead of
+   * organized swell, directional spread is wide everywhere, slopes push
+   * toward the breaking limit (amp * k of ~0.14), and high chop loops many
+   * crests, which is where foam will appear once it renders.
+   */
+  storm: {
+    seed: 4242,
+    windAngle: 0.42,
+    chop: 3.6,
+    bands: [
+      // Dominant storm wind sea: big, steep, and disorganized.
+      {
+        count: 4,
+        minLambda: 34,
+        maxLambda: 72,
+        heading: 0,
+        spread: 0.55,
+        slope: 0.145,
+        speed: 0.8,
+      },
+      // Crossing system ~140 degrees off: the sea state that makes
+      // storms feel treacherous, peaks erupting without rhythm.
+      {
+        count: 3,
+        minLambda: 20,
+        maxLambda: 40,
+        heading: 2.4,
+        spread: 0.8,
+        slope: 0.17,
+        speed: 0.8,
+      },
+      // Steep mid chop.
+      {
+        count: 6,
+        minLambda: 9,
+        maxLambda: 20,
+        heading: 0.3,
+        spread: 1.1,
+        slope: 0.085,
+        speed: 1.5,
+      },
+      // Violent short chop.
+      {
+        count: 5,
+        minLambda: 4,
+        maxLambda: 9,
+        heading: -0.5,
+        spread: 1.5,
+        slope: 0.07,
+        speed: 1.5,
+      },
+      // Spray-scale texture. Min wavelength floor: see the mesh note above.
+      {
+        count: 6,
+        minLambda: 2.6,
+        maxLambda: 4.5,
+        heading: 0.8,
+        spread: 1.8,
+        slope: 0.05,
+      },
+    ],
+  },
 } satisfies Record<string, WaveFieldConfig>
 
 /** The preset the site ships with. */
-export const DEFAULT_FIELD: WaveFieldConfig = SEA_PRESETS.largeSwell
+export const DEFAULT_FIELD: WaveFieldConfig = SEA_PRESETS.storm
 
 function pickPreset(): WaveFieldConfig {
   // Debug hook: /?sea=calm previews a preset without a code edit.
