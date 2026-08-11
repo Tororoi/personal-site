@@ -1,30 +1,6 @@
 <script lang="ts">
-	import { sections, page1Jobs, page2Jobs } from '$lib/data/resume';
-
-	let active = $state(sections[0].id);
-
-	function onScroll() {
-		let current = sections[0].id;
-		for (const section of sections) {
-			const el = document.getElementById(section.id);
-			if (el && el.getBoundingClientRect().top < 160) current = section.id;
-		}
-		active = current;
-	}
-
-	function goTo(event: MouseEvent, id: string) {
-		event.preventDefault();
-		const el = document.getElementById(id);
-		if (el) {
-			window.scrollTo({
-				top: el.getBoundingClientRect().top + window.scrollY - 120,
-				behavior: 'smooth'
-			});
-		}
-	}
+	import { page1Jobs, page2Jobs } from '$lib/data/resume';
 </script>
-
-<svelte:window onscroll={onScroll} />
 
 <svelte:head>
 	<title>Resume · Thomas Cantwell</title>
@@ -32,21 +8,9 @@
 </svelte:head>
 
 <div class="wrap">
-	<aside>
-		<nav class="index">
-			{#each sections as section (section.id)}
-				<a
-					class="index-link"
-					class:active={active === section.id}
-					href="#{section.id}"
-					onclick={(e) => goTo(e, section.id)}>{section.label}</a
-				>
-			{/each}
-		</nav>
-		<a class="download" href="/Resume.pdf" target="_blank" download="Thomas Cantwell Resume.pdf"
-			>↓ DOWNLOAD PDF</a
-		>
-	</aside>
+	<a class="download" href="/Resume.pdf" target="_blank" download="Thomas Cantwell Resume.pdf"
+		>↓ DOWNLOAD PDF</a
+	>
 
 	<main>
 		<div class="paper">
@@ -172,58 +136,31 @@
 
 <style>
 	.wrap {
+		/* Single column at every width; the paper keeps its letter-page proportions. */
+		--paper-width: 824px;
+		/* Sticks flush under the nav, which is sticky on this page. */
+		--nav-height: 85px;
+
 		display: flex;
-		gap: 40px;
-		max-width: 1180px;
+		flex-direction: column;
+		gap: 20px;
+		max-width: calc(var(--paper-width) + 2 * var(--gutter));
 		width: 100%;
 		margin: 0 auto;
 		padding: 40px var(--gutter) 96px;
-		align-items: flex-start;
-	}
-
-	aside {
-		flex: none;
-		width: 220px;
-		position: sticky;
-		top: 104px;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		font-family: var(--font-mono);
-		font-size: 12px;
-		letter-spacing: 0.1em;
-	}
-
-	.index {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.index-link {
-		color: var(--muted);
-		border-left: 3px solid transparent;
-		padding: 8px 0 8px 12px;
-		transition:
-			color 0.15s,
-			border-color 0.15s;
-	}
-
-	.index-link:hover {
-		color: var(--accent);
-	}
-
-	.index-link.active {
-		color: var(--accent);
-		border-left-color: var(--accent);
 	}
 
 	.download {
-		margin-top: 20px;
+		position: sticky;
+		top: var(--nav-height);
+		z-index: 5;
 		text-align: center;
 		color: var(--bg);
 		background: var(--accent);
 		padding: 13px 0;
+		font-family: var(--font-mono);
+		font-size: 12px;
+		letter-spacing: 0.1em;
 		font-weight: 700;
 		transition: background 0.15s;
 	}
@@ -234,7 +171,6 @@
 	}
 
 	main {
-		flex: 1;
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
@@ -273,7 +209,8 @@
 		border-bottom: 1px solid #999;
 		padding-bottom: 4px;
 		margin-top: 24px;
-		scroll-margin-top: 120px;
+		/* Clears the sticky nav and download button when a section is deep-linked. */
+		scroll-margin-top: 140px;
 	}
 
 	.rs-heading.first {
@@ -354,23 +291,10 @@
 
 	@media (max-width: 719px) {
 		.wrap {
-			flex-direction: column;
-			gap: 20px;
+			--nav-height: 65px;
+
+			max-width: none;
 			padding: 20px 16px 64px;
-			align-items: stretch;
-		}
-
-		aside {
-			width: 100%;
-			position: static;
-		}
-
-		.index {
-			display: none;
-		}
-
-		.download {
-			margin-top: 0;
 		}
 
 		.paper {

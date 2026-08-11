@@ -22,7 +22,7 @@ npm run check    # svelte-check
 | `src/routes/projects/` | Featured + archive project lists. |
 | `src/routes/blog/` | Post list, grouped by year under the latest post. |
 | `src/routes/blog/[slug]/` | Post page. Code highlighted at build time. |
-| `src/routes/resume/` | Interactive resume with scroll-spy index and PDF download. |
+| `src/routes/resume/` | Resume papers under a sticky PDF download button. |
 | `src/lib/data/` | `posts.json`, `projects.ts`, `resume.ts`. |
 | `src/lib/server/highlight.ts` | Shiki highlighter with a theme matched to the site palette. |
 | `src/app.css` | Design tokens (colors, type, responsive metrics). |
@@ -39,6 +39,10 @@ route generates its own prerender entries.
 - Copy rule: no em dashes, in site copy or blog content.
 - The resume page reproduces `static/Resume.pdf` word for word, except that the web version
   shows `Palo Alto, CA` in place of the full street address.
+- The resume is a single column at every width: the document is only about two screens tall,
+  which is too short to justify a section index, so the sidebar was dropped and the download
+  button became a sticky bar above the paper. It sticks flush under the nav, whose height is
+  the `--nav-height` value in `src/routes/resume/+page.svelte`.
 
 ## Still to build
 

@@ -5,15 +5,6 @@ export type Job = {
 	bullets: string[];
 };
 
-export const sections = [
-	{ id: 'rs-about', label: 'ABOUT' },
-	{ id: 'rs-experience', label: 'EXPERIENCE' },
-	{ id: 'rs-side-projects', label: 'SIDE PROJECTS' },
-	{ id: 'rs-education', label: 'EDUCATION' },
-	{ id: 'rs-frameworks', label: 'FRAMEWORKS & TOOLS' },
-	{ id: 'rs-languages', label: 'LANGUAGES' }
-];
-
 export const page1Jobs: Job[] = [
 	{
 		name: 'Attunement (YC S24), AI Psychology Platform',
