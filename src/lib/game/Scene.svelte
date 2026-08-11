@@ -2,7 +2,14 @@
 	import * as THREE from 'three';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { onDestroy } from 'svelte';
-	import { waves, sampleSurface, sampleHeight, wavesGlsl } from './waves';
+	import { waves, sampleHeight, wavesGlsl } from './waves';
+	import {
+		events,
+		MAX_EVENTS,
+		sampleOcean,
+		update as updateWhitecaps,
+		whitecapsGlsl
+	} from './whitecaps';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -53,7 +60,27 @@
 		uWaveB: { value: waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase)) },
 		uLineColor: { value: new THREE.Color('#55c4fe') },
 		uFogColor: { value: new THREE.Color('#0f131a') },
-		uFogDensity: { value: 0.0075 }
+		uFogDensity: { value: 0.0075 },
+		// Breaking-crest ("crashing") visualization: lines whiten as the
+		// surface Jacobian drops. Foam begins below uFoamStart and saturates
+		// at uFoamFull. J = 1 flat water, 0 pinched crest, < 0 folded/breaking.
+		// Thresholds sit against the measured storm distribution (median J
+		// ~1.2, p5 ~0.44, J < 0 on ~0.05% of the surface): onset where the
+		// steepest few percent of crests live, saturated just above a true
+		// fold, so breaking events read as bright flashes.
+		uFoamColor: { value: new THREE.Color('#f4f9ff') },
+		uFoamStart: { value: 0.55 },
+		uFoamFull: { value: 0.12 },
+		// Whitecap events, refreshed each frame from the same array the CPU
+		// twin reads (see whitecaps.ts).
+		uEventA: { value: Array.from({ length: MAX_EVENTS }, () => new THREE.Vector4()) },
+		uEventB: { value: Array.from({ length: MAX_EVENTS }, () => new THREE.Vector4()) },
+		// Mesh churn: the surface seethes where the Jacobian says it is
+		// actively breaking. Tighter thresholds than the foam ramp: foam
+		// marks "steep", churn marks "breaking right now".
+		uChurnStart: { value: 0.28 },
+		uChurnFull: { value: -0.15 },
+		uChurnAmp: { value: 0.22 }
 	};
 
 	const waterMaterial = new THREE.ShaderMaterial({
@@ -64,15 +91,21 @@ uniform float uTime;
 uniform float uAmp;
 varying float vViewZ;
 varying float vHeight;
+varying float vJacobian;
+varying float vChurn;
 
 ${wavesGlsl()}
+${whitecapsGlsl()}
 
 void main() {
 	// Sample in world space: when the mesh recenters on the drifting boat,
 	// the wave field stays pinned to the world instead of following it.
 	vec4 world = modelMatrix * vec4(position, 1.0);
 	vec3 p = world.xyz + waveDisplacement(world.xz, uTime, uAmp);
+	applyWhitecaps(p, world.xz, uTime);
 	vHeight = p.y - world.y;
+	vJacobian = waveJacobian(world.xz, uTime, uAmp);
+	vChurn = applyChurn(p, world.xz, uTime, vJacobian);
 	vec4 view = viewMatrix * vec4(p, 1.0);
 	vViewZ = -view.z;
 	gl_Position = projectionMatrix * view;
@@ -82,8 +115,13 @@ uniform vec3 uLineColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uHeightScale;
+uniform vec3 uFoamColor;
+uniform float uFoamStart;
+uniform float uFoamFull;
 varying float vViewZ;
 varying float vHeight;
+varying float vJacobian;
+varying float vChurn;
 
 void main() {
 	// Brighter lines on crests, dimmer in troughs. vHeight is meters above
@@ -91,6 +129,13 @@ void main() {
 	// brightness is comparable across sea states.
 	float hn = clamp(vHeight / uHeightScale * 0.5 + 0.5, 0.0, 1.0);
 	vec3 col = uLineColor * (0.35 + 0.9 * hn);
+
+	// Churn only for now: the Jacobian foam ramp is temporarily disabled so
+	// the churn reads in isolation. To restore it:
+	// float foam = 1.0 - smoothstep(uFoamFull, uFoamStart, vJacobian);
+	// foam = max(foam, vChurn);
+	float foam = vChurn;
+	col = mix(col, uFoamColor, foam);
 
 	// Distance fade into the page background, doubling as moire control.
 	float fog = 1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ);
@@ -125,6 +170,10 @@ void main() {
 	];
 	let buoyMeshes = $state<(THREE.Mesh | undefined)[]>([]);
 
+	// The whitewater churn is mesh displacement in the water shader, not
+	// particles; see applyChurn in whitecaps.ts. Spray was removed: revisit
+	// with the styled render if the storm still wants it.
+
 	// ---------- Scene environment ----------
 
 	// Constant page-background ground while tuning; the env palette resumes
@@ -150,11 +199,20 @@ void main() {
 				accumulator -= STEP;
 				waveTime += STEP;
 				game.time = (game.time + STEP) % DAY_SECONDS;
+				// Whitecap events and spray advance on the fixed step too.
+				updateWhitecaps(STEP, waveTime);
 			}
 
 			const env = computeEnv(game.time / DAY_SECONDS);
 
 			waterUniforms.uTime.value = waveTime;
+
+			// Mirror the event array into the shader uniforms.
+			for (let i = 0; i < MAX_EVENTS; i++) {
+				const e = events[i];
+				waterUniforms.uEventA.value[i].set(e.x, e.z, e.birth, e.sigma);
+				waterUniforms.uEventB.value[i].set(e.cap, e.breakDuration, 0, 0);
+			}
 
 			if (sun) {
 				sun.position.set(env.lightDir[0] * 80, env.lightDir[1] * 80, env.lightDir[2] * 80);
@@ -172,7 +230,9 @@ void main() {
 				const { x, z } = buoys[i];
 				// ampScale 1 matches the water's tuning-mode uAmp; both must
 				// change together or the floats detach from the surface.
-				const surface = sampleSurface(x, z, waveTime);
+				// sampleOcean includes whitecap crumble: a breaking crest
+				// passing under a float drops it with the collapsing water.
+				const surface = sampleOcean(x, z, waveTime);
 				// Ride the surface, plus a fraction of the Gerstner orbital motion
 				// as horizontal sway: anchored floats trace small ellipses.
 				mesh.position.set(

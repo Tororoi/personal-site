@@ -59,6 +59,11 @@ export type WaveFieldConfig = {
   /** Radians; the heading waves travel toward. Weather will own this later. */
   windAngle: number
   /**
+   * Meters per second, used for spray advection and gusts (not wave energy,
+   * yet; the JONSWAP pass will tie band energies to it). Default 5.
+   */
+  windSpeed?: number
+  /**
    * Global Gerstner chop budget. Crest sharpness rises with it. Above ~0.9
    * the sharpest crests start to self-intersect ("looping"): deliberately
    * allowed, since it reads as sharp breaking peaks and gives floaters a
@@ -90,6 +95,7 @@ export const SEA_PRESETS = {
   largeSwell: {
     seed: 1897,
     windAngle: 0.42,
+    windSpeed: 9,
     chop: 2.25,
     bands: [
       // Primary swell: the long rolling system on the wind heading.
@@ -148,6 +154,7 @@ export const SEA_PRESETS = {
   calm: {
     seed: 1897,
     windAngle: 0.42,
+    windSpeed: 2,
     chop: 0.55,
     timeScale: 1,
     bands: [
@@ -201,7 +208,8 @@ export const SEA_PRESETS = {
   storm: {
     seed: 4242,
     windAngle: 0.42,
-    chop: 3.6,
+    windSpeed: 18,
+    chop: 4.6,
     bands: [
       // Dominant storm wind sea: big, steep, and disorganized.
       {
@@ -320,8 +328,11 @@ export function generateWaves(
   return waves
 }
 
+/** The preset actually in effect this session (after the ?sea= override). */
+export const activeField: WaveFieldConfig = pickPreset()
+
 /** The live field. One array; the GPU uniforms and the CPU sampler both read it. */
-export const waves = generateWaves(pickPreset())
+export const waves = generateWaves(activeField)
 
 /**
  * Typical crest height (RMS sum): use for normalizing height-based color.
@@ -338,25 +349,44 @@ export type SurfaceSample = {
   /** Horizontal Gerstner displacement at this point; use scaled-down for sway. */
   swayX: number
   swayZ: number
+  /**
+   * Jacobian determinant of the horizontal Gerstner map. 1 on flat water,
+   * 0 where a crest pinches vertical, negative where the surface folds over
+   * itself: that crest is BREAKING. Foam, spray, and splash triggers all
+   * key off this going negative.
+   */
+  jacobian: number
 }
 
-const scratch = { x: 0, y: 0, z: 0 }
+const scratch = { x: 0, y: 0, z: 0, jxx: 1, jzz: 1, jxz: 0 }
 
 function displace(u: number, v: number, t: number, ampScale: number) {
   let dx = 0
   let dy = 0
   let dz = 0
+  let jxx = 1
+  let jzz = 1
+  let jxz = 0
   for (const w of waves) {
     const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
     const amp = w.amp * ampScale
     const c = Math.cos(theta)
+    const s = Math.sin(theta)
     dx += w.q * amp * w.dirX * c
     dz += w.q * amp * w.dirZ * c
-    dy += amp * Math.sin(theta)
+    dy += amp * s
+    // Partial derivatives of the horizontal displacement.
+    const qak = w.q * amp * w.k
+    jxx -= qak * w.dirX * w.dirX * s
+    jzz -= qak * w.dirZ * w.dirZ * s
+    jxz -= qak * w.dirX * w.dirZ * s
   }
   scratch.x = dx
   scratch.y = dy
   scratch.z = dz
+  scratch.jxx = jxx
+  scratch.jzz = jzz
+  scratch.jxz = jxz
   return scratch
 }
 
@@ -369,17 +399,25 @@ export function sampleSurface(
   z: number,
   t: number,
   ampScale = 1,
+  // 3 is exact to millimeters; 1 is centimeter-grade and half the cost,
+  // fine for particles that only need to hug the surface visually.
+  iterations = 3,
 ): SurfaceSample {
   // Invert the horizontal displacement: find the parameter point that lands on (x, z).
   let u = x
   let v = z
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < iterations; i++) {
     const d = displace(u, v, t, ampScale)
     u = x - d.x
     v = z - d.z
   }
   const d = displace(u, v, t, ampScale)
-  return { height: d.y, swayX: d.x, swayZ: d.z }
+  return {
+    height: d.y,
+    swayX: d.x,
+    swayZ: d.z,
+    jacobian: d.jxx * d.jzz - d.jxz * d.jxz,
+  }
 }
 
 export function sampleHeight(
@@ -394,8 +432,8 @@ export function sampleHeight(
 // ---------- GPU twin ----------
 
 /**
- * GLSL twin of displace(). Same formula, and the uniforms are uploaded from
- * the same `waves` array (see waveUniforms() consumers in Scene).
+ * GLSL twin of displace(). Same formulas, term for term, and the uniforms
+ * are uploaded from the same `waves` array (see the uniform setup in Scene).
  */
 export function wavesGlsl(): string {
   return `
@@ -416,5 +454,25 @@ vec3 waveDisplacement(vec2 p, float t, float ampScale) {
 		d.y += amp * sin(theta);
 	}
 	return d;
+}
+
+// Jacobian determinant of the horizontal Gerstner map. 1 = flat water,
+// 0 = crest pinched vertical, negative = folded over itself: BREAKING.
+// Twin of the jxx/jzz/jxz sums in displace() on the CPU side.
+float waveJacobian(vec2 p, float t, float ampScale) {
+	float jxx = 1.0;
+	float jzz = 1.0;
+	float jxz = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 a = uWaveA[i];
+		vec3 b = uWaveB[i];
+		float theta = (p.x * a.x + p.y * a.y) * a.z - a.w * t + b.z;
+		float s = sin(theta);
+		float qak = b.y * b.x * ampScale * a.z;
+		jxx -= qak * a.x * a.x * s;
+		jzz -= qak * a.y * a.y * s;
+		jxz -= qak * a.x * a.y * s;
+	}
+	return jxx * jzz - jxz * jxz;
 }`
 }
