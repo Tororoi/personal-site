@@ -21,12 +21,15 @@
     "@sveltejs/adapter-netlify": "^6.0.4",
     "@sveltejs/kit": "^2.70.2",
     "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "@types/three": "^0.185.4",
     "svelte": "^5.56.8",
     "svelte-check": "^4.7.5",
     "typescript": "^6.0.3",
     "vite": "^8.2.1"
   },
   "dependencies": {
-    "shiki": "^4.4.3"
+    "@threlte/core": "^8.5.16",
+    "shiki": "^4.4.3",
+    "three": "^0.185.1"
   }
 }

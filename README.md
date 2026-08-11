@@ -18,7 +18,8 @@ npm run check    # svelte-check
 
 | Path | What |
 | --- | --- |
-| `src/routes/+page.svelte` | Home. Empty stage reserved for the Threlte game. |
+| `src/routes/+page.svelte` | Home: metadata + accessible heading. The game stage itself lives in the layout. |
+| `src/lib/game/` | The fishing game (Threlte + three.js, lazy-loaded on `/` only). |
 | `src/routes/projects/` | Featured + archive project lists. |
 | `src/routes/blog/` | Post list, grouped by year under the latest post. |
 | `src/routes/blog/[slug]/` | Post page. Code highlighted at build time. |
@@ -47,10 +48,42 @@ route generates its own prerender entries.
 - `static/Resume.pdf` and `static/Resume.docx` are the same resume in two formats and must
   be regenerated together. A stale docx next to a fresh PDF is the failure mode to watch.
 
+## The game
+
+A low-poly isometric fishing game, being built in phases. Phase 0/1 (shell, ocean,
+day/night) is in. The water currently renders as a **wireframe tuning mode** while the
+simulation is dialed in; lighting (analytic normals + toon ramp) and the low-poly
+treatment return after sign-off. The sea is a 16-component directional Gerstner spectrum;
+tune it in `DEFAULT_FIELD` in `src/lib/game/waves.ts` with `npm run dev` hot-reloading.
+Planned, from reference review: JONSWAP-shaped band energies keyed to wind speed,
+Jacobian-based whitecap/caustic detection (caustics project onto submerged fish backs),
+and a jeantimex-style interactive ripple heightfield for splashes, wake, and rain.
+Decisions already made:
+
+- 24 real minutes per in-game day (`DAY_SECONDS` in `src/lib/game/env.ts`).
+- Boat drifts on a current while the player steers; holds position when idle. (Phase 2.)
+- No textures: cel-shaded flat colors only. Fish will be static unrigged meshes; swim
+  motion is a vertex-shader sine bend. Only the character gets a rig.
+- Ambient on load, no start gate.
+
+Architecture invariants worth knowing before touching it:
+
+- The canvas mounts in `+layout.svelte` and is hidden (not unmounted) off `/`, so the WebGL
+  context and game state survive navigation. `three` is dynamically imported; content
+  routes never ship it.
+- `src/lib/game/waves.ts` holds the wave function twice, GLSL and TypeScript, sharing one
+  parameter array. Everything that floats samples the TS twin. If they diverge, floaters
+  detach from the surface.
+- All lighting/color/weather flows through `computeEnv()` in `env.ts`. In a true isometric
+  ortho view the sky is never on screen, so time of day reads entirely through light,
+  water palette, and fog.
+- Simulation is fixed-step (60Hz) with a free-running renderer; the loop stops when the
+  route isn't `/`. `/?tod=0.5` forces a time of day for debugging (0 = midnight).
+- `prefers-reduced-motion` keeps the static placeholder and never loads the game.
+
 ## Still to build
 
-- The home page game (Threlte). Keep its state in a module-level `state.svelte.ts` runes
-  store so it survives navigation, pause the render loop on `visibilitychange`, and cap DPR
-  on mobile.
+- Game phases 2+: boat + casting, fish, weather, fishing log (see the plan artifact).
+- Blender assets: 13 fish, rowboat, character (asset contract in the plan).
 - Real blog posts. All four bundled posts are placeholder samples (`"sample": true`).
 - A `demo` block type in the post renderer, for posts that embed interactive components.
