@@ -1,0 +1,32 @@
+{
+  "name": "personal-site",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tororoi/personal-site.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Tororoi/personal-site/issues"
+  },
+  "homepage": "https://github.com/Tororoi/personal-site#readme",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@sveltejs/adapter-netlify": "^6.0.4",
+    "@sveltejs/kit": "^2.70.2",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
+    "svelte": "^5.56.8",
+    "svelte-check": "^4.7.5",
+    "typescript": "^6.0.3",
+    "vite": "^8.2.1"
+  },
+  "dependencies": {
+    "shiki": "^4.4.3"
+  }
+}

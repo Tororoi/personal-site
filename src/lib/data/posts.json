@@ -1,0 +1,73 @@
+{
+  "posts": [
+    {
+      "slug": "rust-wasm-pixel-pipeline",
+      "title": "Offloading a Pixel Editor's Render Pipeline to Rust/WebAssembly",
+      "date": "2026-06-14",
+      "tags": ["rust", "webassembly", "performance"],
+      "readingTime": 9,
+      "excerpt": "How I moved dithering, flood fill, and pixel transforms out of JavaScript and into Rust, and what actually got faster.",
+      "sample": true,
+      "blocks": [
+        { "type": "p", "text": "Pixel V started as a pure JavaScript app. Every tool (dither, flood fill, transforms) ran on the main thread against an ImageData buffer. It was fine at 64×64. It was not fine at 1024×1024." },
+        { "type": "h2", "text": "Where the time actually went" },
+        { "type": "p", "text": "Profiling showed the obvious suspects: flood fill's queue churn and the per-pixel loops in the dither pass. The less obvious cost was crossing the JS/canvas boundary: putImageData on every frame of a drag." },
+        { "type": "code", "lang": "rust", "code": "#[wasm_bindgen]\npub fn flood_fill(buf: &mut [u8], w: u32, h: u32, x: u32, y: u32, color: u32) {\n    let target = read_px(buf, w, x, y);\n    if target == color { return; }\n    let mut stack = vec![(x, y)];\n    while let Some((cx, cy)) = stack.pop() {\n        if read_px(buf, w, cx, cy) != target { continue; }\n        write_px(buf, w, cx, cy, color);\n        push_neighbors(&mut stack, cx, cy, w, h);\n    }\n}" },
+        { "type": "p", "text": "The Rust version isn't clever; it's the same scanline-free stack fill. The win is that the whole buffer lives in wasm linear memory, so the fill never touches the JS heap until the final blit." },
+        { "type": "h2", "text": "The dual-canvas trick" },
+        { "type": "p", "text": "Pairing an offscreen canvas for pixel sampling with a desynchronized onscreen canvas for GPU rendering meant the wasm module could own the pixel buffer outright. JavaScript only orchestrates." },
+        { "type": "list", "items": ["Flood fill at 1024×1024: 41ms → 3ms", "Ordered dither full-canvas: 88ms → 6ms", "No GC pauses mid-stroke"] },
+        { "type": "p", "text": "Would I do it again? For anything that loops over pixels, yes. For tool logic and UI state, JavaScript is still the right layer; the boundary tax is real and the ergonomics matter." }
+      ]
+    },
+    {
+      "slug": "versioned-file-format-undo",
+      "title": "Designing a Versioned File Format Around Undo",
+      "date": "2026-03-02",
+      "tags": ["architecture", "javascript"],
+      "readingTime": 7,
+      "excerpt": "Treating the undo stack as the file format: command-pattern snapshots, versioning, and the migration story.",
+      "sample": true,
+      "blocks": [
+        { "type": "p", "text": "Most editors treat the file format and the undo system as separate concerns. Pixel V's core insight is that they're the same data structure: a file is just an undo history with a cursor." },
+        { "type": "h2", "text": "Commands as the source of truth" },
+        { "type": "code", "lang": "javascript", "code": "const command = {\n  v: 3,                    // schema version\n  tool: \"fill\",\n  layer: layerId,\n  before: snapshotRef,      // content-addressed\n  after: snapshotRef,\n  meta: { x, y, color },\n}" },
+        { "type": "p", "text": "Every command carries a schema version. On load, a migration chain walks old commands forward, which means a two-year-old file opens with its full undo history intact." },
+        { "type": "h2", "text": "What full snapshots buy you" },
+        { "type": "p", "text": "Deltas are smaller, but snapshots are content-addressed and deduplicated, so the real cost is lower than it looks, and restore is O(1) instead of a replay." }
+      ]
+    },
+    {
+      "slug": "heroku-to-gcp-migration",
+      "title": "Migrating Production from Heroku to GCP Without a Maintenance Window",
+      "date": "2025-11-18",
+      "tags": ["infrastructure", "gcp", "postgresql"],
+      "readingTime": 11,
+      "excerpt": "A cross-team migration story: dual-writes, cutover rehearsals, and the sync job we made 97% faster on the way out.",
+      "sample": true,
+      "blocks": [
+        { "type": "p", "text": "The brief was simple: get off Heroku. The constraint was less simple: an LP-facing product with no acceptable downtime and a finance team that reconciles against it daily." },
+        { "type": "h2", "text": "Rehearse the cutover, not the migration" },
+        { "type": "p", "text": "We ran the full cutover three times against staging clones before touching production. Each rehearsal surfaced something the plan missed: a connection pool ceiling, a cron that assumed Heroku's ephemeral filesystem." },
+        { "type": "code", "lang": "bash", "code": "# cutover checklist, abridged\npg_dump --snapshot=$SNAP | gcloud sql import ...\n./verify-rowcounts.sh   # every table, both sides\n./replay-wal.sh         # catch up writes since snapshot\n# flip DNS, watch error rates for 15 min before decommission" },
+        { "type": "p", "text": "The unglamorous win: while auditing the sync job for the move, we found it re-fetching unchanged records. Fixing that cut its daily runtime by 97% and main endpoint latency from 30s to 1s." }
+      ]
+    },
+    {
+      "slug": "hipaa-audit-supabase",
+      "title": "Building a HIPAA-Compliant Audit System on Supabase",
+      "date": "2025-07-09",
+      "tags": ["postgresql", "security", "supabase"],
+      "readingTime": 8,
+      "excerpt": "Row-level triggers, append-only tables, and covering an entire platform's surface area without a dedicated audit service.",
+      "sample": true,
+      "blocks": [
+        { "type": "p", "text": "HIPAA doesn't tell you how to build an audit log; it tells you what questions you must be able to answer. Who touched this record, when, and what did they see?" },
+        { "type": "h2", "text": "Triggers over middleware" },
+        { "type": "p", "text": "Application-level audit logging has a fatal flaw: it only covers the application. Database triggers cover every path: the API, the admin console, a developer's psql session." },
+        { "type": "code", "lang": "sql", "code": "create trigger audit_patients\nafter insert or update or delete on patients\nfor each row execute function log_audit_event();\n\n-- append-only: no update/delete grants on audit_log\nrevoke update, delete on audit_log from authenticated;" },
+        { "type": "p", "text": "The append-only property matters as much as the coverage. An audit log you can edit is a liability, not a control." }
+      ]
+    }
+  ]
+}
