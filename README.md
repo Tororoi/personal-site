@@ -53,8 +53,12 @@ route generates its own prerender entries.
 A low-poly isometric fishing game, being built in phases. Phase 0/1 (shell, ocean,
 day/night) is in. The water currently renders as a **wireframe tuning mode** while the
 simulation is dialed in; lighting (analytic normals + toon ramp) and the low-poly
-treatment return after sign-off. The sea is a 16-component directional Gerstner spectrum;
-tune it in `DEFAULT_FIELD` in `src/lib/game/waves.ts` with `npm run dev` hot-reloading.
+treatment return after sign-off. The sea is a multi-band directional Gerstner spectrum
+with named presets in `SEA_PRESETS` in `src/lib/game/waves.ts` (`largeSwell` is signed
+off and ships; `calm` is a tuning scaffold). Preview a preset with `/?sea=calm`; tune
+with `npm run dev` hot-reloading. Chop above ~1 makes crests self-intersect: intentional,
+it reads as breaking peaks, and the loop condition (negative displacement Jacobian) is
+what foam will threshold on.
 Planned, from reference review: JONSWAP-shaped band energies keyed to wind speed,
 Jacobian-based whitecap/caustic detection (caustics project onto submerged fish backs),
 and a jeantimex-style interactive ripple heightfield for splashes, wake, and rain.

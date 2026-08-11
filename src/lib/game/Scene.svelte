@@ -2,7 +2,7 @@
 	import * as THREE from 'three';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { onDestroy } from 'svelte';
-	import { waves, sampleSurface, sampleHeight, significantAmplitude, wavesGlsl } from './waves';
+	import { waves, sampleSurface, sampleHeight, wavesGlsl } from './waves';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -13,8 +13,8 @@
 	const mobile = window.innerWidth < 720;
 	// The ortho camera only ever sees a ~55 x 64m footprint (max corner reach
 	// ~42m from center), so the plane hugs that. Quad size (0.64m desktop, 1m
-	// mobile) must stay under ~1/3 of the shortest ripple wavelength in
-	// DEFAULT_FIELD or the short waves alias into vertex crawl.
+	// mobile) must stay under ~1/3 of the shortest ripple wavelength in the
+	// active sea preset or the short waves alias into vertex crawl.
 	const WATER_SIZE = 140;
 	const WATER_SEGMENTS = mobile ? 140 : 220;
 	const zoom = mobile ? 18 : 26;
@@ -41,7 +41,11 @@
 		// Held at 1 while tuning so the judged sea state is stable; the
 		// weather system will own this multiplier later.
 		uAmp: { value: 1 },
-		uAmpTotal: { value: significantAmplitude },
+		// ABSOLUTE height scale, in meters: full line brightness at +2.5m,
+		// dimmest at -2.5m, for EVERY preset. Deliberately not normalized per
+		// preset, so two sea states compare directly: a calm sea correctly
+		// reads as mostly mid-brightness. Raise if a storm preset clips.
+		uHeightScale: { value: 2.25 },
 		// The wave field itself: uploaded from the same array the CPU sampler
 		// reads, so the two twins cannot disagree about parameters.
 		uWaveA: { value: waves.map((w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega)) },
@@ -76,13 +80,15 @@ void main() {
 uniform vec3 uLineColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
-uniform float uAmpTotal;
+uniform float uHeightScale;
 varying float vViewZ;
 varying float vHeight;
 
 void main() {
-	// Brighter lines on crests, dimmer in troughs: shape reads in stills.
-	float hn = clamp(vHeight / uAmpTotal * 0.5 + 0.5, 0.0, 1.0);
+	// Brighter lines on crests, dimmer in troughs. vHeight is meters above
+	// still water; uHeightScale is an absolute reference, not per-preset, so
+	// brightness is comparable across sea states.
+	float hn = clamp(vHeight / uHeightScale * 0.5 + 0.5, 0.0, 1.0);
 	vec3 col = uLineColor * (0.35 + 0.9 * hn);
 
 	// Distance fade into the page background, doubling as moire control.

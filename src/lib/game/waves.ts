@@ -46,72 +46,165 @@ export type WaveBand = {
   spread: number
   /** Wave slope (amp * k); sets amplitude per wavelength. */
   slope: number
+  /**
+   * Optional phase-speed multiplier for this band, default 1 (physical
+   * dispersion, omega = sqrt(g * k)). Art-direction knob: breaks physics,
+   * but only for this band.
+   */
+  speed?: number
 }
 
 export type WaveFieldConfig = {
   seed: number
   /** Radians; the heading waves travel toward. Weather will own this later. */
   windAngle: number
-  /** Global Gerstner chop budget, 0..1. Higher = sharper crests. */
+  /**
+   * Global Gerstner chop budget. Crest sharpness rises with it. Above ~0.9
+   * the sharpest crests start to self-intersect ("looping"): deliberately
+   * allowed, since it reads as sharp breaking peaks and gives floaters a
+   * lively snap. The loop condition is the Jacobian of the horizontal
+   * displacement going negative, which is exactly what the foam/whitecap
+   * pass will threshold on: loop = foam, once foam renders.
+   *
+   * Caveat: far past ~1, the CPU sampler's fixed-point inversion in
+   * sampleSurface() loses its formal convergence guarantee. It behaves well
+   * at largeSwell's 2.25 in practice; if floaters ever jitter on an extreme
+   * preset, raise the iteration count there.
+   */
   chop: number
+  /**
+   * Optional global multiplier on every wave's phase speed, default 1.
+   * 0.5 halves the whole sea's tempo without touching its shape; relative
+   * speeds between long and short waves stay physical.
+   */
+  timeScale?: number
   bands: WaveBand[]
 }
 
-export const DEFAULT_FIELD: WaveFieldConfig = {
-  seed: 1897,
-  windAngle: 0.42,
-  // Near the cusp limit (1.0): crests pinch sharp. Where crossing systems
-  // stack, local steepness approaches breaking, which is the splash look.
-  chop: 2.25,
-  bands: [
-    // Primary swell: the long rolling system on the wind heading.
-    {
-      count: 4,
-      minLambda: 28,
-      maxLambda: 66,
-      heading: 0,
-      spread: 0.18,
-      slope: 0.085,
-    },
-    // Crossing swell ~110 degrees off: clashes with the primary, piles
-    // pyramid peaks where crests intersect instead of parallel fronts.
-    {
-      count: 3,
-      minLambda: 18,
-      maxLambda: 46,
-      heading: 1.9,
-      spread: 1.25,
-      slope: 0.055,
-    },
-    // Wind sea: the everyday texture, loosely on the wind.
-    {
-      count: 6,
-      minLambda: 8,
-      maxLambda: 16,
-      heading: 0.3,
-      spread: 0.7,
-      slope: 0.05,
-    },
-    // Confused chop: wide scatter, leaning off-wind.
-    {
-      count: 3,
-      minLambda: 5,
-      maxLambda: 25,
-      heading: -0.4,
-      spread: 1.2,
-      slope: 0.045,
-    },
-    // Ripple: near-isotropic. Min wavelength must stay >= ~3-4x the water
-    // mesh quad size (see WATER_SEGMENTS) or it aliases into vertex crawl.
-    {
-      count: 6,
-      minLambda: 2.6,
-      maxLambda: 4.5,
-      heading: 0.8,
-      spread: 1.6,
-      slope: 0.04,
-    },
-  ],
+/**
+ * Named sea states. Preview one live with /?sea=<name>. Weather will
+ * eventually own transitions between them (lerping band energies).
+ */
+export const SEA_PRESETS = {
+  /** Signed off: large, confused open-ocean swell with breaking peaks. */
+  largeSwell: {
+    seed: 1897,
+    windAngle: 0.42,
+    chop: 2.25,
+    bands: [
+      // Primary swell: the long rolling system on the wind heading.
+      {
+        count: 4,
+        minLambda: 28,
+        maxLambda: 66,
+        heading: 0,
+        spread: 0.18,
+        slope: 0.085,
+        speed: 0.7,
+      },
+      // Crossing swell ~110 degrees off: clashes with the primary, piles
+      // pyramid peaks where crests intersect instead of parallel fronts.
+      {
+        count: 3,
+        minLambda: 18,
+        maxLambda: 46,
+        heading: 1.9,
+        spread: 1.25,
+        slope: 0.055,
+        speed: 0.7,
+      },
+      // Wind sea: the everyday texture, loosely on the wind.
+      {
+        count: 6,
+        minLambda: 8,
+        maxLambda: 16,
+        heading: 0.3,
+        spread: 0.7,
+        slope: 0.05,
+        speed: 1.5,
+      },
+      // Confused chop: wide scatter, leaning off-wind.
+      {
+        count: 3,
+        minLambda: 5,
+        maxLambda: 25,
+        heading: -0.4,
+        spread: 1.2,
+        slope: 0.045,
+      },
+      // Ripple: near-isotropic. Min wavelength must stay >= ~3-4x the water
+      // mesh quad size (see WATER_SEGMENTS) or it aliases into vertex crawl.
+      {
+        count: 6,
+        minLambda: 2.6,
+        maxLambda: 4.5,
+        heading: 0.8,
+        spread: 1.6,
+        slope: 0.04,
+      },
+    ],
+  },
+  /** Starting scaffold for tuning: a gentle day. Everything is up for grabs. */
+  calm: {
+    seed: 1897,
+    windAngle: 0.42,
+    chop: 0.55,
+    timeScale: 1,
+    bands: [
+      // One long, low swell rolling through.
+      {
+        count: 2,
+        minLambda: 40,
+        maxLambda: 50,
+        heading: 0,
+        spread: 0.12,
+        slope: 0.008,
+        speed: 0.7,
+      },
+      // A whisper of wind sea.
+      {
+        count: 3,
+        minLambda: 10,
+        maxLambda: 18,
+        heading: 0.2,
+        spread: 0.5,
+        slope: 0.009,
+        speed: 1.2,
+      },
+      // Ripples carry most of the visible texture on a calm day.
+      {
+        count: 5,
+        minLambda: 2,
+        maxLambda: 5,
+        heading: 0.5,
+        spread: 1.4,
+        slope: 0.005,
+      },
+      // Cross ripples
+      {
+        count: 5,
+        minLambda: 6,
+        maxLambda: 10,
+        heading: -0.3,
+        spread: 1.4,
+        slope: 0.005,
+      },
+    ],
+  },
+} satisfies Record<string, WaveFieldConfig>
+
+/** The preset the site ships with. */
+export const DEFAULT_FIELD: WaveFieldConfig = SEA_PRESETS.largeSwell
+
+function pickPreset(): WaveFieldConfig {
+  // Debug hook: /?sea=calm previews a preset without a code edit.
+  if (typeof window !== 'undefined') {
+    const name = new URLSearchParams(window.location.search).get('sea')
+    if (name && name in SEA_PRESETS) {
+      return SEA_PRESETS[name as keyof typeof SEA_PRESETS]
+    }
+  }
+  return DEFAULT_FIELD
 }
 
 /** Deterministic PRNG so the field is identical across sessions and twins. */
@@ -148,21 +241,23 @@ export function generateWaves(
         dirX: Math.cos(angle),
         dirZ: Math.sin(angle),
         k,
-        omega: Math.sqrt(G * k),
+        // Deep-water dispersion, scaled by the band and global speed knobs.
+        // Baked into omega here, so the GPU and CPU twins agree for free.
+        omega: Math.sqrt(G * k) * (band.speed ?? 1) * (cfg.timeScale ?? 1),
         amp,
         q: 0,
         phase: rand() * Math.PI * 2,
       })
     }
   }
-  // Split the chop budget so sum(q * k * amp) = chop stays below 1:
-  // above 1, Gerstner crests self-intersect and the surface loops.
+  // Split the chop budget so sum(q * k * amp) = chop. Below 1 crests stay
+  // smooth; above 1 the sharpest ones loop (see the chop doc on WaveFieldConfig).
   for (const w of waves) w.q = cfg.chop / (w.k * w.amp * waves.length)
   return waves
 }
 
 /** The live field. One array; the GPU uniforms and the CPU sampler both read it. */
-export const waves = generateWaves()
+export const waves = generateWaves(pickPreset())
 
 /**
  * Typical crest height (RMS sum): use for normalizing height-based color.
