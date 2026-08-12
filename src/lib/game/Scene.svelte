@@ -12,12 +12,13 @@
 		windTravel,
 		windVector
 	} from './whitecaps';
+	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl } from './ripples';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
 	let { active = true }: { active?: boolean } = $props();
 
-	const { scene } = useThrelte();
+	const { scene, renderer } = useThrelte();
 
 	const mobile = window.innerWidth < 720;
 	// The ortho camera only ever sees a ~55 x 64m footprint (max corner reach
@@ -105,8 +106,16 @@
 		// Max heading deviation a gust patch can carry, radians. Each patch
 		// samples its own veer from a decorrelated field: ~0.4 = up to ~23
 		// degrees off the global wind, either side.
-		uGustVeer: { value: 0.4 }
+		uGustVeer: { value: 0.4 },
+		// Physics ripple field (ripples.ts): the interactive heightfield.
+		// Texture re-pointed each frame after the sim step (ping-pong swap).
+		uRippleTex: { value: null as THREE.Texture | null },
+		uRippleCenter: { value: new THREE.Vector2(0, 0) },
+		uRippleExtent: { value: RIPPLE_EXTENT }
 	};
+
+	// The wave-equation sim that owns uRippleTex's contents.
+	const rippleSim = new RippleSim();
 
 	const waterMaterial = new THREE.ShaderMaterial({
 		uniforms: waterUniforms,
@@ -118,9 +127,11 @@ varying float vViewZ;
 varying float vHeight;
 varying float vJacobian;
 varying float vChurn;
+varying float vRipple;
 
 ${wavesGlsl()}
 ${whitecapsGlsl()}
+${ripplesGlsl()}
 
 void main() {
 	// Sample in world space: when the mesh recenters on the drifting boat,
@@ -131,6 +142,12 @@ void main() {
 	vHeight = p.y - world.y;
 	vJacobian = waveJacobian(world.xz, uTime, uAmp);
 	vChurn = applyChurn(p, world.xz, uTime, vJacobian);
+	// Sample ripples at the DISPLACED position: Gerstner slides vertices
+	// horizontally by meters, and the field is indexed by true world
+	// coordinates. Sampling at the rest position would paint rings onto the
+	// water's material coordinates, making them swim with the passing waves
+	// instead of staying where the object poked.
+	vRipple = applyRipples(p, p.xz);
 	vec4 view = viewMatrix * vec4(p, 1.0);
 	vViewZ = -view.z;
 	gl_Position = projectionMatrix * view;
@@ -147,6 +164,7 @@ varying float vViewZ;
 varying float vHeight;
 varying float vJacobian;
 varying float vChurn;
+varying float vRipple;
 
 void main() {
 	// Brighter lines on crests, dimmer in troughs. vHeight is meters above
@@ -160,6 +178,7 @@ void main() {
 	// float foam = 1.0 - smoothstep(uFoamFull, uFoamStart, vJacobian);
 	// foam = max(foam, vChurn);
 	float foam = vChurn;
+	foam = max(foam, vRipple);
 	col = mix(col, uFoamColor, foam);
 
 	// Distance fade into the page background, doubling as moire control.
@@ -194,10 +213,11 @@ void main() {
 	// ballistically until the surface catches it again.
 	// y/vy: vertical state. tx/tz: tilt (horizontal components of the up
 	// vector), wx/wz: tilt velocity, for the bottom-heavy pendulum dynamics.
+	// pw: previous waterline, for the surface's rise rate.
 	const buoys = [
-		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0 },
-		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0 },
-		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0 }
+		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0 },
+		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0 },
+		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0 }
 	];
 	let buoyMeshes = $state<(THREE.Mesh | undefined)[]>([]);
 
@@ -269,6 +289,10 @@ void main() {
 				waterUniforms.uEventA.value[i].set(e.x, e.z, e.birth, e.sigma);
 				waterUniforms.uEventB.value[i].set(e.cap, e.breakDuration, 0, 0);
 			}
+			// One wave-equation iteration, then point the water shader at the
+			// freshly written side of the ping-pong pair.
+			rippleSim.step(renderer);
+			waterUniforms.uRippleTex.value = rippleSim.texture;
 
 			if (sun) {
 				sun.position.set(env.lightDir[0] * 80, env.lightDir[1] * 80, env.lightDir[2] * 80);
@@ -293,6 +317,16 @@ void main() {
 				// passing under a float drops it with the collapsing water.
 				const surface = sampleOcean(x, z, waveTime);
 				const waterline = surface.height + 0.15;
+				// How fast the surface itself is moving vertically, clamped
+				// against first-frame garbage.
+				const riseRate =
+					buoyDt > 0
+						? THREE.MathUtils.clamp((waterline - b.pw) / buoyDt, -6, 6)
+						: 0;
+				b.pw = waterline;
+
+				const px = x + surface.swayX * 0.4;
+				const pz = z + surface.swayZ * 0.4;
 
 				let airborne = b.y > waterline + 0.001;
 				if (!airborne) {
@@ -303,12 +337,28 @@ void main() {
 						b.vy = Math.min((waterline - b.y) / buoyDt, BUOY_MAX_CARRY);
 					}
 					b.y = waterline;
+					// The hull pushing through the water is a continuous
+					// disturbance: the wave equation turns it into wake and
+					// churn. Strength follows how hard the surface works
+					// against the buoy, including breaking water (low J).
+					const breaking = THREE.MathUtils.clamp((0.4 - surface.jacobian) / 0.8, 0, 1);
+					const agitation = Math.min(Math.abs(riseRate) * 0.022 + breaking * 0.035, 0.09);
+					injectRipple(px, pz, 0.45, agitation);
 				} else {
 					// Off the crest: the surface fell faster than gravity
 					// allows. Fall ballistically until the water catches us.
 					b.vy -= BUOY_GRAVITY * buoyDt;
 					b.y += b.vy * buoyDt;
 					if (b.y <= waterline) {
+						// Splashdown: one hard poke scaled by the relative
+						// speed of buoy and water. The expanding ring, the
+						// rebound column, and any interference with other
+						// ripples all come from the wave equation.
+						const impact = Math.abs(riseRate - b.vy);
+						if (impact > 1.2) {
+							const amp = Math.min((impact - 1.2) / 3.5, 1);
+							injectRipple(px, pz, 0.8, 0.12 + amp * 0.35);
+						}
 						b.y = waterline;
 						b.vy = 0;
 						airborne = false;
@@ -317,7 +367,7 @@ void main() {
 
 				// Ride the surface, plus a fraction of the Gerstner orbital motion
 				// as horizontal sway: anchored floats trace small ellipses.
-				mesh.position.set(x + surface.swayX * 0.4, b.y, z + surface.swayZ * 0.4);
+				mesh.position.set(px, b.y, pz);
 
 				// Bottom-heavy pendulum tilt. In water, the ballast springs the
 				// buoy toward the water-slope target (gradient over a 1.2m
@@ -367,6 +417,7 @@ void main() {
 		buoyGeometry.dispose();
 		buoyMaterial.dispose();
 		toonGradient.dispose();
+		rippleSim.dispose();
 	});
 </script>
 

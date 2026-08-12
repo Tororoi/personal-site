@@ -59,9 +59,10 @@ off and ships; `calm` is a tuning scaffold). Preview a preset with `/?sea=calm`;
 with `npm run dev` hot-reloading. Chop above ~1 makes crests self-intersect: intentional,
 it reads as breaking peaks, and the loop condition (negative displacement Jacobian) is
 what foam will threshold on.
-Planned, from reference review: JONSWAP-shaped band energies keyed to wind speed,
-Jacobian-based whitecap/caustic detection (caustics project onto submerged fish backs),
-and a jeantimex-style interactive ripple heightfield for splashes, wake, and rain.
+Jacobian whitecap detection and a jeantimex-style wave-equation ripple heightfield
+(`src/lib/game/ripples.ts`, physics-based splashes/wake) are in; still planned from the
+reference review: JONSWAP band energies keyed to wind speed, and caustics projected onto
+submerged fish backs (same Jacobian signal).
 Decisions already made:
 
 - 24 real minutes per in-game day (`DAY_SECONDS` in `src/lib/game/env.ts`).
