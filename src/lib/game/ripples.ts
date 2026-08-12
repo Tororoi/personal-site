@@ -25,9 +25,9 @@
 import * as THREE from 'three'
 import { activeField } from './waves'
 
-export const RIPPLE_RESOLUTION = 256
+export const RIPPLE_RESOLUTION = 1024
 /** Meters of world covered by the domain; cell = extent / resolution. */
-export const RIPPLE_EXTENT = 80
+export const RIPPLE_EXTENT = 300
 
 /**
  * Calm-water defaults; sea presets override via their `ripples` block (see
@@ -40,7 +40,7 @@ export const RIPPLE_EXTENT = 80
 const SETTINGS = {
   displayGain: 3.5,
   churn: 0,
-  propagation: 0.14,
+  propagation: 0.04,
   damping: 0.9955,
   ...activeField.ripples,
 }

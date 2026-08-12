@@ -188,7 +188,7 @@ export const SEA_PRESETS = {
     timeScale: 1,
     // Clean water: smooth rings, no froth. These are the signed-off
     // calm-water interaction settings.
-    ripples: { displayGain: 3.5, churn: 0, propagation: 0.14, damping: 0.9955 },
+    ripples: { displayGain: 3.5, churn: 0, propagation: 0.04, damping: 0.96 },
     bands: [
       // One long, low swell rolling through.
       {
@@ -245,10 +245,10 @@ export const SEA_PRESETS = {
     // Choppy water tears rings apart: disturbances render mostly as
     // seething froth (crest-churn style), and ring energy dies fast.
     ripples: {
-      displayGain: 2.6,
-      churn: 0.05,
-      propagation: 0.15,
-      damping: 0.988,
+      displayGain: 1.6,
+      churn: 0,
+      propagation: 0.05,
+      damping: 0.96,
     },
     bands: [
       // Dominant storm wind sea: big, steep, and disorganized.

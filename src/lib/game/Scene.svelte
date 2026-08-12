@@ -22,13 +22,27 @@
 	const { scene, renderer } = useThrelte();
 
 	const mobile = window.innerWidth < 720;
-	// The ortho camera only ever sees a ~55 x 64m footprint (max corner reach
-	// ~42m from center), so the plane hugs that. Quad size (0.64m desktop, 1m
-	// mobile) must stay under ~1/3 of the shortest ripple wavelength in the
-	// active sea preset or the short waves alias into vertex crawl.
-	const WATER_SIZE = 140;
-	const WATER_SEGMENTS = mobile ? 140 : 220;
+	// The signed-off wireframe tuning view is one URL away: /?wire (composes
+	// with ?sea= and ?tod=). Default is now the solid translucent render.
+	const wireframe = new URLSearchParams(window.location.search).has('wire');
 	const zoom = mobile ? 18 : 26;
+	// The plane is sized from THIS window's actual ground footprint: ortho
+	// zoom is fixed pixels-per-meter, so a bigger window sees more ocean.
+	// The 0.71/1.34 coefficients come from the camera orientation (45 deg
+	// azimuth, ~32 deg elevation): a screen half-width of w meters reaches
+	// 0.71w in world x/z, a half-height of h reaches 1.34h. +4m margin
+	// covers Gerstner sway pulling vertices off the edge. Sized at mount;
+	// a window resize larger than mount needs a reload to regain coverage.
+	const WATER_SIZE =
+		2 * (0.71 * (window.innerWidth / zoom / 2) + 1.34 * (window.innerHeight / zoom / 2) + 4);
+	// Fixed vertex budget buys the finest quads this window allows. The
+	// water is deliberately FINE: the low-poly look belongs to the fish,
+	// boat and buoy models, not the ocean. Quad size must stay under ~1/3
+	// of the shortest ripple wavelength in the active sea preset.
+	const WATER_SEGMENTS = Math.min(
+		Math.round(WATER_SIZE / (mobile ? 0.6 : 0.2)),
+		mobile ? 170 : 510
+	);
 
 	// ---------- Water ----------
 
@@ -120,15 +134,79 @@
 		// Splash froth blobs (froth.ts), refreshed each frame from the same
 		// array addFroth() writes.
 		uFrothA: { value: Array.from({ length: MAX_FROTH }, () => new THREE.Vector4()) },
-		uFrothB: { value: Array.from({ length: MAX_FROTH }, () => new THREE.Vector4()) }
+		uFrothB: { value: Array.from({ length: MAX_FROTH }, () => new THREE.Vector4()) },
+		// Solid-mode water, pool-style (Wallace/jeantimex): a Fresnel blend
+		// between transmitted water color and reflected sky, plus sun
+		// specular. Facets facing the camera show the water; tilted facets
+		// catch the sky and sparkle.
+		uWaterColor: { value: new THREE.Color('#1a5876') },
+		uSkyColor: { value: new THREE.Color('#a8c8d8') },
+		uAlphaBase: { value: 0.78 },
+		// Live sun from the day/night cycle, updated per frame.
+		uSunDir: { value: new THREE.Vector3(0.4, 1, 0.3) },
+		uSunColor: { value: new THREE.Color('#fff2d0') },
+		uSunI: { value: 1.2 },
+		// Constant for the ortho camera: unit vector from scene toward camera.
+		uViewDir: { value: new THREE.Vector3(34, 30, 34).normalize() }
 	};
 
 	// The wave-equation sim that owns uRippleTex's contents.
 	const rippleSim = new RippleSim();
 
+	// The wireframe fragment is the tuning instrument; the solid fragment
+	// is the first step toward the real look: translucent water whose
+	// opacity falls off with depth, faceted shading so geometry reads.
+	const solidFragment = `
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform vec3 uFoamColor;
+uniform vec3 uWaterColor;
+uniform vec3 uSkyColor;
+uniform float uAlphaBase;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform float uSunI;
+uniform vec3 uViewDir;
+varying vec3 vWorld;
+varying float vViewZ;
+varying float vChurn;
+varying float vRipple;
+
+void main() {
+	vec3 normal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
+	if (normal.y < 0.0) normal = -normal;
+
+	// Pool-style shading: Fresnel decides per facet whether you look INTO
+	// the water (transmitted color) or AT it (reflected sky). Flat-on
+	// facets transmit; tilted ones mirror the sky.
+	float facing = clamp(dot(normal, uViewDir), 0.0, 1.0);
+	float fresnel = 0.02 + 0.98 * pow(1.0 - facing, 3.0);
+	vec3 col = mix(uWaterColor, uSkyColor, fresnel);
+
+	// Sun sparkle: sharp Blinn specular on facets catching the half vector.
+	vec3 halfVec = normalize(normalize(uSunDir) + uViewDir);
+	float spec = pow(max(dot(normal, halfVec), 0.0), 90.0);
+	col += uSunColor * spec * uSunI;
+
+	float foam = max(vChurn, vRipple);
+	col = mix(col, uFoamColor, foam);
+
+	// Reflective facets are more opaque (you see the sky, not through);
+	// transmitting facets stay clear for whatever swims below.
+	float alpha = mix(uAlphaBase, 0.96, fresnel);
+	alpha = mix(alpha, 0.97, foam);
+
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	col = mix(col, uFogColor, fog);
+	alpha = mix(alpha, 1.0, fog);
+
+	gl_FragColor = vec4(col, alpha);
+}`;
+
 	const waterMaterial = new THREE.ShaderMaterial({
 		uniforms: waterUniforms,
-		wireframe: true,
+		wireframe,
+		transparent: !wireframe,
 		vertexShader: `
 uniform float uTime;
 uniform float uAmp;
@@ -137,6 +215,7 @@ varying float vHeight;
 varying float vJacobian;
 varying float vChurn;
 varying float vRipple;
+varying vec3 vWorld;
 
 ${wavesGlsl()}
 ${whitecapsGlsl()}
@@ -160,6 +239,7 @@ void main() {
 	// churned water (lifted ripple water + splash froth bursts); smooth
 	// ripples stay uncolored.
 	vRipple = max(applyRipples(p, p.xz, uTime), applyFroth(p, p.xz, uTime));
+	vWorld = p;
 	vec4 view = viewMatrix * vec4(p, 1.0);
 	vViewZ = -view.z;
 	gl_Position = projectionMatrix * view;
@@ -199,6 +279,7 @@ void main() {
 	gl_FragColor = vec4(col, 1.0);
 }`
 	});
+	if (!wireframe) waterMaterial.fragmentShader = solidFragment;
 
 	// ---------- Placeholder floaters (prove the CPU sampler matches the GPU) ----------
 
@@ -319,6 +400,9 @@ void main() {
 				waterUniforms.uFrothB.value[i].set(f.amp, 0, 0, 0);
 			}
 
+			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
+			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
+			waterUniforms.uSunI.value = env.lightIntensity;
 			if (sun) {
 				sun.position.set(env.lightDir[0] * 80, env.lightDir[1] * 80, env.lightDir[2] * 80);
 				sun.color.setRGB(env.light[0], env.light[1], env.light[2], THREE.SRGBColorSpace);
