@@ -118,6 +118,27 @@ export type WaveFieldConfig = {
     /** Wave slope (amp * k); sets capillary energy. */
     slope?: number
   }
+  /**
+   * Reflected sky for this sea, sampled by the water's Wallace-style
+   * reflection (Scene.svelte): a vertical gradient from horizon to zenith,
+   * plus the sun's glare on the reflected ray. Weather transitions will
+   * lerp these along with the bands.
+   */
+  sky?: {
+    /** Color straight overhead (what flat-on facets mirror). */
+    zenith: string
+    /** Color at grazing reflections, near the horizon. */
+    horizon: string
+    /**
+     * Sun diffusion, 0 clear sky .. 1 heavy overcast. Clouds turn the sun
+     * from a point source into an extended one, and every surface lens
+     * images the source: the caustic pattern is CONVOLVED with the
+     * source's angular size. Drives the caustic map's blur + flatten
+     * (caustics.ts / Scene) and softens the sun glare on the water.
+     * Default 0.
+     */
+    diffusion?: number
+  }
   bands: WaveBand[]
 }
 
@@ -139,6 +160,8 @@ export const SEA_PRESETS = {
       speed: 1.5,
       damping: 0.993,
     },
+    // Big weather brewing: a light overcast gray, sun well scattered.
+    sky: { zenith: '#c3cbd1', horizon: '#e9edf0', diffusion: 0.4 },
     bands: [
       // Primary swell: the long rolling system on the wind heading.
       {
@@ -202,6 +225,8 @@ export const SEA_PRESETS = {
     // Clean water: smooth rings, no froth. These are the signed-off
     // calm-water interaction settings.
     ripples: { displayGain: 3.5, churn: 0, speed: 1.2, damping: 0.96 },
+    // A gentle day mirrors a blue sky; near-point sun, crisp caustics.
+    sky: { zenith: '#2e6fb2', horizon: '#a9cfe8', diffusion: 0.05 },
     bands: [
       // One long, low swell rolling through.
       {
@@ -263,6 +288,9 @@ export const SEA_PRESETS = {
       speed: 2.2,
       damping: 0.96,
     },
+    // Heavy cloud deck: a medium gray, darker than the swell's overcast;
+    // a ghost of the caustic web survives it.
+    sky: { zenith: '#6b737a', horizon: '#98a0a7', diffusion: 0.7 },
     bands: [
       // Dominant storm wind sea: big, steep, and disorganized.
       {

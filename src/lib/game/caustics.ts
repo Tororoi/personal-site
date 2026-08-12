@@ -159,6 +159,41 @@ void main() {
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
 
+// ---- Sun-diffusion blur ----
+// A clouded sun is an EXTENDED source, and every surface lens images the
+// source: the caustic pattern is the point-source pattern convolved with
+// the source's angular size projected through the water. So diffusion is
+// literally a Gaussian blur of the map (radius = angular spread x
+// reference-plane depth). A blur conserves energy: folds sink toward the
+// local mean (~1), the crown shadow grows a penumbra, and the receivers'
+// max(light - 1, 0) term dies out on its own — no receiver logic changes.
+// Separable 13-tap kernel at half-sigma spacing, run over the active
+// region only.
+
+const blurVertex = `
+uniform vec4 uRegion; // xy = NDC center, zw = NDC half-size
+varying vec2 vUv;
+void main() {
+	vec2 p = position.xy * uRegion.zw + uRegion.xy;
+	vUv = p * 0.5 + 0.5;
+	gl_Position = vec4(p, 0.0, 1.0);
+}`
+
+const blurFragment = `
+uniform sampler2D uSrc;
+uniform vec2 uStep; // half-sigma tap spacing in uv, along the blur axis
+varying vec2 vUv;
+void main() {
+	float acc = texture2D(uSrc, vUv).r * 0.1997;
+	acc += (texture2D(uSrc, vUv + uStep).r + texture2D(uSrc, vUv - uStep).r) * 0.1762;
+	acc += (texture2D(uSrc, vUv + 2.0 * uStep).r + texture2D(uSrc, vUv - 2.0 * uStep).r) * 0.1211;
+	acc += (texture2D(uSrc, vUv + 3.0 * uStep).r + texture2D(uSrc, vUv - 3.0 * uStep).r) * 0.0648;
+	acc += (texture2D(uSrc, vUv + 4.0 * uStep).r + texture2D(uSrc, vUv - 4.0 * uStep).r) * 0.0270;
+	acc += (texture2D(uSrc, vUv + 5.0 * uStep).r + texture2D(uSrc, vUv - 5.0 * uStep).r) * 0.0088;
+	acc += (texture2D(uSrc, vUv + 6.0 * uStep).r + texture2D(uSrc, vUv - 6.0 * uStep).r) * 0.0022;
+	gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);
+}`
+
 const splatFragment = `
 varying vec2 vOld;
 varying vec2 vNew;
@@ -176,11 +211,22 @@ void main() {
 }`
 
 export class CausticMap {
+  /**
+   * Sun diffusion, 0 clear .. 1 heavy overcast (from the sea preset's
+   * sky.diffusion). Sets the source-size blur radius; weather transitions
+   * can animate it. The micro-ripple (wind) spread will add to the same
+   * radius in quadrature when it arrives.
+   */
+  diffusion = 0
+
   private target: THREE.WebGLRenderTarget
+  private blurTarget: THREE.WebGLRenderTarget
   private material: THREE.ShaderMaterial
+  private blurMaterial: THREE.ShaderMaterial
   private tileAttr: THREE.InstancedBufferAttribute
   private splatGeometry: THREE.InstancedBufferGeometry
   private splatScene: THREE.Scene
+  private blurScene: THREE.Scene
   private splatCamera: THREE.OrthographicCamera
   private clearColor = new THREE.Color(0, 0, 0)
   private savedClearColor = new THREE.Color()
@@ -252,6 +298,39 @@ export class CausticMap {
     this.splatScene.add(splatMesh)
 
     this.splatCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+
+    // Ping target + region quad for the separable sun-diffusion blur.
+    this.blurTarget = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION,
+      CAUSTIC_RESOLUTION,
+      {
+        type: THREE.HalfFloatType,
+        format: THREE.RedFormat,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+        stencilBuffer: false,
+      },
+    )
+    this.blurMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uSrc: { value: null },
+        uStep: { value: new THREE.Vector2(0, 0) },
+        uRegion: { value: new THREE.Vector4(0, 0, 1, 1) },
+      },
+      vertexShader: blurVertex,
+      fragmentShader: blurFragment,
+      blending: THREE.NoBlending,
+      depthTest: false,
+      depthWrite: false,
+    })
+    this.blurScene = new THREE.Scene()
+    const blurMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this.blurMaterial,
+    )
+    blurMesh.frustumCulled = false
+    this.blurScene.add(blurMesh)
   }
 
   get texture(): THREE.Texture {
@@ -322,6 +401,41 @@ export class CausticMap {
     renderer.autoClear = false
     renderer.render(this.splatScene, this.splatCamera)
 
+    // Sun-diffusion blur (see the shader comment). Radius = angular
+    // spread x plane depth, capped at a practical kernel — the receiver
+    // side's flatten term (uCausticFlat, Scene) carries heavy overcast
+    // the rest of the way to featureless light.
+    const sigmaMeters = Math.min(this.diffusion * 0.8, 0.62)
+    const sigmaTexels = sigmaMeters / (CAUSTIC_EXTENT / CAUSTIC_RESOLUTION)
+    if (sigmaTexels > 0.5 && count > 0) {
+      // One tile of margin so the penumbra can spread past the splat
+      // region; taps beyond it read the map's black, consistent with the
+      // "no light computed" convention.
+      const u0 = (Math.max(tx0 - 1, 0) / TILES) * 2 - 1
+      const u1 = (Math.min(tx1 + 2, TILES) / TILES) * 2 - 1
+      const v0 = (Math.max(tz0 - 1, 0) / TILES) * 2 - 1
+      const v1 = (Math.min(tz1 + 2, TILES) / TILES) * 2 - 1
+      const blurU = this.blurMaterial.uniforms
+      ;(blurU.uRegion.value as THREE.Vector4).set(
+        (u0 + u1) / 2,
+        (v0 + v1) / 2,
+        (u1 - u0) / 2,
+        (v1 - v0) / 2,
+      )
+      const step = (0.5 * sigmaTexels) / CAUSTIC_RESOLUTION
+
+      blurU.uSrc.value = this.target.texture
+      ;(blurU.uStep.value as THREE.Vector2).set(step, 0)
+      renderer.setRenderTarget(this.blurTarget)
+      renderer.clear(true, false, false)
+      renderer.render(this.blurScene, this.splatCamera)
+
+      blurU.uSrc.value = this.blurTarget.texture
+      ;(blurU.uStep.value as THREE.Vector2).set(0, step)
+      renderer.setRenderTarget(this.target)
+      renderer.render(this.blurScene, this.splatCamera)
+    }
+
     renderer.autoClear = previousAutoClear
     renderer.setClearColor(this.savedClearColor, previousClearAlpha)
     renderer.setRenderTarget(previousTarget)
@@ -329,7 +443,9 @@ export class CausticMap {
 
   dispose() {
     this.target.dispose()
+    this.blurTarget.dispose()
     this.material.dispose()
+    this.blurMaterial.dispose()
     this.splatGeometry.dispose()
   }
 }

@@ -2,7 +2,7 @@
 	import * as THREE from 'three';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { onDestroy } from 'svelte';
-	import { causticsGlsl, waves, wavesGlsl } from './waves';
+	import { activeField, causticsGlsl, waves, wavesGlsl } from './waves';
 	import {
 		events,
 		MAX_EVENTS,
@@ -15,6 +15,8 @@
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
 	import { addFroth, FROTH_SIGMA, frothBlobs, frothGlsl, MAX_FROTH, updateFroth } from './froth';
+	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
+	import { FoamField, foamGlsl, FOAM_EXTENT } from './foam';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -62,6 +64,14 @@
 	waterGeometry.rotateX(-Math.PI / 2);
 
 	const env0 = computeEnv(game.time / DAY_SECONDS);
+
+	// Sun diffusion from the sea preset's cloud deck (waves.ts sky), 0
+	// clear .. 1 heavy overcast. Feeds three effects of the SAME cause:
+	// the caustic map's source-size blur (caustics.ts), the receiver-side
+	// flatten that carries heavy overcast past the practical blur radius,
+	// and the softening of the sun's glare on the water.
+	const SUN_DIFFUSION = activeField.sky?.diffusion ?? 0;
+	const CAUSTIC_FLAT = THREE.MathUtils.smoothstep(SUN_DIFFUSION, 0.35, 1.0);
 
 	// ---- Wireframe tuning mode ----
 	// Styling is deliberately stripped while the simulation is tuned: bare
@@ -147,7 +157,10 @@
 		// specular. Facets facing the camera show the water; tilted facets
 		// catch the sky and sparkle.
 		uWaterColor: { value: new THREE.Color('#1a5876') },
-		uSkyColor: { value: new THREE.Color('#a8c8d8') },
+		// Wallace-style reflected sky: a vertical gradient owned by the sea
+		// preset (waves.ts sky), sampled along the reflected eye ray.
+		uSkyZenith: { value: new THREE.Color(activeField.sky?.zenith ?? '#a8c8d8') },
+		uSkyHorizon: { value: new THREE.Color(activeField.sky?.horizon ?? '#d5e3ea') },
 		// CLARITY PINNED HIGH for caustic tuning: nearly transparent surface
 		// so the underwater scene reads unobstructed. Restore toward ~0.78
 		// when clarity becomes a weather/preset property.
@@ -157,16 +170,81 @@
 		uSunColor: { value: new THREE.Color('#fff2d0') },
 		uSunI: { value: 1.2 },
 		// Constant for the ortho camera: unit vector from scene toward camera.
-		uViewDir: { value: new THREE.Vector3(34, 30, 34).normalize() }
+		uViewDir: { value: new THREE.Vector3(34, 30, 34).normalize() },
+		// Underwater raytrace (pool-style view refraction): the water
+		// fragment draws the submerged scene itself, so it needs the same
+		// receiver-lighting inputs as the sphere and backdrop materials.
+		// These are the CANONICAL uniform objects; backdropUniforms and
+		// sphereUniforms reference them, so one write per frame feeds all
+		// three shaders.
+		uLightColor: { value: new THREE.Color('#fff2d0') },
+		uLightI: { value: 1.2 },
+		uCausticMap: { value: null as THREE.Texture | null },
+		uCausticCenter: { value: new THREE.Vector2(0, 0) },
+		uCausticExtent: { value: CAUSTIC_EXTENT },
+		uFloorColor: { value: new THREE.Color('#0a2e44') },
+		uSphereColor: { value: new THREE.Color('#8f9ea6') },
+		// Floaters join the underwater raytrace: each buoy's inverse world
+		// matrix (refreshed every frame from its mesh) takes the refracted
+		// ray into box space for a slab test, so submerged halves refract
+		// and sway like everything else below the surface.
+		uBuoyInv: {
+			value: [new THREE.Matrix4(), new THREE.Matrix4(), new THREE.Matrix4()]
+		},
+		uBuoyColor: { value: new THREE.Color('#d95f43') },
+		// Sun diffusion (see SUN_DIFFUSION above): glare softening in the
+		// water fragment, and the caustic flatten in shadeUnderwater.
+		uSunDiffusion: { value: SUN_DIFFUSION },
+		uCausticFlat: { value: CAUSTIC_FLAT },
+		// Persistent foam field (foam.ts): the thickness texture, sampled
+		// at REST coordinates; re-pointed each frame after the sim step.
+		uFoamTex: { value: null as THREE.Texture | null },
+		uFoamCenter: { value: new THREE.Vector2(0, 0) },
+		uFoamExtent: { value: FOAM_EXTENT }
 	};
+
+	// The visible ocean "floor" depth; also the miss plane of the water's
+	// underwater raytrace.
+	const BACKDROP_DEPTH = 10;
+
+	// Wet-side receiver shading, shared VERBATIM by the water's raytraced
+	// underwater view and the sphere mesh's submerged branch: one tuning
+	// surface, twins cannot drift. Hosts declare the uniforms (uSunDir,
+	// uLightColor, uLightI, uCausticMap, uCausticCenter, uCausticExtent).
+	// Constant ambient the caustics never touch; diffuse directional along
+	// the REFRACTED sun; beam-space caustic lookup (see caustics.ts).
+	const underwaterShadeGlsl = `
+vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
+	vec3 sunN = normalize(uSunDir);
+	vec3 refrLight = refract(-sunN, vec3(0.0, 1.0, 0.0), 0.7519);
+	float inc = clamp(dot(normal, -refrLight), 0.0, 1.0);
+	float depthLight = exp(-depth * 0.1);
+	vec2 beamXZ = P.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - P.y) / refrLight.y);
+	vec2 cuv = (beamXZ - uCausticCenter) / uCausticExtent + 0.5;
+	float light = 1.0;
+	if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0) {
+		light = texture2D(uCausticMap, cuv).r;
+	}
+	// Heavy overcast: past the map blur's practical radius, the extended
+	// source washes the pattern (and its shadows) toward featureless light.
+	light = mix(light, 1.0, uCausticFlat);
+	// Direct light is shadow-modulated only (min with 1); fold brightness
+	// arrives as the additive term, cosine-weighted to true irradiance.
+	vec3 col = albedo * (0.45 + 0.5 * inc * depthLight * uLightI * min(light, 1.0));
+	col += uLightColor * max(light - 1.0, 0.0) * uLightI * 0.8 * inc * depthLight;
+	return col;
+}`;
 
 	// The wave-equation sim that owns uRippleTex's contents.
 	const rippleSim = new RippleSim();
 
-	// Forward-splat caustic map (pool-style differential area). Caustics
-	// source from the ripple field only; ambient bands stay out per the
-	// noise diagnosis (see caustics.ts for how they could return).
+	// The foam thickness field that owns uFoamTex's contents.
+	const foamField = new FoamField();
+
+	// Forward-splat caustic map (pool-style differential area) over the
+	// full wave surface, blurred by the preset's sun diffusion.
 	const causticMap = new CausticMap();
+	causticMap.diffusion = SUN_DIFFUSION;
 
 	// Click to drop a ripple, pool-style. This is also the embryo of the
 	// casting input: click -> raycast -> water point.
@@ -197,52 +275,149 @@ uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform vec3 uFoamColor;
 uniform vec3 uWaterColor;
-uniform vec3 uSkyColor;
+uniform vec3 uSkyZenith;
+uniform vec3 uSkyHorizon;
 uniform float uAlphaBase;
 uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uSunI;
 uniform vec3 uViewDir;
+uniform vec3 uLightColor;
+uniform float uLightI;
+uniform sampler2D uCausticMap;
+uniform vec2 uCausticCenter;
+uniform float uCausticExtent;
+uniform vec3 uFloorColor;
+uniform vec3 uSphereColor;
+uniform float uSunDiffusion;
+uniform float uCausticFlat;
+uniform float uTime;
 varying vec3 vWorld;
+varying vec2 vRest;
 varying float vViewZ;
 varying float vChurn;
 varying float vRipple;
+
+// Must match the <T.Mesh> sphere placement and caustics.ts uSphereCenter.
+const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
+const float SPHERE_R = 5.0;
+
+uniform mat4 uBuoyInv[3];
+uniform vec3 uBuoyColor;
+// Half extents of buoyGeometry (BoxGeometry 0.5 x 0.9 x 0.5).
+const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
+
+${underwaterShadeGlsl}
+${foamGlsl()}
+
+// Ray vs a buoy's oriented box: slab test in the box's local frame.
+// Returns the entering t (world units, both frames are rigid) or -1;
+// writes the world-space face normal.
+float buoyHit(mat4 inv, vec3 ro, vec3 rd, out vec3 nWorld) {
+	vec3 o = (inv * vec4(ro, 1.0)).xyz;
+	vec3 d = (inv * vec4(rd, 0.0)).xyz;
+	vec3 invD = 1.0 / d;
+	vec3 t0 = (-BUOY_HALF - o) * invD;
+	vec3 t1 = (BUOY_HALF - o) * invD;
+	vec3 tmin3 = min(t0, t1);
+	vec3 tmax3 = max(t0, t1);
+	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
+	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
+	if (tN > tF || tN < 0.0) return -1.0;
+	// The entering face is the axis tN came from; its normal opposes the ray.
+	vec3 nLocal = -sign(d) * step(vec3(tN), tmin3);
+	// Rigid transform: v * mat3(inv) == transpose(mat3(inv)) * v == R * v.
+	nWorld = normalize(nLocal * mat3(inv));
+	return tN;
+}
 
 void main() {
 	vec3 normal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
 	if (normal.y < 0.0) normal = -normal;
 
-	// Pool-style shading: Fresnel decides per facet whether you look INTO
-	// the water (transmitted color) or AT it (reflected sky). Flat-on
-	// facets transmit; tilted ones mirror the sky.
+	// Pool-style view refraction: the underwater scene is drawn BY the
+	// water. Refract the eye ray at this facet's normal, intersect it with
+	// the sphere (floor plane on a miss), and shade the hit with the SAME
+	// shadeUnderwater the sphere mesh uses — so the submerged body sways
+	// and shatters with every wave and ripple, while the dry crown
+	// (rasterized normally above the surface) stays put, pencil-in-water
+	// style.
+	vec3 eye = -uViewDir;
+	vec3 refr = refract(eye, normal, 0.7519);
+	vec3 oc = vWorld - SPHERE_C;
+	float b = dot(oc, refr);
+	float c = dot(oc, oc) - SPHERE_R * SPHERE_R;
+	float disc = b * b - c;
+	float tHit = -1.0;
+	vec3 hitN = vec3(0.0, 1.0, 0.0);
+	vec3 albedo = uSphereColor;
+	if (disc > 0.0) {
+		float th = -b - sqrt(disc);
+		if (th > 0.0) {
+			tHit = th;
+			hitN = normalize(vWorld + refr * th - SPHERE_C);
+		}
+	}
+	// Buoys are in the intersection list too; nearest hit wins.
+	for (int i = 0; i < 3; i++) {
+		vec3 bn;
+		float tb = buoyHit(uBuoyInv[i], vWorld, refr, bn);
+		if (tb > 0.0 && (tHit < 0.0 || tb < tHit)) {
+			tHit = tb;
+			hitN = bn;
+			albedo = uBuoyColor;
+		}
+	}
+	vec3 transmitted;
+	if (tHit > 0.0) {
+		vec3 P = vWorld + refr * tHit;
+		transmitted = shadeUnderwater(P, hitN, albedo, max(vWorld.y - P.y, 0.0));
+	} else {
+		// Same flat shading as the backdrop mesh, which this raytrace has
+		// effectively replaced under the water.
+		transmitted = uFloorColor * (0.1 + 0.32 * uLightI);
+	}
+	// The tint the old translucent layer contributed by alpha blending,
+	// now composed in-shader; uAlphaBase is still the clarity knob.
+	transmitted = mix(transmitted, uWaterColor, uAlphaBase);
+
+	// Wallace-style reflection: reflect the eye ray and sample the SKY in
+	// that direction — the preset's vertical gradient with the sun's glare
+	// living IN the sky — instead of a single flat sky color. His fresnel
+	// too: a substantial base reflectivity rising to 1 at grazing, which
+	// is what makes water read as a mirror at low angles.
 	float facing = clamp(dot(normal, uViewDir), 0.0, 1.0);
-	float fresnel = 0.02 + 0.98 * pow(1.0 - facing, 3.0);
-	vec3 col = mix(uWaterColor, uSkyColor, fresnel);
+	float fresnel = mix(0.25, 1.0, pow(1.0 - facing, 3.0));
+	vec3 reflectedRay = reflect(eye, normal);
+	vec3 skyCol = mix(uSkyHorizon, uSkyZenith, clamp(reflectedRay.y, 0.0, 1.0));
+	// The glare is the sun's mirror image: a diffused (clouded) sun makes
+	// it broader and dimmer, same cause as the caustic blur.
+	float glareExp = mix(350.0, 30.0, uSunDiffusion);
+	float glareGain = 2.0 * (1.0 - 0.85 * uSunDiffusion);
+	skyCol += uSunColor * uSunI * glareGain * pow(max(dot(reflectedRay, normalize(uSunDir)), 0.0), glareExp);
+	vec3 col = mix(transmitted, skyCol, fresnel);
 
-	// Sun sparkle: sharp Blinn specular on facets catching the half vector.
-	vec3 halfVec = normalize(normalize(uSunDir) + uViewDir);
-	float spec = pow(max(dot(normal, halfVec), 0.0), 90.0);
-	col += uSunColor * spec * uSunI;
-
-	float foam = max(vChurn, vRipple);
+	// Whiteness: the active boil (churn/ripple seethe) plus PERSISTENT
+	// foam residue (foam.ts) — patches left behind by the strongest
+	// breaks and by spray landings, dying on their own clock with a
+	// webbing tear-off. No whiteness is slaved to the instantaneous wave
+	// shape: foam that appeared and vanished with each passing peak read
+	// as unmotivated.
+	float foam = max(max(vChurn, vRipple), foamWeb(vRest, foamThicknessAt(vRest)));
 	col = mix(col, uFoamColor, foam);
-
-	// Reflective facets are more opaque (you see the sky, not through);
-	// transmitting facets stay clear for whatever swims below.
-	float alpha = mix(uAlphaBase, 0.96, fresnel);
-	alpha = mix(alpha, 0.97, foam);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
 	col = mix(col, uFogColor, fog);
-	alpha = mix(alpha, 1.0, fog);
 
-	gl_FragColor = vec4(col, alpha);
+	gl_FragColor = vec4(col, 1.0);
 }`;
 
 	const waterMaterial = new THREE.ShaderMaterial({
 		uniforms: waterUniforms,
 		wireframe,
-		transparent: !wireframe,
+		// Solid water is OPAQUE now: it raytraces its own underwater view,
+		// so nothing rasterized below the surface should show through.
+		transparent: false,
 		vertexShader: `
 uniform float uTime;
 uniform float uAmp;
@@ -252,6 +427,7 @@ varying float vJacobian;
 varying float vChurn;
 varying float vRipple;
 varying vec3 vWorld;
+varying vec2 vRest;
 
 ${wavesGlsl()}
 ${whitecapsGlsl()}
@@ -276,6 +452,10 @@ void main() {
 	// ripples stay uncolored.
 	vRipple = max(applyRipples(p, p.xz, uTime), applyFroth(p, p.xz, uTime));
 	vWorld = p;
+	// Rest (material) coordinates for surface-riding decals: foam is
+	// anchored to the WATER, not the world, so it must be sampled in the
+	// frame that sways with the surface.
+	vRest = world.xz;
 	vec4 view = viewMatrix * vec4(p, 1.0);
 	vViewZ = -view.z;
 	gl_Position = projectionMatrix * view;
@@ -324,8 +504,8 @@ void main() {
 	// there is something lit beneath it. It's a depth-colored void, not a
 	// caustic receiver: at 10m under our seas, refracted light is far too
 	// diffuse to pattern it, so caustics render only on OBJECTS below the
-	// surface (the sphere, later fish).
-	const BACKDROP_DEPTH = 10;
+	// surface (the sphere, later fish). BACKDROP_DEPTH is declared up with
+	// the water uniforms, which raytrace to the same plane.
 	const backdropGeometry = new THREE.PlaneGeometry(WATER_SIZE, WATER_SIZE);
 	backdropGeometry.rotateX(-Math.PI / 2);
 	const backdropUniforms = {
@@ -338,19 +518,19 @@ void main() {
 		uSunDir: waterUniforms.uSunDir,
 		uFogColor: waterUniforms.uFogColor,
 		uFogDensity: waterUniforms.uFogDensity,
-		// Backdrop's own: refreshed from the env palette each frame.
-		uFloorColor: { value: new THREE.Color('#0a2e44') },
-		uLightColor: { value: new THREE.Color('#fff2d0') },
-		uLightI: { value: 1.2 },
+		// Shared canonical objects living on waterUniforms (see there): one
+		// write per frame feeds the water raytrace, backdrop and sphere.
+		uFloorColor: waterUniforms.uFloorColor,
+		uLightColor: waterUniforms.uLightColor,
+		uLightI: waterUniforms.uLightI,
 		uDepth: { value: BACKDROP_DEPTH },
-		// Ripple field for caustics (uRippleCTex re-pointed each frame) and
-		// the tuning sphere's sun-projected shadow.
+		// Ripple field texture, re-pointed each frame.
 		uRippleCTex: { value: null as THREE.Texture | null },
 		uRippleCCenter: { value: new THREE.Vector2(0, 0) },
 		uRippleCExtent: { value: RIPPLE_EXTENT },
-		uCausticMap: { value: null as THREE.Texture | null },
-		uCausticCenter: { value: new THREE.Vector2(0, 0) },
-		uCausticExtent: { value: CAUSTIC_EXTENT }
+		uCausticMap: waterUniforms.uCausticMap,
+		uCausticCenter: waterUniforms.uCausticCenter,
+		uCausticExtent: waterUniforms.uCausticExtent
 	};
 	const backdropMaterial = new THREE.ShaderMaterial({
 		uniforms: backdropUniforms,
@@ -403,7 +583,8 @@ void main() {
 		uCausticMap: backdropUniforms.uCausticMap,
 		uCausticCenter: backdropUniforms.uCausticCenter,
 		uCausticExtent: backdropUniforms.uCausticExtent,
-		uSphereColor: { value: new THREE.Color('#8f9ea6') }
+		uSphereColor: waterUniforms.uSphereColor,
+		uCausticFlat: waterUniforms.uCausticFlat
 	};
 	const sphereMaterial = new THREE.ShaderMaterial({
 		uniforms: sphereUniforms,
@@ -429,6 +610,7 @@ uniform vec3 uSphereColor;
 uniform sampler2D uCausticMap;
 uniform vec2 uCausticCenter;
 uniform float uCausticExtent;
+uniform float uCausticFlat;
 uniform float uTime;
 uniform float uAmp;
 varying vec3 vWorld;
@@ -436,6 +618,7 @@ varying vec3 vNormal;
 varying float vViewZ;
 
 ${wavesGlsl()}
+${underwaterShadeGlsl}
 
 void main() {
 	vec3 normal = normalize(vNormal);
@@ -456,39 +639,11 @@ void main() {
 	float wrap = clamp((dot(normal, sun) + 0.4) / 1.4, 0.0, 1.0);
 	vec3 dry = uSphereColor * (0.3 + 0.75 * wrap * uLightI);
 
-	// --- Wet branch, structured like the pool reference: a constant
-	// ambient base the caustics never touch (scattered water light reaches
-	// undersides too), plus a diffuse term that is DIRECTIONAL along the
-	// REFRACTED sun ray — underwater, light arrives along
-	// refract(-sun, up), not from straight above — and only that
-	// directional term is caustic-modulated.
-	float depth = max(waterY - vWorld.y, 0.0);
-	float depthLight = exp(-depth * 0.1);
-	vec3 refrLight = refract(-sun, vec3(0.0, 1.0, 0.0), 0.7519);
-	float inc = clamp(dot(normal, -refrLight), 0.0, 1.0);
-
-	// BEAM-SPACE lookup, as the pool reference: slide this point along the
-	// refracted sun direction to the splat's reference plane and read the
-	// beam's intensity there. Every point at every depth lies on exactly
-	// one beam, so the equator gets its caustics too — the old top-down
-	// landing map starved everything below the upper third and needed a
-	// stack of noise guards; beam space needs none. The map clears to
-	// black = no light, ~1 where flat water passes light through, > 1 in
-	// fold filaments, 0 in the exposed crown's shadow.
-	vec2 beamXZ = vWorld.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - vWorld.y) / refrLight.y);
-	vec2 cuv = (beamXZ - uCausticCenter) / uCausticExtent + 0.5;
-	float light = 1.0;
-	if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0) {
-		light = texture2D(uCausticMap, cuv).r;
-	}
-
-	// Direct light is shadow-modulated only (min with 1): fold brightness
-	// arrives as the additive caustic term, not by washing the diffuse.
-	// The map stores energy per HORIZONTAL area; the inc cosine converts
-	// it to true surface irradiance, so flanks neither blow out nor
-	// over-collect.
-	vec3 wet = uSphereColor * (0.45 + 0.5 * inc * depthLight * uLightI * min(light, 1.0));
-	wet += uLightColor * max(light - 1.0, 0.0) * uLightI * 0.8 * inc * depthLight;
+	// --- Wet branch: shadeUnderwater (shared with the water raytrace, see
+	// its definition for the lighting model). Only reached by fragments
+	// the opaque water surface doesn't cover — i.e. the thin waterline
+	// blend band on an exposed crown.
+	vec3 wet = shadeUnderwater(vWorld, normal, uSphereColor, max(waterY - vWorld.y, 0.0));
 
 	vec3 col = mix(dry, wet, submerged);
 
@@ -515,6 +670,16 @@ void main() {
 		color: '#d95f43',
 		gradientMap: toonGradient
 	});
+
+	// Ballistic spray clumps (spray.ts): one instanced low-poly droplet
+	// mesh, matrices rewritten each frame from the particle pool. Dead
+	// slots collapse to scale 0.
+	const sprayGeometry = new THREE.OctahedronGeometry(1, 0);
+	const sprayMaterial = new THREE.MeshBasicMaterial({ color: '#eef6fc' });
+	const sprayMesh = new THREE.InstancedMesh(sprayGeometry, sprayMaterial, MAX_SPRAY);
+	sprayMesh.frustumCulled = false;
+	sprayMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+	const sprayDummy = new THREE.Object3D();
 
 	// y/vy: vertical state for gravity-limited falling. Buoyancy is instant
 	// upward (rising water carries the float), but when a crest drops away
@@ -588,10 +753,13 @@ void main() {
 				accumulator -= STEP;
 				waveTime += STEP;
 				game.time = (game.time + STEP) % DAY_SECONDS;
-				// Whitecap events and froth drift advance on the fixed step too.
+				// Whitecap events, froth drift, and ballistic spray advance on
+				// the fixed step too (spray after whitecaps: it reads the
+				// freshly scanned break events).
 				setRippleClock(waveTime);
 				updateWhitecaps(STEP, waveTime);
 				updateFroth(STEP, waveTime);
+				updateSpray(STEP, waveTime);
 			}
 
 			const env = computeEnv(game.time / DAY_SECONDS);
@@ -620,6 +788,10 @@ void main() {
 				waterUniforms.uFrothA.value[i].set(f.x, f.z, f.birth, f.sigma);
 				waterUniforms.uFrothB.value[i].set(f.amp, 0, 0, 0);
 			}
+			// One foam-field update (decay + diffusion + drift + queued
+			// deposits), then point the water shader at the fresh side.
+			foamField.step(renderer, wind.x, wind.z);
+			waterUniforms.uFoamTex.value = foamField.texture;
 
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
@@ -695,11 +867,13 @@ void main() {
 						const impact = Math.abs(riseRate - b.vy);
 						if (impact > 1.2) {
 							const amp = Math.min((impact - 1.2) / 3.5, 1);
-							// Two separate effects: the displacement hat (water
-							// pushed aside, wave equation) and the froth burst
-							// (churn that boils in place, froth.ts).
+							// Three separate effects: the displacement hat (water
+							// pushed aside, wave equation), the froth burst
+							// (churn that boils in place, froth.ts), and the
+							// airborne crown (ballistic spray, spray.ts).
 							injectRipple(px, pz, 0.8, 0.12 + amp * 0.35);
 							addFroth(waveTime, px, pz, FROTH_SIGMA, 0.5 + amp * 0.7);
+							emitImpactSpray(waveTime, px, pz, 0, 0, amp);
 						}
 						b.y = waterline;
 						b.vy = 0;
@@ -744,6 +918,13 @@ void main() {
 				buoyNormal.set(b.tx, 1, b.tz).normalize();
 				mesh.quaternion.setFromUnitVectors(UP, buoyNormal);
 
+				// Feed the water's underwater raytrace: box-space transform
+				// from the transform just written (Threlte would compute the
+				// world matrix later in the frame; do it now so the raytraced
+				// half can't lag the rasterized half).
+				mesh.updateMatrixWorld();
+				waterUniforms.uBuoyInv.value[i].copy(mesh.matrixWorld).invert();
+
 				// Directional tip splash: swinging hard means the rim digs
 				// into the water on the side the buoy is rotating toward, so
 				// a small one-sided splash lands off that rim. Throttled and
@@ -760,8 +941,24 @@ void main() {
 					const tip = Math.min((tipSpeed - TIP_SPLASH_THRESHOLD) / 3.5, 1);
 					injectRipple(sideX, sideZ, 0.3, 0.04 + tip * 0.08);
 					addFroth(waveTime, sideX, sideZ, 0.32, 0.15 + tip * 0.35);
+					// The rim digging in flicks water outward on that side.
+					emitImpactSpray(waveTime, sideX, sideZ, b.wx / tipSpeed, b.wz / tipSpeed, tip * 0.5);
 				}
 			}
+
+			// Mirror the spray pool into the instanced mesh.
+			for (let i = 0; i < MAX_SPRAY; i++) {
+				const p = sprayParticles[i];
+				if (p.size === 0) {
+					sprayDummy.scale.setScalar(0);
+				} else {
+					sprayDummy.scale.setScalar(p.size);
+					sprayDummy.position.set(p.x, p.y, p.z);
+				}
+				sprayDummy.updateMatrix();
+				sprayMesh.setMatrixAt(i, sprayDummy.matrix);
+			}
+			sprayMesh.instanceMatrix.needsUpdate = true;
 		},
 		{ autoStart: false }
 	);
@@ -782,8 +979,11 @@ void main() {
 		sphereMaterial.dispose();
 		buoyGeometry.dispose();
 		buoyMaterial.dispose();
+		sprayGeometry.dispose();
+		sprayMaterial.dispose();
 		toonGradient.dispose();
 		rippleSim.dispose();
+		foamField.dispose();
 	});
 </script>
 
@@ -805,6 +1005,8 @@ void main() {
 	position={[0, -BACKDROP_DEPTH, 0]}
 />
 <T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
+
+<T is={sprayMesh} />
 <T.Mesh geometry={waterGeometry} material={waterMaterial} />
 
 {#each buoys as buoy, i (i)}
