@@ -164,12 +164,17 @@ export function computeEnv(phase: number): Env {
 	const t = smoothstep(0, 1, (p - a.phase) / (b.phase - a.phase));
 
 	// Sun travels east to west; the moon takes over on the opposite arc.
+	// The 0.6 southern offset keeps a LOW sun well off the east-west axis:
+	// the isometric camera looks along that axis, and with a small offset
+	// every 45-degree sun was either flat frontal light or backlit. This
+	// way morning/afternoon sun is crosswise — classic lit/shadow modeling
+	// on receivers.
 	const theta = (p - 0.25) * Math.PI * 2;
 	const sunAltitude = Math.sin(theta);
 	const usingSun = sunAltitude > 0;
 	const raw: RGB = usingSun
-		? [Math.cos(theta) * 0.85, sunAltitude, 0.32]
-		: [-Math.cos(theta) * 0.85, -sunAltitude, -0.32];
+		? [Math.cos(theta) * 0.85, sunAltitude, 0.6]
+		: [-Math.cos(theta) * 0.85, -sunAltitude, -0.6];
 	const len = Math.hypot(raw[0], raw[1], raw[2]);
 	const lightDir: RGB = [raw[0] / len, raw[1] / len, raw[2] / len];
 

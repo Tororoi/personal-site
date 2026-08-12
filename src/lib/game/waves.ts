@@ -94,8 +94,8 @@ export type WaveFieldConfig = {
     displayGain?: number
     /** 0..1: fraction of ripple energy rendered as seethe distortion. */
     churn?: number
-    /** Wave-equation step scale; higher = faster spreading. */
-    propagation?: number
+    /** Physical ripple propagation speed, m/s (resolution-independent). */
+    speed?: number
     /** Per-step energy retention; lower = rings die faster. */
     damping?: number
     /** Splash-froth seethe displacement, meters (consumed by froth.ts). */
@@ -104,6 +104,19 @@ export type WaveFieldConfig = {
     frothWhiteness?: number
     /** Splashdown froth burst radius, meters (consumed by froth.ts). */
     frothSigma?: number
+  }
+  /**
+   * Sub-pixel capillary ripples for caustics: too small to move a pixel at
+   * our zoom, so they are computed only where they are observable, in the
+   * caustic Hessian (causticsGlsl). Real pools dapple finely because
+   * centimeter-scale ripples are the strong lenses.
+   */
+  capillary?: {
+    count?: number
+    minLambda?: number
+    maxLambda?: number
+    /** Wave slope (amp * k); sets capillary energy. */
+    slope?: number
   }
   bands: WaveBand[]
 }
@@ -123,7 +136,7 @@ export const SEA_PRESETS = {
     ripples: {
       displayGain: 3.2,
       churn: 0.35,
-      propagation: 0.14,
+      speed: 1.5,
       damping: 0.993,
     },
     bands: [
@@ -188,7 +201,7 @@ export const SEA_PRESETS = {
     timeScale: 1,
     // Clean water: smooth rings, no froth. These are the signed-off
     // calm-water interaction settings.
-    ripples: { displayGain: 3.5, churn: 0, propagation: 0.04, damping: 0.96 },
+    ripples: { displayGain: 3.5, churn: 0, speed: 1.2, damping: 0.96 },
     bands: [
       // One long, low swell rolling through.
       {
@@ -196,7 +209,7 @@ export const SEA_PRESETS = {
         minLambda: 40,
         maxLambda: 50,
         heading: 0,
-        spread: 0.12,
+        spread: 1.52,
         slope: 0.008,
         speed: 0.7,
       },
@@ -206,7 +219,7 @@ export const SEA_PRESETS = {
         minLambda: 10,
         maxLambda: 18,
         heading: 0.2,
-        spread: 0.5,
+        spread: 1.5,
         slope: 0.009,
         speed: 1.2,
       },
@@ -247,7 +260,7 @@ export const SEA_PRESETS = {
     ripples: {
       displayGain: 1.6,
       churn: 0,
-      propagation: 0.05,
+      speed: 2.2,
       damping: 0.96,
     },
     bands: [
@@ -382,6 +395,46 @@ export const significantAmplitude = Math.sqrt(
   waves.reduce((s, w) => s + w.amp * w.amp, 0),
 )
 
+const CAPILLARY_DEFAULTS = {
+  count: 5,
+  // True pool scale: curvature A*k^2 ~ 2 gives a focal depth ~1.5m, so
+  // caustics are fully formed just below the surface like the reference.
+  minLambda: 0.25,
+  maxLambda: 0.8,
+  slope: 0.022,
+}
+
+/** Caustic-only capillary band; see the `capillary` config doc above. */
+const capillaries = (() => {
+  const cfg = { ...CAPILLARY_DEFAULTS, ...(activeField.capillary ?? {}) }
+  const rand = mulberry32(activeField.seed + 101)
+  const out: {
+    dirX: number
+    dirZ: number
+    k: number
+    omega: number
+    /** amp * k^2: this wave's curvature (lens strength). */
+    ak2: number
+    phase: number
+  }[] = []
+  for (let i = 0; i < cfg.count; i++) {
+    const f = (i + 0.3 + rand() * 0.4) / cfg.count
+    const lambda = cfg.minLambda * Math.pow(cfg.maxLambda / cfg.minLambda, f)
+    const k = (2 * Math.PI) / lambda
+    const angle = rand() * Math.PI * 2 // near-isotropic: capillaries scatter
+    const amp = ((cfg.slope * lambda) / (2 * Math.PI)) * (0.75 + rand() * 0.5)
+    out.push({
+      dirX: Math.cos(angle),
+      dirZ: Math.sin(angle),
+      k,
+      omega: Math.sqrt(G * k),
+      ak2: amp * k * k,
+      phase: rand() * Math.PI * 2,
+    })
+  }
+  return out
+})()
+
 // ---------- CPU twin ----------
 
 export type SurfaceSample = {
@@ -514,5 +567,91 @@ float waveJacobian(vec2 p, float t, float ampScale) {
 		jxz -= qak * a.x * a.y * s;
 	}
 	return jxx * jzz - jxz * jxz;
+}`
+}
+
+/**
+ * Caustics from the real surface, for anything underwater (the backdrop,
+ * the tuning sphere, eventually fish backs). Follow the sun ray from an
+ * underwater point up to the surface and ask the Jacobian how much the
+ * surface CONVERGES there: converging surface focuses light.
+ *
+ * Physically corrected for sea state: rough water scatters light, so
+ * contrast falls with the sea's significant amplitude, and dies further
+ * with depth. A storm therefore shows FAINT smeared dapples while calm
+ * water shows crisp ones, not the other way around.
+ *
+ * Requires wavesGlsl() earlier in the same shader (uses waveJacobian).
+ */
+export function causticsGlsl(): string {
+  const seaScatter = (1 / (1 + significantAmplitude * 1.2)).toFixed(3)
+  const f = (n: number) => n.toFixed(6)
+  // Baked capillary Hessian terms (static per preset).
+  const capLines = capillaries
+    .map(
+      (c) =>
+        `\ttheta = (p.x * ${f(c.dirX)} + p.y * ${f(c.dirZ)}) * ${f(c.k)} - ${f(c.omega)} * t + ${f(c.phase)};\n` +
+        `\tcs = sin(theta) * ${f(c.ak2)};\n` +
+        `\thxx -= cs * ${f(c.dirX * c.dirX)}; hzz -= cs * ${f(c.dirZ * c.dirZ)}; hxz -= cs * ${f(c.dirX * c.dirZ)};`,
+    )
+    .join('\n')
+  return `
+// Refractive caustics, faithful to the pool reference: light bends through
+// the surface by its normal; the floor-mapping's area change is
+// det(I + depth * eta * H) with H the height field's HESSIAN (curvature).
+// Curvature per wave is A*k^2, so fine ripples dominate BY PHYSICS.
+// Composable: consumers accumulate Hessian terms from the ambient field
+// (here) and the interactive ripple texture (rippleCausticGlsl), then
+// shade the combined curvature, so buoy rings and splashes bend light
+// exactly like the pool's drop rings do.
+
+vec2 causticEntry(vec2 pointXZ, float depth, vec3 sunDir) {
+	vec3 sun = normalize(sunDir);
+	return pointXZ + (sun.xz / max(sun.y, 0.25)) * depth;
+}
+
+void ambientCausticHessian(vec2 p, float t, float ampScale,
+	inout float hxx, inout float hzz, inout float hxz) {
+	float theta;
+	float cs;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 a = uWaveA[i];
+		vec3 b = uWaveB[i];
+		theta = (p.x * a.x + p.y * a.y) * a.z - a.w * t + b.z;
+		cs = sin(theta) * (b.x * ampScale * a.z * a.z);
+		hxx -= cs * a.x * a.x;
+		hzz -= cs * a.y * a.y;
+		hxz -= cs * a.x * a.y;
+	}
+${capLines}
+}
+
+float causticShade(float hxx, float hzz, float hxz, float depth) {
+	float bend = depth * 0.25; // refraction lever arm, eta ~ 1 - 1/1.33
+	// det(I - bend * H): the Jacobian of the refracted surface-to-receiver
+	// map (rays bend DOWN the gradient), consistent with refractedEntry.
+	float det = (1.0 - bend * hxx) * (1.0 - bend * hzz) - bend * bend * hxz * hxz;
+	// abs(det): past the focal distance rays have CROSSED; the pattern
+	// stays bright near every fold rather than exploding once and pegging.
+	// The high clamp keeps razor filaments as lines, not plateaus.
+	float focus = clamp(1.0 / max(abs(det), 0.05) - 1.0, -0.85, 8.0);
+	// Pixel-integrated fold diffusion: deep below the focal distance the
+	// folds are denser than a pixel, and the true pixel-average washes
+	// toward a soft glow. fwidth(det) measures exactly that in-pixel
+	// churn, so this one term is BOTH the anti-aliasing and the physical
+	// post-focal blur (deeper = dimmer, like the pool floor), and it is
+	// resolution-adaptive by construction. Near-focal filaments where det
+	// is smooth pass through untouched.
+	focus /= 1.0 + fwidth(det) * 60.0;
+	return focus * ${seaScatter};
+}
+
+float causticAt(vec2 pointXZ, float depth, vec3 sunDir, float t, float ampScale) {
+	vec2 p = causticEntry(pointXZ, depth, sunDir);
+	float hxx = 0.0;
+	float hzz = 0.0;
+	float hxz = 0.0;
+	ambientCausticHessian(p, t, ampScale, hxx, hzz, hxz);
+	return causticShade(hxx, hzz, hxz, depth);
 }`
 }

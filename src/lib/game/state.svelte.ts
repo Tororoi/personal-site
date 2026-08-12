@@ -7,7 +7,13 @@ import { DAY_SECONDS } from './env';
  * into their bundles.
  */
 export const game = $state({
-	/** Seconds into the 24-minute day. Starts mid-morning. */
-	time: DAY_SECONDS * 0.34,
+	/**
+	 * Seconds into the 24-minute day. Starts mid-afternoon with the sun 45
+	 * degrees above the horizon in the south-west (phase 0.604 on the env
+	 * sun arc): crosswise to the isometric camera's view axis, so
+	 * receivers show classic lit/shadow modeling. Phase 0.396 is the
+	 * mirrored morning pose.
+	 */
+	time: DAY_SECONDS * 0.604,
 	running: true
 });

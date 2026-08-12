@@ -26,8 +26,14 @@ import * as THREE from 'three'
 import { activeField } from './waves'
 
 export const RIPPLE_RESOLUTION = 1024
-/** Meters of world covered by the domain; cell = extent / resolution. */
-export const RIPPLE_EXTENT = 300
+/**
+ * Meters of world covered by the domain. The domain must cover the SCENE
+ * (the pool reference's domain covers its whole scene; that is the parity
+ * that matters, not absolute cell size). At 100m / 1024 the cells are
+ * ~0.1m, ~2.5 screen pixels at zoom 26: the same cells-per-pixel regime as
+ * the reference. Sub-pixel cells would be waste.
+ */
+export const RIPPLE_EXTENT = 100
 
 /**
  * Calm-water defaults; sea presets override via their `ripples` block (see
@@ -40,10 +46,23 @@ export const RIPPLE_EXTENT = 300
 const SETTINGS = {
   displayGain: 3.5,
   churn: 0,
-  propagation: 0.04,
+  /** Physical ripple propagation speed, m/s. */
+  speed: 1.5,
   damping: 0.9955,
   ...activeField.ripples,
 }
+
+/**
+ * The wave-equation step constant, DERIVED from the physical speed and the
+ * cell size (honest meters: presets state m/s and never need retuning when
+ * resolution or extent change). c = sqrt(P/2) cells/step, so
+ * P = 2 (c dt / cell)^2, clamped at 0.5 for stability; speeds above ~
+ * cell/dt * 0.5 are unreachable at this resolution and get clamped.
+ */
+const PROPAGATION = Math.min(
+  2 * ((SETTINGS.speed / 60 / (RIPPLE_EXTENT / RIPPLE_RESOLUTION)) ** 2),
+  0.5,
+)
 /** Seethe displacement for churned lifted water, meters. */
 const LIFT_SEETHE_AMPLITUDE = 0.26
 
@@ -54,18 +73,62 @@ type Injection = { x: number; z: number; radius: number; strength: number }
 const pending: Injection[] = []
 
 /**
+ * Live disturbance regions, for consumers that only want to work where
+ * ripples exist (the caustic splat culls to these). A disturbance's reach
+ * is its expanding ring front: speed * age, plus a margin. Lifetime comes
+ * from the preset's damping (time to decay to ~3%).
+ */
+const activity: { x: number; z: number; birth: number }[] = []
+const ACTIVITY_TTL = Math.log(0.03) / Math.log(SETTINGS.damping) / 60
+
+export function activeRegions(t: number): { x: number; z: number; r: number }[] {
+  for (let i = activity.length - 1; i >= 0; i--) {
+    if (t - activity[i].birth > ACTIVITY_TTL) activity.splice(i, 1)
+  }
+  return activity.map((a) => ({
+    x: a.x,
+    z: a.z,
+    r: SETTINGS.speed * (t - a.birth) + 2.5,
+  }))
+}
+
+/** Called by injectRipple; exported for future non-ripple disturbances. */
+export function noteActivity(t: number, x: number, z: number) {
+  // Self-prune so the list stays healthy even if activeRegions is unused.
+  for (let i = activity.length - 1; i >= 0; i--) {
+    if (t - activity[i].birth > ACTIVITY_TTL) activity.splice(i, 1)
+  }
+  // Merge with a recent nearby entry so continuous agitation (a bobbing
+  // buoy) holds one region instead of spawning one per frame.
+  for (const a of activity) {
+    const dx = a.x - x
+    const dz = a.z - z
+    if (dx * dx + dz * dz < 4 && t - a.birth < 0.5) return
+  }
+  if (activity.length < 48) activity.push({ x, z, birth: t })
+}
+
+/**
  * Disturb the water at world (x, z): a displacement "hat" of `strength`
  * meters (down at center, crown around), which the wave equation evolves.
  * For the non-propagating burst of splash churn, see froth.ts.
  */
+let rippleClock = 0
+/** Called once per fixed step by the Scene so injections can be dated. */
+export function setRippleClock(t: number) {
+  rippleClock = t
+}
+
 export function injectRipple(
   x: number,
   z: number,
   radius: number,
   strength: number,
 ) {
-  if (pending.length < 64 && strength !== 0)
+  if (pending.length < 64 && strength !== 0) {
     pending.push({ x, z, radius, strength })
+    noteActivity(rippleClock, x, z)
+  }
 }
 
 // Debug hook: poke the water from the console, e.g. injectRipple(0, 0, 1, 0.4).
@@ -92,14 +155,19 @@ varying vec2 vUv;
 
 void main() {
 	vec2 hv = texture2D(uPrev, vUv).xy;
-	float sum =
-		texture2D(uPrev, vUv + vec2(uTexel, 0.0)).x +
-		texture2D(uPrev, vUv - vec2(uTexel, 0.0)).x +
-		texture2D(uPrev, vUv + vec2(0.0, uTexel)).x +
-		texture2D(uPrev, vUv - vec2(0.0, uTexel)).x;
+	float hr = texture2D(uPrev, vUv + vec2(uTexel, 0.0)).x;
+	float hl = texture2D(uPrev, vUv - vec2(uTexel, 0.0)).x;
+	float hu = texture2D(uPrev, vUv + vec2(0.0, uTexel)).x;
+	float hd = texture2D(uPrev, vUv - vec2(0.0, uTexel)).x;
+	float sum = hr + hl + hu + hd;
 	float v = hv.y + (sum * 0.25 - hv.x) * uPropagation;
 	v *= uDamping;
 	float h = hv.x + v;
+	// The gradient rides free in zw: these neighbor fetches already
+	// happened, and consumers (the caustic splat) then need ONE fetch per
+	// sample instead of five.
+	float cell = uExtent * uTexel;
+	vec2 grad = vec2(hr - hl, hu - hd) / (2.0 * cell);
 
 	vec2 world = (vUv - 0.5) * uExtent + uCenter;
 	for (int i = 0; i < ${MAX_INJECT}; i++) {
@@ -126,7 +194,7 @@ void main() {
 	h *= mix(0.9, 1.0, edge);
 	v *= mix(0.9, 1.0, edge);
 
-	gl_FragColor = vec4(h, v, 0.0, 1.0);
+	gl_FragColor = vec4(h, v, grad.x, grad.y);
 }`
 
 export class RippleSim {
@@ -152,7 +220,7 @@ export class RippleSim {
       uniforms: {
         uPrev: { value: this.targets[0].texture },
         uTexel: { value: 1 / RIPPLE_RESOLUTION },
-        uPropagation: { value: SETTINGS.propagation },
+        uPropagation: { value: PROPAGATION },
         uDamping: { value: SETTINGS.damping },
         uCenter: { value: new THREE.Vector2(0, 0) },
         uExtent: { value: RIPPLE_EXTENT },
@@ -226,5 +294,69 @@ float applyRipples(inout vec3 p, vec2 worldXZ, float t) {
 		p += vec3(n1 * 0.55, 0.45 + abs(n2), n2 * 0.55) * (${LIFT_SEETHE_AMPLITUDE.toFixed(2)} * seethe);
 	}
 	return seethe;
+}`
+}
+
+/**
+ * The ripple field's contribution to caustics: the finite-difference
+ * Hessian of the interactive heightfield, added into the same curvature
+ * accumulator as the ambient waves. This is what makes buoy rings, wakes
+ * and splashes bend light on the floor below, exactly like the pool
+ * reference's drop rings. Uses the PHYSICAL field (no display gain).
+ * Standalone uniforms: safe to include without ripplesGlsl().
+ */
+export function rippleCausticGlsl(): string {
+  const texel = (1 / RIPPLE_RESOLUTION).toFixed(6)
+  return `
+uniform sampler2D uRippleCTex;
+uniform vec2 uRippleCCenter;
+uniform float uRippleCExtent;
+
+// Gradient of the ripple field (central differences), for the refractive
+// entry-point solve.
+vec2 rippleGrad(vec2 worldXZ) {
+	vec2 ruv = (worldXZ - uRippleCCenter) / uRippleCExtent + 0.5;
+	if (ruv.x <= 0.02 || ruv.x >= 0.98 || ruv.y <= 0.02 || ruv.y >= 0.98) return vec2(0.0);
+	float e = uRippleCExtent * ${texel};
+	vec2 tx = vec2(${texel}, 0.0);
+	vec2 ty = vec2(0.0, ${texel});
+	return vec2(
+		texture2D(uRippleCTex, ruv + tx).x - texture2D(uRippleCTex, ruv - tx).x,
+		texture2D(uRippleCTex, ruv + ty).x - texture2D(uRippleCTex, ruv - ty).x
+	) / (2.0 * e);
+}
+
+// Refraction makes caustic GEOMETRY depth-dependent: the surface point
+// whose bent ray lands at your point is displaced by bend * grad(h),
+// solved by fixed-point iteration (same trick as the CPU Gerstner
+// sampler). Rings genuinely converge toward focus and invert past it,
+// instead of projecting straight down unchanged at every depth.
+vec2 refractedEntry(vec2 entry0, float bend) {
+	vec2 s = entry0;
+	for (int i = 0; i < 3; i++) {
+		s = entry0 + bend * rippleGrad(s);
+	}
+	return s;
+}
+
+void rippleHessian(vec2 worldXZ, inout float hxx, inout float hzz, inout float hxz) {
+	vec2 ruv = (worldXZ - uRippleCCenter) / uRippleCExtent + 0.5;
+	if (ruv.x <= 0.02 || ruv.x >= 0.98 || ruv.y <= 0.02 || ruv.y >= 0.98) return;
+	float e = uRippleCExtent * ${texel}; // texel size in meters
+	vec2 tx = vec2(${texel}, 0.0);
+	vec2 ty = vec2(0.0, ${texel});
+	float hc = texture2D(uRippleCTex, ruv).x;
+	float hr = texture2D(uRippleCTex, ruv + tx).x;
+	float hl = texture2D(uRippleCTex, ruv - tx).x;
+	float hu = texture2D(uRippleCTex, ruv + ty).x;
+	float hd = texture2D(uRippleCTex, ruv - ty).x;
+	float hru = texture2D(uRippleCTex, ruv + tx + ty).x;
+	float hrd = texture2D(uRippleCTex, ruv + tx - ty).x;
+	float hlu = texture2D(uRippleCTex, ruv - tx + ty).x;
+	float hld = texture2D(uRippleCTex, ruv - tx - ty).x;
+	float inv = 1.0 / (e * e);
+	hxx += (hr + hl - 2.0 * hc) * inv;
+	hzz += (hu + hd - 2.0 * hc) * inv;
+	hxz += (hru - hrd - hlu + hld) * 0.25 * inv;
 }`
 }

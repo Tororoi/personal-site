@@ -2,7 +2,7 @@
 	import * as THREE from 'three';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { onDestroy } from 'svelte';
-	import { waves, wavesGlsl } from './waves';
+	import { causticsGlsl, waves, wavesGlsl } from './waves';
 	import {
 		events,
 		MAX_EVENTS,
@@ -12,19 +12,26 @@
 		windTravel,
 		windVector
 	} from './whitecaps';
-	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl } from './ripples';
+	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
+	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
 	import { addFroth, FROTH_SIGMA, frothBlobs, frothGlsl, MAX_FROTH, updateFroth } from './froth';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
 	let { active = true }: { active?: boolean } = $props();
 
-	const { scene, renderer } = useThrelte();
+	const { scene, renderer, camera } = useThrelte();
 
 	const mobile = window.innerWidth < 720;
 	// The signed-off wireframe tuning view is one URL away: /?wire (composes
 	// with ?sea= and ?tod=). Default is now the solid translucent render.
-	const wireframe = new URLSearchParams(window.location.search).has('wire');
+	const urlParams = new URLSearchParams(window.location.search);
+	const wireframe = urlParams.has('wire');
+	// ?tod=0..1 sets the day phase at load (0.25 sunrise, 0.396 = 45 deg
+	// sun in the south-east, 0.5 noon, 0.604 = 45 deg sun in the
+	// south-west [crosswise side light, the default], 0.75 sunset).
+	const todParam = urlParams.get('tod');
+	if (todParam !== null) game.time = DAY_SECONDS * parseFloat(todParam);
 	const zoom = mobile ? 18 : 26;
 	// The plane is sized from THIS window's actual ground footprint: ortho
 	// zoom is fixed pixels-per-meter, so a bigger window sees more ocean.
@@ -141,7 +148,10 @@
 		// catch the sky and sparkle.
 		uWaterColor: { value: new THREE.Color('#1a5876') },
 		uSkyColor: { value: new THREE.Color('#a8c8d8') },
-		uAlphaBase: { value: 0.78 },
+		// CLARITY PINNED HIGH for caustic tuning: nearly transparent surface
+		// so the underwater scene reads unobstructed. Restore toward ~0.78
+		// when clarity becomes a weather/preset property.
+		uAlphaBase: { value: 0.3 },
 		// Live sun from the day/night cycle, updated per frame.
 		uSunDir: { value: new THREE.Vector3(0.4, 1, 0.3) },
 		uSunColor: { value: new THREE.Color('#fff2d0') },
@@ -152,6 +162,32 @@
 
 	// The wave-equation sim that owns uRippleTex's contents.
 	const rippleSim = new RippleSim();
+
+	// Forward-splat caustic map (pool-style differential area). Caustics
+	// source from the ripple field only; ambient bands stay out per the
+	// noise diagnosis (see caustics.ts for how they could return).
+	const causticMap = new CausticMap();
+
+	// Click to drop a ripple, pool-style. This is also the embryo of the
+	// casting input: click -> raycast -> water point.
+	const raycaster = new THREE.Raycaster();
+	const clickNdc = new THREE.Vector2();
+	const waterPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+	const clickPoint = new THREE.Vector3();
+	function onPointerDown(event: PointerEvent) {
+		const rect = renderer.domElement.getBoundingClientRect();
+		clickNdc.set(
+			((event.clientX - rect.left) / rect.width) * 2 - 1,
+			-((event.clientY - rect.top) / rect.height) * 2 + 1
+		);
+		const cam = camera.current;
+		if (!cam) return;
+		raycaster.setFromCamera(clickNdc, cam);
+		if (raycaster.ray.intersectPlane(waterPlane, clickPoint)) {
+			injectRipple(clickPoint.x, clickPoint.z, 0.25, 0.2);
+		}
+	}
+	renderer.domElement.addEventListener('pointerdown', onPointerDown);
 
 	// The wireframe fragment is the tuning instrument; the solid fragment
 	// is the first step toward the real look: translucent water whose
@@ -281,6 +317,187 @@ void main() {
 	});
 	if (!wireframe) waterMaterial.fragmentShader = solidFragment;
 
+	// ---------- Underwater backdrop ----------
+	// The "floor" of the visible ocean: an opaque plane a few meters down.
+	// The surface's transparency reveals it the way the pool reference
+	// reveals its tiles: calm clear water finally reads as WATER because
+	// there is something lit beneath it. It's a depth-colored void, not a
+	// caustic receiver: at 10m under our seas, refracted light is far too
+	// diffuse to pattern it, so caustics render only on OBJECTS below the
+	// surface (the sphere, later fish).
+	const BACKDROP_DEPTH = 10;
+	const backdropGeometry = new THREE.PlaneGeometry(WATER_SIZE, WATER_SIZE);
+	backdropGeometry.rotateX(-Math.PI / 2);
+	const backdropUniforms = {
+		// Shared uniform OBJECTS with the water material: one write per
+		// frame updates both shaders.
+		uTime: waterUniforms.uTime,
+		uAmp: waterUniforms.uAmp,
+		uWaveA: waterUniforms.uWaveA,
+		uWaveB: waterUniforms.uWaveB,
+		uSunDir: waterUniforms.uSunDir,
+		uFogColor: waterUniforms.uFogColor,
+		uFogDensity: waterUniforms.uFogDensity,
+		// Backdrop's own: refreshed from the env palette each frame.
+		uFloorColor: { value: new THREE.Color('#0a2e44') },
+		uLightColor: { value: new THREE.Color('#fff2d0') },
+		uLightI: { value: 1.2 },
+		uDepth: { value: BACKDROP_DEPTH },
+		// Ripple field for caustics (uRippleCTex re-pointed each frame) and
+		// the tuning sphere's sun-projected shadow.
+		uRippleCTex: { value: null as THREE.Texture | null },
+		uRippleCCenter: { value: new THREE.Vector2(0, 0) },
+		uRippleCExtent: { value: RIPPLE_EXTENT },
+		uCausticMap: { value: null as THREE.Texture | null },
+		uCausticCenter: { value: new THREE.Vector2(0, 0) },
+		uCausticExtent: { value: CAUSTIC_EXTENT }
+	};
+	const backdropMaterial = new THREE.ShaderMaterial({
+		uniforms: backdropUniforms,
+		vertexShader: `
+varying vec3 vWorld;
+varying float vViewZ;
+void main() {
+	vec4 world = modelMatrix * vec4(position, 1.0);
+	vWorld = world.xyz;
+	vec4 view = viewMatrix * world;
+	vViewZ = -view.z;
+	gl_Position = projectionMatrix * view;
+}`,
+		fragmentShader: `
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform vec3 uFloorColor;
+uniform float uLightI;
+varying vec3 vWorld;
+varying float vViewZ;
+
+void main() {
+	vec3 col = uFloorColor * (0.1 + 0.32 * uLightI);
+
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	col = mix(col, uFogColor, fog);
+	gl_FragColor = vec4(col, 1.0);
+}`
+	});
+
+	// Caustic tuning prop: a large pale sphere under the water. Its
+	// curvature, sun-facing shading and depth gradient are what make
+	// caustics read as LIGHT striking a surface instead of a flat pattern.
+	// Stand-in for the fish/whale-shark backs that will receive the same
+	// causticAt() term.
+	const sphereGeometry = new THREE.SphereGeometry(5, 64, 48);
+	const sphereUniforms = {
+		uTime: waterUniforms.uTime,
+		uAmp: waterUniforms.uAmp,
+		uWaveA: waterUniforms.uWaveA,
+		uWaveB: waterUniforms.uWaveB,
+		uSunDir: waterUniforms.uSunDir,
+		uFogColor: waterUniforms.uFogColor,
+		uFogDensity: waterUniforms.uFogDensity,
+		uLightColor: backdropUniforms.uLightColor,
+		uLightI: backdropUniforms.uLightI,
+		uRippleCTex: backdropUniforms.uRippleCTex,
+		uRippleCCenter: backdropUniforms.uRippleCCenter,
+		uRippleCExtent: backdropUniforms.uRippleCExtent,
+		uCausticMap: backdropUniforms.uCausticMap,
+		uCausticCenter: backdropUniforms.uCausticCenter,
+		uCausticExtent: backdropUniforms.uCausticExtent,
+		uSphereColor: { value: new THREE.Color('#8f9ea6') }
+	};
+	const sphereMaterial = new THREE.ShaderMaterial({
+		uniforms: sphereUniforms,
+		vertexShader: `
+varying vec3 vWorld;
+varying vec3 vNormal;
+varying float vViewZ;
+void main() {
+	vec4 world = modelMatrix * vec4(position, 1.0);
+	vWorld = world.xyz;
+	vNormal = mat3(modelMatrix) * normal;
+	vec4 view = viewMatrix * world;
+	vViewZ = -view.z;
+	gl_Position = projectionMatrix * view;
+}`,
+		fragmentShader: `
+uniform vec3 uSunDir;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform vec3 uLightColor;
+uniform float uLightI;
+uniform vec3 uSphereColor;
+uniform sampler2D uCausticMap;
+uniform vec2 uCausticCenter;
+uniform float uCausticExtent;
+uniform float uTime;
+uniform float uAmp;
+varying vec3 vWorld;
+varying vec3 vNormal;
+varying float vViewZ;
+
+${wavesGlsl()}
+
+void main() {
+	vec3 normal = normalize(vNormal);
+	vec3 sun = normalize(uSunDir);
+
+	// The ACTUAL water surface above this fragment, not the resting plane:
+	// one fixed-point step undoes the Gerstner horizontal sway, same
+	// inversion the CPU sampler uses. A crown standing proud of a storm
+	// trough is genuinely DRY: lit by direct sun, no caustics, no depth
+	// dimming.
+	vec3 D = waveDisplacement(vWorld.xz, uTime, uAmp);
+	D = waveDisplacement(vWorld.xz - D.xz, uTime, uAmp);
+	float waterY = D.y;
+	float submerged = clamp((waterY - vWorld.y) / 0.35 + 0.5, 0.0, 1.0);
+
+	// --- Dry branch: direct sun with soft wrap so the terminator doesn't
+	// slice a hard line across the crown.
+	float wrap = clamp((dot(normal, sun) + 0.4) / 1.4, 0.0, 1.0);
+	vec3 dry = uSphereColor * (0.3 + 0.75 * wrap * uLightI);
+
+	// --- Wet branch, structured like the pool reference: a constant
+	// ambient base the caustics never touch (scattered water light reaches
+	// undersides too), plus a diffuse term that is DIRECTIONAL along the
+	// REFRACTED sun ray — underwater, light arrives along
+	// refract(-sun, up), not from straight above — and only that
+	// directional term is caustic-modulated.
+	float depth = max(waterY - vWorld.y, 0.0);
+	float depthLight = exp(-depth * 0.1);
+	vec3 refrLight = refract(-sun, vec3(0.0, 1.0, 0.0), 0.7519);
+	float inc = clamp(dot(normal, -refrLight), 0.0, 1.0);
+
+	// BEAM-SPACE lookup, as the pool reference: slide this point along the
+	// refracted sun direction to the splat's reference plane and read the
+	// beam's intensity there. Every point at every depth lies on exactly
+	// one beam, so the equator gets its caustics too — the old top-down
+	// landing map starved everything below the upper third and needed a
+	// stack of noise guards; beam space needs none. The map clears to
+	// black = no light, ~1 where flat water passes light through, > 1 in
+	// fold filaments, 0 in the exposed crown's shadow.
+	vec2 beamXZ = vWorld.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - vWorld.y) / refrLight.y);
+	vec2 cuv = (beamXZ - uCausticCenter) / uCausticExtent + 0.5;
+	float light = 1.0;
+	if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0) {
+		light = texture2D(uCausticMap, cuv).r;
+	}
+
+	// Direct light is shadow-modulated only (min with 1): fold brightness
+	// arrives as the additive caustic term, not by washing the diffuse.
+	// The map stores energy per HORIZONTAL area; the inc cosine converts
+	// it to true surface irradiance, so flanks neither blow out nor
+	// over-collect.
+	vec3 wet = uSphereColor * (0.45 + 0.5 * inc * depthLight * uLightI * min(light, 1.0));
+	wet += uLightColor * max(light - 1.0, 0.0) * uLightI * 0.8 * inc * depthLight;
+
+	vec3 col = mix(dry, wet, submerged);
+
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	col = mix(col, uFogColor, fog);
+	gl_FragColor = vec4(col, 1.0);
+}`
+	});
+
 	// ---------- Placeholder floaters (prove the CPU sampler matches the GPU) ----------
 
 	const toonGradient = new THREE.DataTexture(
@@ -372,6 +589,7 @@ void main() {
 				waveTime += STEP;
 				game.time = (game.time + STEP) % DAY_SECONDS;
 				// Whitecap events and froth drift advance on the fixed step too.
+				setRippleClock(waveTime);
 				updateWhitecaps(STEP, waveTime);
 				updateFroth(STEP, waveTime);
 			}
@@ -394,6 +612,9 @@ void main() {
 			// freshly written side of the ping-pong pair.
 			rippleSim.step(renderer);
 			waterUniforms.uRippleTex.value = rippleSim.texture;
+			backdropUniforms.uRippleCTex.value = rippleSim.texture;
+			causticMap.step(renderer, rippleSim.texture, waterUniforms.uSunDir.value, waveTime);
+			backdropUniforms.uCausticMap.value = causticMap.texture;
 			for (let i = 0; i < MAX_FROTH; i++) {
 				const f = frothBlobs[i];
 				waterUniforms.uFrothA.value[i].set(f.x, f.z, f.birth, f.sigma);
@@ -403,6 +624,13 @@ void main() {
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
 			waterUniforms.uSunI.value = env.lightIntensity;
+			backdropUniforms.uFloorColor.value.setRGB(
+				env.waterDeep[0],
+				env.waterDeep[1],
+				env.waterDeep[2]
+			);
+			backdropUniforms.uLightColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
+			backdropUniforms.uLightI.value = env.lightIntensity;
 			if (sun) {
 				sun.position.set(env.lightDir[0] * 80, env.lightDir[1] * 80, env.lightDir[2] * 80);
 				sun.color.setRGB(env.light[0], env.light[1], env.light[2], THREE.SRGBColorSpace);
@@ -544,8 +772,14 @@ void main() {
 	});
 
 	onDestroy(() => {
+		renderer.domElement.removeEventListener('pointerdown', onPointerDown);
 		waterGeometry.dispose();
 		waterMaterial.dispose();
+		backdropGeometry.dispose();
+		backdropMaterial.dispose();
+		causticMap.dispose();
+		sphereGeometry.dispose();
+		sphereMaterial.dispose();
 		buoyGeometry.dispose();
 		buoyMaterial.dispose();
 		toonGradient.dispose();
@@ -565,6 +799,12 @@ void main() {
 <T.DirectionalLight bind:ref={sun} position={[40, 60, 20]} intensity={env0.lightIntensity * 2} />
 <T.AmbientLight bind:ref={ambient} intensity={env0.ambientIntensity * 1.6} />
 
+<T.Mesh
+	geometry={backdropGeometry}
+	material={backdropMaterial}
+	position={[0, -BACKDROP_DEPTH, 0]}
+/>
+<T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
 <T.Mesh geometry={waterGeometry} material={waterMaterial} />
 
 {#each buoys as buoy, i (i)}

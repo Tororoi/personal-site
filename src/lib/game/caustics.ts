@@ -1,0 +1,335 @@
+/**
+ * Forward-splat caustic map: the pool reference's differential-area method,
+ * adapted to our scene.
+ *
+ * A grid of vertices rides the water surface. Each vertex refracts the sun
+ * ray through the local surface normal (true Snell), then projects the
+ * refracted ray onto a fixed reference plane — the map is BEAM-SPACE, as
+ * in the reference, not a top-down landing map. Receivers sample it by
+ * sliding their own position along the refracted sun direction to the
+ * same plane, so every point at every depth lies on exactly one beam and
+ * reads that beam's intensity. (An earlier version intersected the sphere
+ * in the splat and indexed by landing xz; a top-down projection has zero
+ * texel density at the silhouette, so caustics starved below the sphere's
+ * upper third and the silhouette ring was pure noise.) The fragment
+ * shader computes brightness as oldArea / newArea from screen
+ * derivatives, and additive blending stacks fold contributions correctly
+ * (several surface patches lighting the same spot genuinely sum).
+ *
+ * What falls out:
+ *  - Band-limited output: the pattern cannot exceed grid + map resolution,
+ *    so the analytic-sampling speckle is structurally impossible.
+ *  - Crown shadow: entry points inside an exposed crown are not water;
+ *    their beams splat with zero weight, which IS the crown's shadow in
+ *    beam space. Self-shadowing of receivers is the receiver cosine's
+ *    job (dot(normal, -refractedLight)), exactly as in the reference.
+ *  - The trade: brightness is evaluated at the reference plane's depth
+ *    for all receivers (the reference accepts the same approximation);
+ *    depth-true convergence went out with the landing map.
+ *
+ * The splat refracts through the TRUE surface: the ambient Gerstner bands
+ * (band-limited by the grid, so no analytic-sampling speckle) plus the
+ * interactive ripple field. Capillaries stay out for now. Rays originate
+ * on the displaced surface, so a receiver poking above a trough sits above
+ * every ray origin and correctly receives no caustics.
+ *
+ * Future receivers (fish) upgrade the analytic intersection to a top-down
+ * receiver depth pre-pass; the splat machinery is unchanged.
+ */
+
+import * as THREE from 'three'
+import { RIPPLE_EXTENT } from './ripples'
+import { waves, wavesGlsl } from './waves'
+
+export const CAUSTIC_RESOLUTION = 2048
+/**
+ * The caustic domain covers the VIEW, not the ripple domain: light only
+ * needs computing where the eye can see it, and the smaller extent buys
+ * finer texels (80m / 2048 = 3.9cm) than matching the 100m ripple field
+ * would. Receivers outside the domain read neutral light.
+ */
+export const CAUSTIC_EXTENT = 80
+/**
+ * ACTIVE-TILE splatting: the domain divides into TILES x TILES tiles and
+ * only tiles over the receivers (the sphere, later fish) are splatted each
+ * frame; the rest of the map stays at its black clear. A full-domain grid
+ * at useful ray density (~one per ripple cell) costs ~640k vertices, far
+ * past this GPU's ~200k/frame budget; receiver culling spends the
+ * vertices only where landed light is actually visible.
+ */
+const TILES = 16
+/** Rays per tile side: 5m tile / 48 = 0.104m spacing, the approved density. */
+const TILE_GRID = 48
+/** Vertex budget: cap on simultaneously active tiles (~140k verts). */
+const MAX_TILES = 60
+const IOR = (1 / 1.33).toFixed(4)
+/**
+ * Depth of the beam-space reference plane, meters below rest. Brightness
+ * is evaluated here for all receivers; the sphere's center depth is the
+ * best single compromise. Receivers must project along the refracted sun
+ * to THIS plane when sampling the map.
+ */
+export const CAUSTIC_PLANE_DEPTH = 6
+
+const splatVertex = `
+uniform sampler2D uRippleTex;
+uniform vec2 uCenter;
+uniform float uExtent;
+uniform vec2 uRippleCenter;
+uniform float uRippleExtent;
+uniform vec3 uSunDir;
+uniform vec3 uSphereCenter;
+uniform float uSphereRadius;
+uniform float uPlaneDepth;
+uniform float uTime;
+uniform float uAmp;
+varying vec2 vOld;
+varying vec2 vNew;
+varying float vWeight;
+
+${wavesGlsl()}
+
+attribute vec2 aTile; // active tile origin, in tile units
+
+void main() {
+	vec2 domainUv = (aTile + uv) / ${TILES}.0;
+	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter;
+
+	// The TRUE surface: full ambient Gerstner displacement plus analytic
+	// tangent normals (this is the wave bands entering caustics,
+	// band-limited by the grid), with the interactive ripples on top.
+	// Rays start where the water actually is: a sphere crown standing
+	// proud of a trough is above every ray origin and gets sky, not
+	// caustics.
+	vec3 D = waveDisplacement(sxz, uTime, uAmp);
+	vec3 P = vec3(sxz.x + D.x, D.y, sxz.y + D.z);
+	float txx = 0.0;
+	float txy = 0.0;
+	float txz = 0.0;
+	float tzy = 0.0;
+	float tzz = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 a = uWaveA[i];
+		vec3 b = uWaveB[i];
+		float theta = (sxz.x * a.x + sxz.y * a.y) * a.z - a.w * uTime + b.z;
+		float sn = sin(theta);
+		float cs = cos(theta);
+		float qak = b.y * b.x * uAmp * a.z;
+		float ak = b.x * uAmp * a.z;
+		txx -= qak * a.x * a.x * sn;
+		txy += ak * a.x * cs;
+		txz -= qak * a.x * a.y * sn;
+		tzy += ak * a.y * cs;
+		tzz -= qak * a.y * a.y * sn;
+	}
+	vec3 Tu = vec3(1.0 + txx, txy, txz);
+	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
+	vec3 Na = cross(Tv, Tu);
+	vec2 slope = -Na.xz / max(Na.y, 0.2);
+
+	// Interactive ripple field rides the displaced surface. Height AND
+	// gradient in one fetch (the sim bakes grad into zw). Capillaries
+	// stay out of caustics for now.
+	vec2 ruv = (P.xz - uRippleCenter) / uRippleExtent + 0.5;
+	if (ruv.x > 0.01 && ruv.x < 0.99 && ruv.y > 0.01 && ruv.y < 0.99) {
+		vec4 field = texture2D(uRippleTex, ruv);
+		P.y += field.x;
+		slope += field.zw;
+	}
+
+	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
+	vec3 incident = -normalize(uSunDir);
+	vec3 refr = refract(incident, normal, ${IOR});
+	if (refr.y > -0.01) refr = vec3(0.0, -1.0, 0.0); // grazing guard
+
+	// Beam-space: EVERY ray projects to the reference plane; no receiver
+	// intersection here at all. The one exception is an entry point inside
+	// an exposed crown — not water, so its beam carries no light, which is
+	// precisely the crown's shadow in beam space. It still lands along its
+	// geometric path so its triangles stay sane.
+	vec3 origin = P;
+	vec3 oc = origin - uSphereCenter;
+	vWeight = dot(oc, oc) < uSphereRadius * uSphereRadius ? 0.0 : 1.0;
+	float t = max((origin.y + uPlaneDepth) / max(-refr.y, 0.05), 0.0);
+	vec3 land = origin + refr * t;
+
+	vOld = sxz;
+	vNew = land.xz;
+	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
+	gl_Position = vec4(ndc, 0.0, 1.0);
+}`
+
+const splatFragment = `
+varying vec2 vOld;
+varying vec2 vNew;
+varying float vWeight;
+
+void main() {
+	// Differential-area brightness: how much refraction concentrated this
+	// patch of light. 1 = neutral, > 1 focused, < 1 spread. Zero-weight
+	// beams (crown-blocked) splat darkness by contributing nothing.
+	float oldArea = length(dFdx(vOld)) * length(dFdy(vOld));
+	float newArea = length(dFdx(vNew)) * length(dFdy(vNew));
+	float brightness = clamp(oldArea / max(newArea, 1e-7), 0.0, 30.0);
+	brightness *= vWeight;
+	gl_FragColor = vec4(brightness, 0.0, 0.0, 1.0);
+}`
+
+export class CausticMap {
+  private target: THREE.WebGLRenderTarget
+  private material: THREE.ShaderMaterial
+  private tileAttr: THREE.InstancedBufferAttribute
+  private splatGeometry: THREE.InstancedBufferGeometry
+  private splatScene: THREE.Scene
+  private splatCamera: THREE.OrthographicCamera
+  private clearColor = new THREE.Color(0, 0, 0)
+  private savedClearColor = new THREE.Color()
+
+  constructor() {
+    this.target = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION,
+      CAUSTIC_RESOLUTION,
+      {
+        type: THREE.HalfFloatType,
+        // Single channel: quarters the additive fill bandwidth vs RGBA.
+        format: THREE.RedFormat,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+        stencilBuffer: false,
+      },
+    )
+
+    // One aTile instance attribute shared by both passes: which tiles are
+    // active this frame.
+    this.tileAttr = new THREE.InstancedBufferAttribute(
+      new Float32Array(MAX_TILES * 2),
+      2,
+    )
+    this.tileAttr.setUsage(THREE.DynamicDrawUsage)
+
+    const base = new THREE.PlaneGeometry(1, 1, TILE_GRID, TILE_GRID)
+    const geo = new THREE.InstancedBufferGeometry()
+    geo.index = base.index
+    geo.setAttribute('position', base.getAttribute('position'))
+    geo.setAttribute('uv', base.getAttribute('uv'))
+    geo.setAttribute('aTile', this.tileAttr)
+    geo.instanceCount = 0
+    this.splatGeometry = geo
+
+    this.material = new THREE.ShaderMaterial({
+      uniforms: {
+        uRippleTex: { value: null },
+        uCenter: { value: new THREE.Vector2(0, 0) },
+        uExtent: { value: CAUSTIC_EXTENT },
+        uRippleCenter: { value: new THREE.Vector2(0, 0) },
+        uRippleExtent: { value: RIPPLE_EXTENT },
+        uSunDir: { value: new THREE.Vector3(0.4, 1, 0.3) },
+        uSphereCenter: { value: new THREE.Vector3(3, -6, 2) },
+        uSphereRadius: { value: 5 },
+        uPlaneDepth: { value: CAUSTIC_PLANE_DEPTH },
+        uTime: { value: 0 },
+        uAmp: { value: 1 },
+        uWaveA: {
+          value: waves.map((w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega)),
+        },
+        uWaveB: {
+          value: waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase)),
+        },
+      },
+      vertexShader: splatVertex,
+      fragmentShader: splatFragment,
+      blending: THREE.AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      // Folded triangles invert their winding; both faces must splat.
+      side: THREE.DoubleSide,
+    })
+
+    this.splatScene = new THREE.Scene()
+    const splatMesh = new THREE.Mesh(this.splatGeometry, this.material)
+    splatMesh.frustumCulled = false
+    this.splatScene.add(splatMesh)
+
+    this.splatCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+  }
+
+  get texture(): THREE.Texture {
+    return this.target.texture
+  }
+
+  /**
+   * Splat the tiles covering the sphere's caustic footprint. Only objects
+   * receive caustics now, so the active region is just the sphere's disc,
+   * shifted along the sun's slant (rays enter the water upwind of where
+   * they land) and padded for wave sway and refraction spread. The map
+   * clears to BLACK — 0 means "no light reaches here" — and receivers
+   * outside the splatted region must treat the map as dark too.
+   */
+  step(
+    renderer: THREE.WebGLRenderer,
+    rippleTexture: THREE.Texture,
+    sunDir: THREE.Vector3,
+    time: number,
+  ) {
+    const sphere = this.material.uniforms.uSphereCenter.value as THREE.Vector3
+    const sphereR = this.material.uniforms.uSphereRadius.value as number
+
+    // Surface entry points sit sunward of the landing point by roughly
+    // depth * tan(sunZenith); refraction bends rays toward vertical so the
+    // un-refracted tangent over-estimates, which is the safe direction.
+    const sy = Math.max(sunDir.y, 0.3)
+    const slantX = sunDir.x / sy
+    const slantZ = sunDir.z / sy
+    const depth = Math.max(-sphere.y, 0) + sphereR
+    const cx = sphere.x + slantX * depth * 0.5
+    const cz = sphere.z + slantZ * depth * 0.5
+    const r =
+      sphereR + Math.hypot(slantX, slantZ) * depth * 0.5 + 5
+
+    // Mark tiles overlapped by the disc's bounding box.
+    const tileSize = CAUSTIC_EXTENT / TILES
+    const half = CAUSTIC_EXTENT / 2
+    let count = 0
+    const attr = this.tileAttr.array as Float32Array
+    const tx0 = Math.max(0, Math.floor((cx - r + half) / tileSize))
+    const tx1 = Math.min(TILES - 1, Math.floor((cx + r + half) / tileSize))
+    const tz0 = Math.max(0, Math.floor((cz - r + half) / tileSize))
+    const tz1 = Math.min(TILES - 1, Math.floor((cz + r + half) / tileSize))
+    for (let tz = tz0; tz <= tz1 && count < MAX_TILES; tz++) {
+      for (let tx = tx0; tx <= tx1 && count < MAX_TILES; tx++) {
+        attr[count * 2] = tx
+        attr[count * 2 + 1] = tz
+        count++
+      }
+    }
+    this.tileAttr.needsUpdate = true
+    this.splatGeometry.instanceCount = count
+
+    this.material.uniforms.uRippleTex.value = rippleTexture
+    this.material.uniforms.uSunDir.value.copy(sunDir)
+    this.material.uniforms.uTime.value = time
+
+    // Clear the whole map to black, then additively splat the active tiles.
+    const previousTarget = renderer.getRenderTarget()
+    const previousAutoClear = renderer.autoClear
+    renderer.getClearColor(this.savedClearColor)
+    const previousClearAlpha = renderer.getClearAlpha()
+
+    renderer.setRenderTarget(this.target)
+    renderer.setClearColor(this.clearColor, 1)
+    renderer.clear(true, false, false)
+    renderer.autoClear = false
+    renderer.render(this.splatScene, this.splatCamera)
+
+    renderer.autoClear = previousAutoClear
+    renderer.setClearColor(this.savedClearColor, previousClearAlpha)
+    renderer.setRenderTarget(previousTarget)
+  }
+
+  dispose() {
+    this.target.dispose()
+    this.material.dispose()
+    this.splatGeometry.dispose()
+  }
+}
