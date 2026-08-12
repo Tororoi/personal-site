@@ -167,8 +167,13 @@ export function update(dt: number, t: number) {
     if (e.sigma !== 0 && t - e.birth > e.breakDuration) e.sigma = 0
   }
 
+  // TEMP: natural-pinch viewing — no events means no crumble deforming
+  // the crests and no event-driven spray obscuring them, consistently
+  // for both the GPU surface and the CPU floaters. Restore by removing
+  // this flag.
+  const SPAWN_EVENTS = false
   scanClock += dt
-  if (scanClock >= SCAN_INTERVAL) {
+  if (SPAWN_EVENTS && scanClock >= SCAN_INTERVAL) {
     scanClock = 0
     for (let x = -SCAN_EXTENT; x <= SCAN_EXTENT; x += SCAN_STEP) {
       for (let z = -SCAN_EXTENT; z <= SCAN_EXTENT; z += SCAN_STEP) {

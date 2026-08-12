@@ -30,9 +30,10 @@
 
 import { addFoam } from './foam'
 import { injectRipple } from './ripples'
+import { waves } from './waves'
 import { events, MAX_EVENTS, sampleOcean, windVector } from './whitecaps'
 
-export const MAX_SPRAY = 512
+export const MAX_SPRAY = 640
 
 const GRAVITY = 9.8
 /**
@@ -82,6 +83,41 @@ const CREST_J = 0.3
 const CREST_TRIES = 4
 /** Wind speed (m/s) that counts as "full" emission energy. */
 const WIND_FULL = 15
+/**
+ * COVER splash: thick, low, chunky clumps erupting exactly where the
+ * folded polys are culled from the surface (J below the cull zone).
+ * They ignore gravity and the submersion cull — they ARE the water in
+ * the gap, a boil sitting in and trailing behind the hole — and each
+ * deposits foam where it dies. Continuous re-emission at the fold's
+ * current position is what keeps a MOVING gap covered.
+ */
+const COVER_SIZE_MIN = 0.16
+const COVER_SIZE_MAX = 0.55
+const COVER_LIFE = 0.7
+/**
+ * The cover boil has its OWN dense fold scanner — event-driven emission
+ * (8 sparse whitecap patches) left folds outside any event culled but
+ * uncovered. A jittered grid sweeps the visible sea several times a
+ * second; every point inside a pinch's catch basin emits clumps sized
+ * and counted by PINCH DEPTH: grazing pinches get a small dot or two,
+ * hard folds get big boluses. The per-pass random grid offset is what
+ * lets a coarse grid reliably find thin fold LINES over a few passes.
+ */
+const COVER_SCAN_INTERVAL = 0.12
+const COVER_SCAN_STEP = 2.2
+const COVER_SCAN_EXTENT = 40
+const COVER_J_START = 0.18
+const COVER_J_FULL = -0.35
+/**
+ * Cover clumps SURF: the fold pattern travels at the phase velocity of
+ * the dominant wave, so the boil advects at exactly that velocity to
+ * stay seated in the culled gap. (The first version damped to a stop
+ * and kept its birth height — the crest moved on and left frozen white
+ * boulders hanging in the air.)
+ */
+const domWave = waves.reduce((a, b) => (b.amp > a.amp ? b : a), waves[0])
+const CREST_VX = domWave.dirX * (domWave.omega / domWave.k)
+const CREST_VZ = domWave.dirZ * (domWave.omega / domWave.k)
 
 export type SprayParticle = {
   x: number
@@ -95,6 +131,8 @@ export type SprayParticle = {
   size: number
   /** True for impact (buoy) spray, which may deposit foam on landing. */
   impact: boolean
+  /** True for cover splash: no gravity, no submersion cull (see above). */
+  cover: boolean
 }
 
 export const sprayParticles: SprayParticle[] = Array.from(
@@ -109,6 +147,7 @@ export const sprayParticles: SprayParticle[] = Array.from(
     birth: -10,
     size: 0,
     impact: false,
+    cover: false,
   }),
 )
 
@@ -137,6 +176,30 @@ function launch(
   p.birth = t
   p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
   p.impact = impact
+  p.cover = false
+}
+
+function launchCover(
+  t: number,
+  x: number,
+  y: number,
+  z: number,
+  vx: number,
+  vz: number,
+  size: number,
+) {
+  const p = alloc()
+  if (!p) return
+  p.x = x
+  p.y = y
+  p.z = z
+  p.vx = vx
+  p.vy = 0
+  p.vz = vz
+  p.birth = t
+  p.size = size
+  p.impact = false
+  p.cover = true
 }
 
 /**
@@ -158,28 +221,35 @@ function emitCrest(t: number, ex: number, ez: number, sigma: number) {
     const s = sampleOcean(x, z, t, 1, 1)
     if (s.jacobian > CREST_J || s.height < 0.05) continue
     const forward = CREST_FORWARD_BASE + windSpeed * CREST_FORWARD
-    launch(
-      t,
-      x,
-      s.height + 0.15,
-      z,
-      wx * forward + (Math.random() * 2 - 1) * 0.5,
-      LAUNCH_UP_MIN + Math.random() * LAUNCH_UP_VAR,
-      wz * forward + (Math.random() * 2 - 1) * 0.5,
-      false,
-    )
-    // The low twin: same crest, slightly offset, skimming forward just
-    // above the surface on a short flat arc.
-    launch(
-      t,
-      x + (Math.random() * 2 - 1) * 0.4,
-      s.height + 0.08,
-      z + (Math.random() * 2 - 1) * 0.4,
-      wx * forward * 1.15 + (Math.random() * 2 - 1) * 0.5,
-      LOW_UP_MIN + Math.random() * LOW_UP_VAR,
-      wz * forward * 1.15 + (Math.random() * 2 - 1) * 0.5,
-      false,
-    )
+    // A genuinely FOLDED crest (J < 0.05) has its polys culled from the
+    // surface — the water there exists only as this spray, so it erupts
+    // twice as much of it, thrown harder.
+    const pairs = s.jacobian < 0.05 ? 2 : 1
+    const boost = s.jacobian < 0.05 ? 1.35 : 1
+    for (let k = 0; k < pairs; k++) {
+      launch(
+        t,
+        x + (Math.random() * 2 - 1) * 0.3,
+        s.height + 0.15,
+        z + (Math.random() * 2 - 1) * 0.3,
+        wx * forward + (Math.random() * 2 - 1) * 0.5,
+        (LAUNCH_UP_MIN + Math.random() * LAUNCH_UP_VAR) * boost,
+        wz * forward + (Math.random() * 2 - 1) * 0.5,
+        false,
+      )
+      // The low twin: same crest, slightly offset, skimming forward just
+      // above the surface on a short flat arc.
+      launch(
+        t,
+        x + (Math.random() * 2 - 1) * 0.4,
+        s.height + 0.08,
+        z + (Math.random() * 2 - 1) * 0.4,
+        wx * forward * 1.15 + (Math.random() * 2 - 1) * 0.5,
+        LOW_UP_MIN + Math.random() * LOW_UP_VAR,
+        wz * forward * 1.15 + (Math.random() * 2 - 1) * 0.5,
+        false,
+      )
+    }
     return
   }
 }
@@ -213,6 +283,38 @@ export function emitImpactSpray(
       Math.sin(a) * r + dirZ * 1.6 * energy,
       true,
     )
+  }
+}
+
+let coverScanClock = 0
+
+function scanCoverFolds(t: number) {
+  const jx = Math.random() * COVER_SCAN_STEP
+  const jz = Math.random() * COVER_SCAN_STEP
+  for (let x = -COVER_SCAN_EXTENT + jx; x <= COVER_SCAN_EXTENT; x += COVER_SCAN_STEP) {
+    for (let z = -COVER_SCAN_EXTENT + jz; z <= COVER_SCAN_EXTENT; z += COVER_SCAN_STEP) {
+      const s = sampleOcean(x, z, t, 1, 1)
+      if (s.jacobian > COVER_J_START) continue
+      const pinch = Math.min(
+        (COVER_J_START - s.jacobian) / (COVER_J_START - COVER_J_FULL),
+        1,
+      )
+      const count = 1 + Math.round(pinch * 2)
+      for (let k = 0; k < count; k++) {
+        const size =
+          (COVER_SIZE_MIN + (COVER_SIZE_MAX - COVER_SIZE_MIN) * pinch) *
+          (0.75 + Math.random() * 0.5)
+        launchCover(
+          t,
+          x + (Math.random() * 2 - 1) * 0.9,
+          s.height + 0.05 + Math.random() * 0.2,
+          z + (Math.random() * 2 - 1) * 0.9,
+          CREST_VX + (Math.random() * 2 - 1) * 0.3,
+          CREST_VZ + (Math.random() * 2 - 1) * 0.3,
+          size,
+        )
+      }
+    }
   }
 }
 
@@ -258,10 +360,36 @@ export function updateSpray(dt: number, t: number) {
     for (let k = 0; k < n; k++) emitCrest(t, e.x, e.z, e.sigma)
   }
 
+  // TEMP: natural-pinch viewing — cover boil off so the bare crests
+  // show. Restore by removing this flag.
+  const COVER_ENABLED = false
+  coverScanClock += dt
+  if (COVER_ENABLED && coverScanClock >= COVER_SCAN_INTERVAL) {
+    coverScanClock = 0
+    scanCoverFolds(t)
+  }
+
   checkParity ^= 1
   for (let i = 0; i < sprayParticles.length; i++) {
     const p = sprayParticles[i]
     if (p.size === 0) continue
+    if (p.cover) {
+      // Cover splash: SURFS at the fold's own speed (crest phase
+      // velocity), riding the live surface with a seething bob — never
+      // culled, it stands in for the water the fold removed.
+      p.x += p.vx * dt
+      p.z += p.vz * dt
+      const sc = sampleOcean(p.x, p.z, t, 1, 1)
+      const boil =
+        Math.sin(t * 9.1 + p.birth * 53.7) * 0.1 +
+        Math.sin(t * 15.3 + p.birth * 91.3) * 0.06
+      p.y = sc.height + 0.12 + boil
+      if (t - p.birth > COVER_LIFE) {
+        addFoam(p.x - sc.swayX, p.z - sc.swayZ, 0.1 + p.size * 0.4)
+        p.size = 0
+      }
+      continue
+    }
     if (t - p.birth > LIFE_MAX) {
       p.size = 0
       continue
@@ -291,7 +419,8 @@ export function updateSpray(dt: number, t: number) {
         // the landing — so it rides the Gerstner sway with the surface.
         injectRipple(p.x, p.z, 0.1 + p.size, 0.02 + p.size * 0.18)
         if (!p.impact) {
-          addFoam(p.x - s.swayX, p.z - s.swayZ, 0.05 + p.size * 0.4)
+          // Foam's ONLY source now — the field is emergent from landings.
+        addFoam(p.x - s.swayX, p.z - s.swayZ, 0.07 + p.size * 0.5)
         } else if (Math.random() < 0.4) {
           // Buoy (impact) spray leaves far less residue than a breaking
           // crest: a bobbing float was painting a solid disc around

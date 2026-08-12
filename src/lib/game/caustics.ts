@@ -221,6 +221,8 @@ export class CausticMap {
 
   private target: THREE.WebGLRenderTarget
   private blurTarget: THREE.WebGLRenderTarget
+  private blurQuarterA: THREE.WebGLRenderTarget
+  private blurQuarterB: THREE.WebGLRenderTarget
   private material: THREE.ShaderMaterial
   private blurMaterial: THREE.ShaderMaterial
   private tileAttr: THREE.InstancedBufferAttribute
@@ -304,17 +306,34 @@ export class CausticMap {
     // so bouncing through a half-res intermediate is visually identical
     // at a quarter of the taps (everything addresses normalized UV, so
     // only this allocation changes).
+    const blurTargetOpts = {
+      type: THREE.HalfFloatType,
+      format: THREE.RedFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    } as const
     this.blurTarget = new THREE.WebGLRenderTarget(
       CAUSTIC_RESOLUTION / 2,
       CAUSTIC_RESOLUTION / 2,
-      {
-        type: THREE.HalfFloatType,
-        format: THREE.RedFormat,
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        depthBuffer: false,
-        stencilBuffer: false,
-      },
+      blurTargetOpts,
+    )
+    // Quarter-res pair for WIDE blurs: at storm's sigma (~14 texels) the
+    // sparse 13-tap kernel sampled full-res filaments every ~7 texels
+    // and ALIASED — ghosted filament replicas that read as faceted
+    // caustics. Downsampling twice (each a 2x2 box via bilinear)
+    // prefilters the source so the same tap spacing is ~1.8 of the
+    // quarter-res texels: a genuine smooth spread.
+    this.blurQuarterA = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION / 4,
+      CAUSTIC_RESOLUTION / 4,
+      blurTargetOpts,
+    )
+    this.blurQuarterB = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION / 4,
+      CAUSTIC_RESOLUTION / 4,
+      blurTargetOpts,
     )
     this.blurMaterial = new THREE.ShaderMaterial({
       uniforms: {
@@ -429,17 +448,34 @@ export class CausticMap {
         (v1 - v0) / 2,
       )
       const step = (0.5 * sigmaTexels) / CAUSTIC_RESOLUTION
+      const stepVec = blurU.uStep.value as THREE.Vector2
+      const pass = (
+        src: THREE.WebGLRenderTarget,
+        dst: THREE.WebGLRenderTarget,
+        sx: number,
+        sy: number,
+      ) => {
+        blurU.uSrc.value = src.texture
+        stepVec.set(sx, sy)
+        renderer.setRenderTarget(dst)
+        renderer.clear(true, false, false)
+        renderer.render(this.blurScene, this.splatCamera)
+      }
 
-      blurU.uSrc.value = this.target.texture
-      ;(blurU.uStep.value as THREE.Vector2).set(step, 0)
-      renderer.setRenderTarget(this.blurTarget)
-      renderer.clear(true, false, false)
-      renderer.render(this.blurScene, this.splatCamera)
-
-      blurU.uSrc.value = this.blurTarget.texture
-      ;(blurU.uStep.value as THREE.Vector2).set(0, step)
-      renderer.setRenderTarget(this.target)
-      renderer.render(this.blurScene, this.splatCamera)
+      if (sigmaTexels <= 5) {
+        // Narrow blur: taps are dense enough against full-res content.
+        pass(this.target, this.blurTarget, step, 0)
+        pass(this.blurTarget, this.target, 0, step)
+      } else {
+        // Wide blur: prefilter down to quarter res (two bilinear 2x2
+        // boxes — the zero-step "blur" is an identity copy through the
+        // minifying bilinear fetch), blur there, upsample on the way
+        // back. Same sigma in UV space; no aliasing.
+        pass(this.target, this.blurTarget, 0, 0)
+        pass(this.blurTarget, this.blurQuarterA, 0, 0)
+        pass(this.blurQuarterA, this.blurQuarterB, step, 0)
+        pass(this.blurQuarterB, this.target, 0, step)
+      }
     }
 
     renderer.autoClear = previousAutoClear
@@ -450,6 +486,8 @@ export class CausticMap {
   dispose() {
     this.target.dispose()
     this.blurTarget.dispose()
+    this.blurQuarterA.dispose()
+    this.blurQuarterB.dispose()
     this.material.dispose()
     this.blurMaterial.dispose()
     this.splatGeometry.dispose()

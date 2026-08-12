@@ -26,7 +26,7 @@
  */
 
 import * as THREE from 'three'
-import { activeField, waves, wavesGlsl } from './waves'
+import { waves, wavesGlsl } from './waves'
 
 export const FOAM_RESOLUTION = 512
 /**
@@ -50,7 +50,7 @@ export const FOAM_EXTENT = 100
  * spreading — and a plateau falls through the render floor everywhere
  * AT ONCE. Biggest footprint and complete fade are the same moment.
  */
-const DECAY_TAU_THIN = 14
+const DECAY_TAU_THIN = 8
 const DECAY_TAU_THICK = 2.5
 /**
  * Decay time constant where the water is actively BREAKING: churn tears
@@ -63,22 +63,6 @@ const DECAY_TAU_TURB = 1.1
 /** Jacobian ramp for the turbulence probe; matches the churn's. */
 const TURB_J_START = 0.28
 const TURB_J_FULL = -0.15
-/**
- * Crest foam GENERATION, in-field: wherever the surface is pinched, the
- * field grows foam directly — every visible pinch, everywhere, with no
- * scan grid, event slots, or gaps to slip through (the CPU event-based
- * painter missed most crests for all three reasons). Growth is
- * quadratic in pinch depth: a grazing pinch mists faintly, a hard fold
- * saturates to solid in ~half a second. The moving crest generates as
- * it goes and its wake decays on the calm clock: the trail is emergent.
- */
-// Default; presets override via their foam.pinchJStart (see waves.ts).
-const PINCH_J_START = activeField.foam?.pinchJStart ?? 0.55
-const PINCH_J_EXTREME = -0.1
-/** Thickness added per frame at full pinch. */
-const PINCH_RATE = 0.04
-/** Field value forced at strongly pinched texels: crest foam is solid. */
-const PINCH_FLOOR = 0.8
 /**
  * Per-frame neighbor mixing, 0..1: the spread rate. Diffusion is the
  * dissipation mechanism — mass leaves the peak and widens the skirt,
@@ -118,6 +102,65 @@ void main() {
 	gl_Position = vec4(position.xy, 0.0, 1.0);
 }`
 
+/**
+ * The web skeleton is STATIC in world space, so its distance field is
+ * baked ONCE into a small tiling texture (periodic hash -> seamless
+ * repeat) and the water fragment pays two bilinear fetches instead of
+ * two live Voronoi evaluations (~36 hashes + trig per pixel — measured
+ * as the difference between 19 and ~50 fps in a foamy storm).
+ */
+const WEB_TILE_CELLS = 8
+const WEB_TILE_RES = 512
+
+const webBakeFragment = `
+varying vec2 vUv;
+
+vec2 webHash2(vec2 p) {
+	// Periodic in the tile so the texture repeats seamlessly.
+	p = mod(p, ${WEB_TILE_CELLS}.0);
+	return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
+}
+
+float webSmin(float a, float b, float k) {
+	float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+	return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+void main() {
+	vec2 x = vUv * ${WEB_TILE_CELLS}.0;
+	vec2 n = floor(x);
+	vec2 f = fract(x);
+	vec2 mg = vec2(0.0);
+	vec2 mr = vec2(0.0);
+	float md = 8.0;
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++) {
+			vec2 g = vec2(float(i), float(j));
+			vec2 o = webHash2(n + g);
+			vec2 r = g + o - f;
+			float d = dot(r, r);
+			if (d < md) {
+				md = d;
+				mr = r;
+				mg = g;
+			}
+		}
+	}
+	md = 8.0;
+	// Edge distances combine through a SMOOTH min: filleted junctions.
+	for (int j = -1; j <= 1; j++) {
+		for (int i = -1; i <= 1; i++) {
+			vec2 g = mg + vec2(float(i), float(j));
+			vec2 o = webHash2(n + g);
+			vec2 r = g + o - f;
+			if (dot(mr - r, mr - r) > 0.00001) {
+				md = webSmin(md, dot(0.5 * (mr + r), normalize(r - mr)), 0.25);
+			}
+		}
+	}
+	gl_FragColor = vec4(md, 0.0, 0.0, 1.0);
+}`
+
 const simFragment = `
 uniform sampler2D uPrev;
 uniform float uTexel;
@@ -125,6 +168,7 @@ uniform float uDecay;     // per-frame retention: calm + thin foam
 uniform float uDecayThick; // per-frame retention: calm + thick foam (faster)
 uniform float uDecayTurb; // per-frame retention on breaking water
 uniform float uDiffusion; // per-step neighbor mixing (dt-scaled)
+uniform float uDiffTexel; // diffusion tap distance in uv (see step())
 uniform float uDtScale;   // frame dt / (1/60): wall-clock rate correction
 uniform vec2 uShift;      // uv advection this frame (downwind drift)
 uniform vec2 uCenter;
@@ -140,10 +184,10 @@ void main() {
 	vec2 uv = vUv - uShift;
 	float c = texture2D(uPrev, uv).r;
 	float avg = (
-		texture2D(uPrev, uv + vec2(uTexel, 0.0)).r +
-		texture2D(uPrev, uv - vec2(uTexel, 0.0)).r +
-		texture2D(uPrev, uv + vec2(0.0, uTexel)).r +
-		texture2D(uPrev, uv - vec2(0.0, uTexel)).r
+		texture2D(uPrev, uv + vec2(uDiffTexel, 0.0)).r +
+		texture2D(uPrev, uv - vec2(uDiffTexel, 0.0)).r +
+		texture2D(uPrev, uv + vec2(0.0, uDiffTexel)).r +
+		texture2D(uPrev, uv - vec2(0.0, uDiffTexel)).r
 	) * 0.25;
 	vec2 world = (vUv - 0.5) * uExtent + uCenter;
 	// Turbulence-scaled decay: the local instantaneous Jacobian probes
@@ -180,22 +224,12 @@ void main() {
 	// main thinning force (double the radius = a quarter the thickness),
 	// and heavy evaporation was cutting the long thin phase short.
 	// uDtScale makes rates WALL-CLOCK true at any framerate.
-	float h = max(spreadH * retain - 0.00012 * uDtScale * (1.0 + 5.0 * turb), 0.0);
+	float h = max(spreadH * retain - 0.0002 * uDtScale * (1.0 + 5.0 * turb), 0.0);
 
-	// Crest foam is a LEADING-EDGE phenomenon, entirely: the front of a
-	// breaking crest is by definition water that has no foam yet, so
-	// BOTH the floor and the continuous generation apply only where the
-	// existing field is still low. The advancing front paints solid
-	// white; the water behind it gets zero replenishment — its foam is
-	// immediately torn thin by the turbulence clock and spread by
-	// diffusion into the open network, which is how a real wave's wake
-	// disperses. (Ungated generation kept topping the wake back up to
-	// dense for as long as the water stayed pinched: standing patches of
-	// solid foam far behind any edge.)
-	float front = 1.0 - smoothstep(0.15, 0.45, c);
-	float pinch = clamp((${PINCH_J_START.toFixed(2)} - J) / ${(PINCH_J_START - PINCH_J_EXTREME).toFixed(2)}, 0.0, 1.0);
-	h += pinch * pinch * ${PINCH_RATE.toFixed(3)} * uDtScale * front;
-	h = max(h, smoothstep(0.55, 0.9, pinch) * ${PINCH_FLOOR.toFixed(2)} * front);
+	// NO in-field crest generation: foam is EMERGENT from spray alone.
+	// Every deposit below entered through a landing clump; crests read as
+	// breaking because they erupt spray (and their folded polys cull),
+	// and the foam field is simply where that water came back down.
 
 	for (int i = 0; i < ${MAX_INJECT}; i++) {
 		vec4 inj = uInject[i];
@@ -220,6 +254,7 @@ export class FoamField {
   private material: THREE.ShaderMaterial
   private simScene: THREE.Scene
   private simCamera: THREE.OrthographicCamera
+  private webTarget: THREE.WebGLRenderTarget | null = null
 
   constructor() {
     const makeTarget = () =>
@@ -245,6 +280,7 @@ export class FoamField {
         uDecayThick: { value: Math.exp(-1 / (60 * DECAY_TAU_THICK)) },
         uDecayTurb: { value: Math.exp(-1 / (60 * DECAY_TAU_TURB)) },
         uDiffusion: { value: DIFFUSION },
+        uDiffTexel: { value: 1 / FOAM_RESOLUTION },
         uDtScale: { value: 1 },
         uShift: { value: new THREE.Vector2(0, 0) },
         uCenter: { value: new THREE.Vector2(0, 0) },
@@ -281,6 +317,37 @@ export class FoamField {
     return this.targets[this.current].texture
   }
 
+  /** The baked, tiling web-skeleton distance field (null until baked). */
+  get webTexture(): THREE.Texture | null {
+    return this.webTarget ? this.webTarget.texture : null
+  }
+
+  private bakeWeb(renderer: THREE.WebGLRenderer) {
+    this.webTarget = new THREE.WebGLRenderTarget(WEB_TILE_RES, WEB_TILE_RES, {
+      type: THREE.HalfFloatType,
+      format: THREE.RedFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      wrapS: THREE.RepeatWrapping,
+      wrapT: THREE.RepeatWrapping,
+      depthBuffer: false,
+      stencilBuffer: false,
+    })
+    const material = new THREE.ShaderMaterial({
+      vertexShader: simVertex,
+      fragmentShader: webBakeFragment,
+      depthTest: false,
+      depthWrite: false,
+    })
+    const scene = new THREE.Scene()
+    scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material))
+    const previous = renderer.getRenderTarget()
+    renderer.setRenderTarget(this.webTarget)
+    renderer.render(scene, this.simCamera)
+    renderer.setRenderTarget(previous)
+    material.dispose()
+  }
+
   /** One field update per frame, consuming queued deposits. */
   step(
     renderer: THREE.WebGLRenderer,
@@ -289,15 +356,21 @@ export class FoamField {
     t: number,
     dt: number,
   ) {
+    if (!this.webTarget) this.bakeWeb(renderer)
     const u = this.material.uniforms
     u.uTime.value = t
     const d = Math.min(Math.max(dt, 0.001), 0.1)
     u.uDecay.value = Math.exp(-d / DECAY_TAU_THIN)
     u.uDecayThick.value = Math.exp(-d / DECAY_TAU_THICK)
     u.uDecayTurb.value = Math.exp(-d / DECAY_TAU_TURB)
-    // Mixing saturates at ~1 per step; below-60fps spread loses a little
-    // top speed but stays close, and every other clock is exact.
-    u.uDiffusion.value = Math.min(DIFFUSION * d * 60, 0.97)
+    // Mixing saturates at ~1 per step, which would silently HALVE the
+    // spread rate when steps are skipped (dt doubles). Compensation:
+    // spread variance goes as mixing x tapDistance^2, so widen the taps
+    // by sqrt of whatever the saturated mixing couldn't deliver.
+    const targetMix = DIFFUSION * d * 60
+    const mix = Math.min(targetMix, 0.95)
+    u.uDiffusion.value = mix
+    u.uDiffTexel.value = Math.sqrt(targetMix / mix) / FOAM_RESOLUTION
     u.uDtScale.value = d * 60
     const shift = u.uShift.value as THREE.Vector2
     shift.set(
@@ -325,15 +398,15 @@ export class FoamField {
     this.targets[0].dispose()
     this.targets[1].dispose()
     this.material.dispose()
+    if (this.webTarget) this.webTarget.dispose()
   }
 }
 
 // ---- Rendering ----
 
 /** Voronoi web cell sizes, meters: the three-rung ladder (see foamGlsl). */
-const CELL_FINE = 0.25
-const CELL_MID = 0.6
-const CELL_COARSE = 1.4
+const CELL_FINE = 0.4
+const CELL_COARSE = 2.2
 /**
  * Strand half-width at full thickness, in cell units. The farthest
  * interior point of a cell sits ~0.5 from an edge, so 0.55 fuses the
@@ -353,57 +426,7 @@ export function foamGlsl(): string {
 uniform sampler2D uFoamTex;
 uniform vec2 uFoamCenter;
 uniform float uFoamExtent;
-
-vec2 foamHash2(vec2 p) {
-	return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
-}
-
-// Polynomial smooth minimum: where two cell edges meet, the blended
-// distance dips below either one, so the thresholded strand grows a
-// rounded FILLET at every junction instead of an angular corner.
-float foamSmin(float a, float b, float k) {
-	float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
-	return mix(b, a, h) - k * h * (1.0 - h);
-}
-
-// Exact distance to the nearest Voronoi cell EDGE (iq's two-pass
-// method): the web skeleton. Thresholding a TRUE distance field is what
-// makes the strands capsule-shaped with naturally rounded junctions.
-float foamWebDist(vec2 x) {
-	vec2 n = floor(x);
-	vec2 f = fract(x);
-	vec2 mg = vec2(0.0);
-	vec2 mr = vec2(0.0);
-	float md = 8.0;
-	for (int j = -1; j <= 1; j++) {
-		for (int i = -1; i <= 1; i++) {
-			vec2 g = vec2(float(i), float(j));
-			vec2 o = foamHash2(n + g);
-			vec2 r = g + o - f;
-			float d = dot(r, r);
-			if (d < md) {
-				md = d;
-				mr = r;
-				mg = g;
-			}
-		}
-	}
-	md = 8.0;
-	// 3x3 second pass (iq's cheap variant): marginally inexact at some
-	// far corners, invisible in foam, half the hashing. Edge distances
-	// combine through a SMOOTH min, so junctions come out filleted.
-	for (int j = -1; j <= 1; j++) {
-		for (int i = -1; i <= 1; i++) {
-			vec2 g = mg + vec2(float(i), float(j));
-			vec2 o = foamHash2(n + g);
-			vec2 r = g + o - f;
-			if (dot(mr - r, mr - r) > 0.00001) {
-				md = foamSmin(md, dot(0.5 * (mr + r), normalize(r - mr)), 0.25);
-			}
-		}
-	}
-	return md;
-}
+uniform sampler2D uFoamWebTex;
 
 float foamThicknessAt(vec2 rest) {
 	vec2 uv = (rest - uFoamCenter) / uFoamExtent + 0.5;
@@ -420,30 +443,23 @@ float foamWeb(vec2 worldXZ, float thickness, float jac) {
 	float dens = smoothstep(0.04, 0.45, thickness);
 	// Cell merging follows the WAVES: compressed water (J < 1) packs the
 	// foam and holds the fine web longer; stretched water opens the
-	// cells early — the web's evolution reads as part of the sea.
+	// cells early.
 	float merge = clamp((1.0 - jac) * 0.25, -0.2, 0.2);
-	// Domain warp: raw Voronoi edges are dead straight and their
-	// junctions angular ("giraffe print"). A gentle sine warp curves
-	// every strand; the smooth-min in foamWebDist rounds the joints.
+	// Domain warp: baked Voronoi edges are dead straight and their
+	// junctions angular; a gentle sine warp curves every strand (the
+	// smooth-min baked into the tile rounds the joints).
 	vec2 q = worldXZ + vec2(
 		sin(worldXZ.y * 7.3 + worldXZ.x * 2.1),
 		sin(worldXZ.x * 6.1 - worldXZ.y * 2.7)
 	) * 0.09;
-	// Three-rung cell ladder: solid/fine lace above ~0.45 thickness, mid
-	// cells through the long middle age, huge sparse cells at the end.
-	float hi = smoothstep(0.55 - merge, 0.9 - merge, dens);
-	float lo = smoothstep(0.06, 0.55 - merge, dens);
-	// Evaluate only the ladder rungs this pixel actually blends: fresh
-	// solid sheets (the common case in banks) cost ONE Voronoi, not three.
-	float dEdge;
-	if (hi >= 0.999) {
-		dEdge = foamWebDist(q / ${CELL_FINE.toFixed(2)});
-	} else {
-		float dMC = (lo >= 0.999)
-			? foamWebDist(q / ${CELL_MID.toFixed(2)})
-			: mix(foamWebDist(q / ${CELL_COARSE.toFixed(2)}), foamWebDist(q / ${CELL_MID.toFixed(2)}), lo);
-		dEdge = (hi <= 0.001) ? dMC : mix(dMC, foamWebDist(q / ${CELL_FINE.toFixed(2)}), hi);
-	}
+	// The skeleton distance field is BAKED into a tiling texture (see
+	// webBakeFragment): two bilinear fetches replace two live Voronoi
+	// evaluations, which at storm foam coverage was the difference
+	// between 19 and ~50 fps. Two rungs, fine and coarse — the cells
+	// merge and GROW as the foam thins.
+	float dFine = texture2D(uFoamWebTex, q / ${(CELL_FINE * WEB_TILE_CELLS).toFixed(2)}).r;
+	float dCoarse = texture2D(uFoamWebTex, q / ${(CELL_COARSE * WEB_TILE_CELLS).toFixed(2)}).r;
+	float dEdge = mix(dCoarse, dFine, smoothstep(0.1, 0.8 - merge, dens));
 	float halfWidth = dens * ${SOLID_WIDTH.toFixed(2)};
 	// Fade the last hairlines out instead of cutting: the render floor.
 	return smoothstep(halfWidth, halfWidth - 0.09, dEdge) * smoothstep(0.04, 0.09, thickness);

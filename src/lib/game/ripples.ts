@@ -283,6 +283,17 @@ void applyRipples(inout vec3 p, vec2 worldXZ) {
 	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
 	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return;
 	p.y += texture2D(uRippleTex, ruv).x * ${SETTINGS.displayGain.toFixed(2)};
+}
+
+// The DISPLAYED ripple surface's gradient (the sim bakes the physical
+// gradient into zw; display gain scales height and slope alike). This is
+// what lets ripples SHADE at texture resolution regardless of how coarse
+// the water mesh is: the fragment adds these slopes onto the interpolated
+// analytic wave normal.
+vec2 rippleShadeGrad(vec2 worldXZ) {
+	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
+	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return vec2(0.0);
+	return texture2D(uRippleTex, ruv).zw * ${SETTINGS.displayGain.toFixed(2)};
 }`
 }
 

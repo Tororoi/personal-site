@@ -2,7 +2,7 @@
 	import * as THREE from 'three';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { onDestroy } from 'svelte';
-	import { activeField, causticsGlsl, waves, wavesGlsl } from './waves';
+	import { activeField, causticsGlsl, significantAmplitude, waves, wavesGlsl } from './waves';
 	import {
 		events,
 		MAX_EVENTS,
@@ -14,9 +14,6 @@
 	} from './whitecaps';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
-	// Froth currently has no live emitters (buoys rely on splash + foam);
-	// the machinery stays wired for future effects.
-	import { frothBlobs, frothGlsl, MAX_FROTH, updateFroth } from './froth';
 	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
 	import { computeEnv, DAY_SECONDS } from './env';
@@ -37,33 +34,56 @@
 	const todParam = urlParams.get('tod');
 	if (todParam !== null) game.time = DAY_SECONDS * parseFloat(todParam);
 	const zoom = mobile ? 18 : 26;
-	// The plane is sized from THIS window's actual ground footprint: ortho
+
+	// ---------- Water ----------
+	// The plane is fitted to THIS window's actual ground footprint: ortho
 	// zoom is fixed pixels-per-meter, so a bigger window sees more ocean.
 	// The 0.71/1.34 coefficients come from the camera orientation (45 deg
 	// azimuth, ~32 deg elevation): a screen half-width of w meters reaches
-	// 0.71w in world x/z, a half-height of h reaches 1.34h. +4m margin
-	// covers Gerstner sway pulling vertices off the edge. Sized at mount;
-	// a window resize larger than mount needs a reload to regain coverage.
-	const WATER_SIZE =
-		2 * (0.71 * (window.innerWidth / zoom / 2) + 1.34 * (window.innerHeight / zoom / 2) + 4);
-	// Fixed vertex budget buys the finest quads this window allows. The
-	// water is deliberately FINE: the low-poly look belongs to the fish,
-	// boat and buoy models, not the ocean. Quad size must stay under ~1/3
-	// of the shortest ripple wavelength in the active sea preset.
-	const WATER_SEGMENTS = Math.min(
-		Math.round(WATER_SIZE / (mobile ? 0.6 : 0.2)),
-		mobile ? 170 : 510
-	);
+	// 0.71w in world x/z, a half-height of h reaches 1.34h. Fitting the
+	// mesh to the frustum footprint IS the polygon cull: nothing outside
+	// the window (plus the physics margin) is ever meshed.
+	//
+	// The margin is derived from the ACTIVE wave field instead of a fixed
+	// guess: Gerstner sway pulls edge vertices inward by up to the sum of
+	// per-wave sway amplitudes, and an elevated crest at the window edge
+	// uncovers ground behind it by ~1.6x its height at our camera
+	// elevation — the old flat 4m margin let storm seas reveal unrendered
+	// corners.
+	const SWAY_BOUND = waves.reduce((sum, w) => sum + w.q * w.amp, 0);
+	const EDGE_MARGIN = 2 + SWAY_BOUND + 3.2 * significantAmplitude;
+	function buildWaterGeometry() {
+		const size =
+			2 *
+			(0.71 * (window.innerWidth / zoom / 2) +
+				1.34 * (window.innerHeight / zoom / 2) +
+				EDGE_MARGIN);
+		// Quad size only limits displacement silhouettes now: shading is
+		// smooth (analytic vertex slopes + per-pixel ripple gradients), so
+		// the mesh can be far coarser than the old facet-shaded 0.2m
+		// without visible faceting. Must stay under ~1/3 of the shortest
+		// ripple wavelength.
+		const segments = Math.min(
+			Math.round(size / (mobile ? 0.6 : 0.5)),
+			mobile ? 170 : 510
+		);
+		const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+		geometry.rotateX(-Math.PI / 2);
+		return geometry;
+	}
+	let waterGeometry = $state(buildWaterGeometry());
 
-	// ---------- Water ----------
-
-	const waterGeometry = new THREE.PlaneGeometry(
-		WATER_SIZE,
-		WATER_SIZE,
-		WATER_SEGMENTS,
-		WATER_SEGMENTS
-	);
-	waterGeometry.rotateX(-Math.PI / 2);
+	// Window resizes rebuild the plane (debounced), so the water always
+	// covers the CURRENT window instead of the mount-time one.
+	let resizeTimer = 0;
+	function onWindowResize() {
+		clearTimeout(resizeTimer);
+		resizeTimer = window.setTimeout(() => {
+			waterGeometry.dispose();
+			waterGeometry = buildWaterGeometry();
+		}, 200);
+	}
+	window.addEventListener('resize', onWindowResize);
 
 	const env0 = computeEnv(game.time / DAY_SECONDS);
 
@@ -106,8 +126,8 @@
 		// steepest few percent of crests live, saturated just above a true
 		// fold, so breaking events read as bright flashes.
 		uFoamColor: { value: new THREE.Color('#f4f9ff') },
-		uFoamStart: { value: 0.55 },
-		uFoamFull: { value: 0.12 },
+		uFoamStart: { value: 0 },
+		uFoamFull: { value: -0.12 },
 		// Whitecap events, refreshed each frame from the same array the CPU
 		// twin reads (see whitecaps.ts).
 		uEventA: { value: Array.from({ length: MAX_EVENTS }, () => new THREE.Vector4()) },
@@ -150,10 +170,6 @@
 		uRippleTex: { value: null as THREE.Texture | null },
 		uRippleCenter: { value: new THREE.Vector2(0, 0) },
 		uRippleExtent: { value: RIPPLE_EXTENT },
-		// Splash froth blobs (froth.ts), refreshed each frame from the same
-		// array addFroth() writes.
-		uFrothA: { value: Array.from({ length: MAX_FROTH }, () => new THREE.Vector4()) },
-		uFrothB: { value: Array.from({ length: MAX_FROTH }, () => new THREE.Vector4()) },
 		// Solid-mode water, pool-style (Wallace/jeantimex): a Fresnel blend
 		// between transmitted water color and reflected sky, plus sun
 		// specular. Facets facing the camera show the water; tilted facets
@@ -202,7 +218,9 @@
 		// at REST coordinates; re-pointed each frame after the sim step.
 		uFoamTex: { value: null as THREE.Texture | null },
 		uFoamCenter: { value: new THREE.Vector2(0, 0) },
-		uFoamExtent: { value: FOAM_EXTENT }
+		uFoamExtent: { value: FOAM_EXTENT },
+		// Baked tiling web-skeleton distance field (set after first bake).
+		uFoamWebTex: { value: null as THREE.Texture | null }
 	};
 
 	// The visible ocean "floor" depth; also the miss plane of the water's
@@ -240,8 +258,14 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	// The wave-equation sim that owns uRippleTex's contents.
 	const rippleSim = new RippleSim();
 
-	// The foam thickness field that owns uFoamTex's contents.
+	// The foam thickness field that owns uFoamTex's contents. Stepped at
+	// HALF frame rate: foam evolves on multi-second timescales, the
+	// dt-aware step keeps every clock wall-clock true across skipped
+	// frames, and the sim (the wave-sum probe especially) is one of the
+	// larger recurring GPU passes.
 	const foamField = new FoamField();
+	let foamAccum = 0;
+	let foamEven = false;
 
 	// Forward-splat caustic map (pool-style differential area) over the
 	// full wave surface, blurred by the preset's sun diffusion.
@@ -294,11 +318,17 @@ uniform vec3 uSphereColor;
 uniform float uSunDiffusion;
 uniform float uCausticFlat;
 uniform float uTime;
+uniform float uAmp;
+uniform float uFoamStart;
+uniform float uFoamFull;
+uniform float uHeightScale;
+varying float vHeight;
 varying vec3 vWorld;
 varying vec2 vRest;
+varying vec2 vSlope;
+varying float vOverhang;
+varying float vPinchWhite;
 varying float vViewZ;
-varying float vChurn;
-varying float vRipple;
 varying float vJacobian;
 
 // Must match the <T.Mesh> sphere placement and caustics.ts uSphereCenter.
@@ -312,6 +342,38 @@ const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
 
 ${underwaterShadeGlsl}
 ${foamGlsl()}
+${ripplesGlsl()}
+${wavesGlsl()}
+
+// Exact loop mask at FRAGMENT resolution (see the gate in main): one
+// tangent loop yields both tests — the unnormalized Na.y IS the
+// horizontal Jacobian determinant, and Na.y/|Na| is the tilt.
+float pinchMask(vec2 restXZ) {
+	float txx = 0.0;
+	float txy = 0.0;
+	float txz = 0.0;
+	float tzy = 0.0;
+	float tzz = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 wa = uWaveA[i];
+		vec3 wb = uWaveB[i];
+		float theta = (restXZ.x * wa.x + restXZ.y * wa.y) * wa.z - wa.w * uTime + wb.z;
+		float sn = sin(theta);
+		float cs = cos(theta);
+		float qak = wb.y * wb.x * uAmp * wa.z;
+		float ak = wb.x * uAmp * wa.z;
+		txx -= qak * wa.x * wa.x * sn;
+		txy += ak * wa.x * cs;
+		txz -= qak * wa.x * wa.y * sn;
+		tzy += ak * wa.y * cs;
+		tzz -= qak * wa.y * wa.y * sn;
+	}
+	vec3 Tu = vec3(1.0 + txx, txy, txz);
+	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
+	vec3 Na = cross(Tv, Tu);
+	float ny = Na.y / max(length(Na), 0.0001);
+	return max(1.0 - smoothstep(0.0, 0.04, Na.y), 1.0 - smoothstep(0.02, 0.12, ny));
+}
 
 // Ray vs a buoy's oriented box: slab test in the box's local frame.
 // Returns the entering t (world units, both frames are rigid) or -1;
@@ -335,8 +397,13 @@ float buoyHit(mat4 inv, vec3 ro, vec3 rd, out vec3 nWorld) {
 }
 
 void main() {
-	vec3 normal = normalize(cross(dFdx(vWorld), dFdy(vWorld)));
-	if (normal.y < 0.0) normal = -normal;
+	// SMOOTH shading: interpolated analytic wave slope + per-pixel ripple
+	// slope from the sim texture (rings shade at texture resolution no
+	// matter how coarse the mesh is). Churn zones keep the chaotic facet
+	// normal — those facets ARE the boil's look.
+	vec2 slope = vSlope + rippleShadeGrad(vWorld.xz);
+	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
+
 
 	// Pool-style view refraction: the underwater scene is drawn BY the
 	// water. Refract the eye ray at this facet's normal, intersect it with
@@ -406,7 +473,13 @@ void main() {
 	// webbing tear-off. No whiteness is slaved to the instantaneous wave
 	// shape: foam that appeared and vanished with each passing peak read
 	// as unmotivated.
-	float foam = max(max(vChurn, vRipple), foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
+	// TEMP natural-view: ONLY the looping mesh is white. The vertex mask
+	// is near-binary and interpolates as triangular wedges (the fold is a
+	// sub-quad feature), so pixels in the TRANSITION band re-evaluate the
+	// exact mask at fragment resolution — a thin sliver of the screen
+	// pays the wave loop, and the ribbon edges come out curved.
+	float foam = vPinchWhite;
+	if (foam > 0.01 && foam < 0.99) foam = pinchMask(vRest);
 	col = mix(col, uFoamColor, foam);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
@@ -421,21 +494,26 @@ void main() {
 		// Solid water is OPAQUE now: it raytraces its own underwater view,
 		// so nothing rasterized below the surface should show through.
 		transparent: false,
+		// Folded (looping) crests invert their triangle winding — with
+		// default FrontSide culling the rolling tongue of a breaking wave
+		// was never rendered at all, only the crease seam behind it. Same
+		// lesson the caustic splat learned.
+		side: THREE.DoubleSide,
 		vertexShader: `
 uniform float uTime;
 uniform float uAmp;
 varying float vViewZ;
 varying float vHeight;
 varying float vJacobian;
-varying float vChurn;
-varying float vRipple;
 varying vec3 vWorld;
 varying vec2 vRest;
+varying vec2 vSlope;
+varying float vOverhang;
+varying float vPinchWhite;
 
 ${wavesGlsl()}
 ${whitecapsGlsl()}
 ${ripplesGlsl()}
-${frothGlsl()}
 
 void main() {
 	// Sample in world space: when the mesh recenters on the drifting boat,
@@ -445,15 +523,60 @@ void main() {
 	applyWhitecaps(p, world.xz, uTime);
 	vHeight = p.y - world.y;
 	vJacobian = waveJacobian(world.xz, uTime, uAmp);
-	vChurn = applyChurn(p, world.xz, uTime, vJacobian);
+	// TEMP natural-view: ONLY the LOOPING mesh is white. Two strict,
+	// local tests, no neighborhood guessing:
+	//  - J < 0: the horizontal rest->display mapping is INVERTED here —
+	//    this vertex is on the surface segment tucked between the fold
+	//    lines, i.e. inside the loop itself;
+	//  - overhang: the (normalized) surface normal has tipped past
+	//    vertical — the rolling face of the tongue.
+	// Elevated-but-unfolded water near a pinch stays dark.
+	// Analytic ambient-wave SLOPE (the caustic splat's tangent
+	// construction): interpolated per pixel, it shades the swell as a
+	// smooth curved surface instead of per-triangle facets — the facet
+	// look was screen-derivative shading, where the triangle is the
+	// shading unit. Ripple slopes join per-pixel in the fragment.
+	float txx = 0.0;
+	float txy = 0.0;
+	float txz = 0.0;
+	float tzy = 0.0;
+	float tzz = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 wa = uWaveA[i];
+		vec3 wb = uWaveB[i];
+		float theta = (world.x * wa.x + world.z * wa.y) * wa.z - wa.w * uTime + wb.z;
+		float sn = sin(theta);
+		float cs = cos(theta);
+		float qak = wb.y * wb.x * uAmp * wa.z;
+		float ak = wb.x * uAmp * wa.z;
+		txx -= qak * wa.x * wa.x * sn;
+		txy += ak * wa.x * cs;
+		txz -= qak * wa.x * wa.y * sn;
+		tzy += ak * wa.y * cs;
+		tzz -= qak * wa.y * wa.y * sn;
+	}
+	vec3 Tu = vec3(1.0 + txx, txy, txz);
+	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
+	vec3 Na = cross(Tv, Tu);
+	vSlope = -Na.xz / max(Na.y, 0.2);
+	// NORMALIZED normal y: -> 0 means the surface tips vertical, < 0
+	// means it OVERHANGS — the visible rolling tongue of a breaking
+	// loop, which the Jacobian ramp misses (J marks the compressed seam
+	// hidden INSIDE the fold, not the thrown water rolling over it).
+	// Raw Na.y would be wrong here: unnormalized, it IS approximately
+	// the Jacobian determinant again.
+	vOverhang = Na.y / max(length(Na), 0.0001);
+	vPinchWhite = max(
+		1.0 - smoothstep(0.0, 0.04, vJacobian),
+		1.0 - smoothstep(0.02, 0.12, vOverhang)
+	);
 	// Sample ripples at the DISPLACED position: Gerstner slides vertices
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
 	// water's material coordinates, making them swim with the passing waves
 	// instead of staying where the object poked. Ripples are pure smooth
-	// displacement; vRipple whiteness comes only from froth bursts.
+	// displacement, no whiteness.
 	applyRipples(p, p.xz);
-	vRipple = applyFroth(p, p.xz, uTime);
 	vWorld = p;
 	// Rest (material) coordinates for surface-riding decals: foam is
 	// anchored to the WATER, not the world, so it must be sampled in the
@@ -474,8 +597,6 @@ uniform float uFoamFull;
 varying float vViewZ;
 varying float vHeight;
 varying float vJacobian;
-varying float vChurn;
-varying float vRipple;
 
 void main() {
 	// Brighter lines on crests, dimmer in troughs. vHeight is meters above
@@ -487,8 +608,7 @@ void main() {
 	// Churn only for now: the Jacobian foam ramp is temporarily disabled so
 	// the churn reads in isolation. To restore it:
 	// float foam = 1.0 - smoothstep(uFoamFull, uFoamStart, vJacobian);
-	// foam = max(foam, vChurn);
-	float foam = max(vChurn, vRipple);
+	float foam = 0.0;
 	col = mix(col, uFoamColor, foam);
 
 	// Distance fade into the page background, doubling as moire control.
@@ -500,17 +620,10 @@ void main() {
 	});
 	if (!wireframe) waterMaterial.fragmentShader = solidFragment;
 
-	// ---------- Underwater backdrop ----------
-	// The "floor" of the visible ocean: an opaque plane a few meters down.
-	// The surface's transparency reveals it the way the pool reference
-	// reveals its tiles: calm clear water finally reads as WATER because
-	// there is something lit beneath it. It's a depth-colored void, not a
-	// caustic receiver: at 10m under our seas, refracted light is far too
-	// diffuse to pattern it, so caustics render only on OBJECTS below the
-	// surface (the sphere, later fish). BACKDROP_DEPTH is declared up with
-	// the water uniforms, which raytrace to the same plane.
-	const backdropGeometry = new THREE.PlaneGeometry(WATER_SIZE, WATER_SIZE);
-	backdropGeometry.rotateX(-Math.PI / 2);
+	// ---------- Shared underwater uniforms ----------
+	// Historically the backdrop plane's material; the plane itself is gone
+	// (the opaque water raytraces its own floor at BACKDROP_DEPTH), but
+	// this object remains the uniform hub the sphere material references.
 	const backdropUniforms = {
 		// Shared uniform OBJECTS with the water material: one write per
 		// frame updates both shaders.
@@ -535,34 +648,10 @@ void main() {
 		uCausticCenter: waterUniforms.uCausticCenter,
 		uCausticExtent: waterUniforms.uCausticExtent
 	};
-	const backdropMaterial = new THREE.ShaderMaterial({
-		uniforms: backdropUniforms,
-		vertexShader: `
-varying vec3 vWorld;
-varying float vViewZ;
-void main() {
-	vec4 world = modelMatrix * vec4(position, 1.0);
-	vWorld = world.xyz;
-	vec4 view = viewMatrix * world;
-	vViewZ = -view.z;
-	gl_Position = projectionMatrix * view;
-}`,
-		fragmentShader: `
-uniform vec3 uFogColor;
-uniform float uFogDensity;
-uniform vec3 uFloorColor;
-uniform float uLightI;
-varying vec3 vWorld;
-varying float vViewZ;
-
-void main() {
-	vec3 col = uFloorColor * (0.1 + 0.32 * uLightI);
-
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
-	col = mix(col, uFogColor, fog);
-	gl_FragColor = vec4(col, 1.0);
-}`
-	});
+	// No backdrop MESH anymore: since the water went opaque and raytraces
+	// its own floor color, the backdrop plane was 100% occluded — a
+	// full-screen quad of dead fill every frame. backdropUniforms remains
+	// as the shared-uniform hub the sphere material references.
 
 	// Caustic tuning prop: a large pale sphere under the water. Its
 	// curvature, sun-facing shading and depth gradient are what make
@@ -685,7 +774,9 @@ void main() {
 	// Ballistic spray clumps (spray.ts): one instanced low-poly droplet
 	// mesh, matrices rewritten each frame from the particle pool. Dead
 	// slots collapse to scale 0.
-	const sprayGeometry = new THREE.OctahedronGeometry(1, 0);
+	// Detail 1: rounder clumps (the big cover boils read as boulders at
+	// detail 0) while staying low-poly.
+	const sprayGeometry = new THREE.OctahedronGeometry(1, 1);
 	const sprayMaterial = new THREE.MeshBasicMaterial({ color: '#eef6fc' });
 	const sprayMesh = new THREE.InstancedMesh(sprayGeometry, sprayMaterial, MAX_SPRAY);
 	sprayMesh.frustumCulled = false;
@@ -825,12 +916,11 @@ void main() {
 				accumulator -= STEP;
 				waveTime += STEP;
 				game.time = (game.time + STEP) % DAY_SECONDS;
-				// Whitecap events, froth drift, and ballistic spray advance on
-				// the fixed step too (spray after whitecaps: it reads the
-				// freshly scanned break events).
+				// Whitecap events and ballistic spray advance on the fixed
+				// step too (spray after whitecaps: it reads the freshly
+				// scanned break events).
 				setRippleClock(waveTime);
 				updateWhitecaps(STEP, waveTime);
-				updateFroth(STEP, waveTime);
 				updateSpray(STEP, waveTime);
 				contactFoamClock += STEP;
 				if (contactFoamClock >= CONTACT_FOAM_INTERVAL) {
@@ -860,15 +950,17 @@ void main() {
 			backdropUniforms.uRippleCTex.value = rippleSim.texture;
 			causticMap.step(renderer, rippleSim.texture, waterUniforms.uSunDir.value, waveTime);
 			backdropUniforms.uCausticMap.value = causticMap.texture;
-			for (let i = 0; i < MAX_FROTH; i++) {
-				const f = frothBlobs[i];
-				waterUniforms.uFrothA.value[i].set(f.x, f.z, f.birth, f.sigma);
-				waterUniforms.uFrothB.value[i].set(f.amp, 0, 0, 0);
+			// One foam-field update per TWO frames (decay + diffusion +
+			// drift + queued deposits), then point the water shader at the
+			// fresh side.
+			foamAccum += Math.min(delta, 0.1);
+			foamEven = !foamEven;
+			if (foamEven) {
+				foamField.step(renderer, wind.x, wind.z, waveTime, foamAccum);
+				foamAccum = 0;
+				waterUniforms.uFoamTex.value = foamField.texture;
+				waterUniforms.uFoamWebTex.value = foamField.webTexture;
 			}
-			// One foam-field update (decay + diffusion + drift + queued
-			// deposits), then point the water shader at the fresh side.
-			foamField.step(renderer, wind.x, wind.z, waveTime, Math.min(delta, 0.1));
-			waterUniforms.uFoamTex.value = foamField.texture;
 
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
@@ -1046,10 +1138,10 @@ void main() {
 
 	onDestroy(() => {
 		renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+		window.removeEventListener('resize', onWindowResize);
+		clearTimeout(resizeTimer);
 		waterGeometry.dispose();
 		waterMaterial.dispose();
-		backdropGeometry.dispose();
-		backdropMaterial.dispose();
 		causticMap.dispose();
 		sphereGeometry.dispose();
 		sphereMaterial.dispose();
@@ -1075,11 +1167,6 @@ void main() {
 <T.DirectionalLight bind:ref={sun} position={[40, 60, 20]} intensity={env0.lightIntensity * 2} />
 <T.AmbientLight bind:ref={ambient} intensity={env0.ambientIntensity * 1.6} />
 
-<T.Mesh
-	geometry={backdropGeometry}
-	material={backdropMaterial}
-	position={[0, -BACKDROP_DEPTH, 0]}
-/>
 <T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
 
 <T is={sprayMesh} />

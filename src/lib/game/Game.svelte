@@ -8,10 +8,12 @@
 
 	let { active = true }: { active?: boolean } = $props();
 
-	const mobile = window.innerWidth < 720;
-	// Cap device pixel ratio: retina at full DPR doubles fragment work for
-	// little visible gain on a faceted low-poly scene.
-	const dpr = Math.min(window.devicePixelRatio || 1, mobile ? 1.5 : 2);
+	// Cap device pixel ratio at 1.5 EVERYWHERE: desktop retina is DPR 2,
+	// so the old desktop cap of 2 was a no-op right where the fragment
+	// pipeline (underwater raytrace + reflection + foam web) is the frame
+	// budget. 1.5 is 44% less fill than 2, and the soft organic water
+	// hides the difference at our ortho zoom.
+	const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
 
 	// Debug hook: /?tod=0.5 forces a time of day (0 = midnight, 0.5 = noon).
 	const todParam = new URLSearchParams(window.location.search).get('tod');
