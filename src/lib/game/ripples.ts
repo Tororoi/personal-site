@@ -25,13 +25,15 @@
 import * as THREE from 'three'
 import { activeField } from './waves'
 
-export const RIPPLE_RESOLUTION = 1024
+export const RIPPLE_RESOLUTION = 768
 /**
  * Meters of world covered by the domain. The domain must cover the SCENE
  * (the pool reference's domain covers its whole scene; that is the parity
- * that matters, not absolute cell size). At 100m / 1024 the cells are
- * ~0.1m, ~2.5 screen pixels at zoom 26: the same cells-per-pixel regime as
- * the reference. Sub-pixel cells would be waste.
+ * that matters, not absolute cell size). At 100m / 768 the cells are
+ * ~0.13m, ~3.4 screen pixels at zoom 26. Chosen against both neighbors:
+ * 1024 was the reference's cells-per-pixel regime at nearly twice the
+ * cost, and 512 visibly blotched the ring caustics and showed the wave
+ * equation's axis anisotropy as square-ish rings around the buoys.
  */
 export const RIPPLE_EXTENT = 100
 
@@ -39,13 +41,10 @@ export const RIPPLE_EXTENT = 100
  * Calm-water defaults; sea presets override via their `ripples` block (see
  * WaveFieldConfig in waves.ts). displayGain scales the DISPLAY of the field
  * without touching the simulation: the raw physics lives in honest meters
- * (a hard splash ring is ~5-15cm, real but invisible at 26px/m). churn
- * renders LIFTED ripple water as crest-style seethe: calm water makes clean
- * rings, choppy water tears them into agitation.
+ * (a hard splash ring is ~5-15cm, real but invisible at 26px/m).
  */
 const SETTINGS = {
   displayGain: 3.5,
-  churn: 0,
   /** Physical ripple propagation speed, m/s. */
   speed: 1.5,
   damping: 0.9955,
@@ -63,8 +62,6 @@ const PROPAGATION = Math.min(
   2 * ((SETTINGS.speed / 60 / (RIPPLE_EXTENT / RIPPLE_RESOLUTION)) ** 2),
   0.5,
 )
-/** Seethe displacement for churned lifted water, meters. */
-const LIFT_SEETHE_AMPLITUDE = 0.26
 
 /** Gaussian pokes applied per sim step. */
 const MAX_INJECT = 8
@@ -272,9 +269,9 @@ export class RippleSim {
 }
 
 /**
- * Water-shader side: sample the field, displace, and churn only LIFTED
- * displaced water (churn-gated per sea); craters and troughs stay smooth.
- * Splash bursts are froth.ts, not here.
+ * Water-shader side: sample the field and displace. Pure smooth
+ * displacement — no seethe, no whiteness; rings are rings. Splash boil,
+ * when something wants one, is separate machinery (froth.ts).
  */
 export function ripplesGlsl(): string {
   return `
@@ -282,18 +279,10 @@ uniform sampler2D uRippleTex;
 uniform vec2 uRippleCenter;
 uniform float uRippleExtent;
 
-float applyRipples(inout vec3 p, vec2 worldXZ, float t) {
+void applyRipples(inout vec3 p, vec2 worldXZ) {
 	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
-	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return 0.0;
-	vec2 hv = texture2D(uRippleTex, ruv).xy;
-	p.y += hv.x * ${SETTINGS.displayGain.toFixed(2)};
-	float seethe = ${SETTINGS.churn.toFixed(2)} * clamp(max(hv.x, 0.0) * 10.0, 0.0, 1.0);
-	if (seethe > 0.003) {
-		float n1 = sin(worldXZ.x * 23.0 + t * 29.0) * sin(worldXZ.y * 17.0 - t * 25.0);
-		float n2 = sin(worldXZ.x * 9.5 - t * 31.0 + 1.7) * sin(worldXZ.y * 13.5 + t * 21.0);
-		p += vec3(n1 * 0.55, 0.45 + abs(n2), n2 * 0.55) * (${LIFT_SEETHE_AMPLITUDE.toFixed(2)} * seethe);
-	}
-	return seethe;
+	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return;
+	p.y += texture2D(uRippleTex, ruv).x * ${SETTINGS.displayGain.toFixed(2)};
 }`
 }
 

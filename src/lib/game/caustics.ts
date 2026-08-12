@@ -300,9 +300,13 @@ export class CausticMap {
     this.splatCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
 
     // Ping target + region quad for the separable sun-diffusion blur.
+    // HALF resolution: a wide Gaussian has no fine detail to preserve,
+    // so bouncing through a half-res intermediate is visually identical
+    // at a quarter of the taps (everything addresses normalized UV, so
+    // only this allocation changes).
     this.blurTarget = new THREE.WebGLRenderTarget(
-      CAUSTIC_RESOLUTION,
-      CAUSTIC_RESOLUTION,
+      CAUSTIC_RESOLUTION / 2,
+      CAUSTIC_RESOLUTION / 2,
       {
         type: THREE.HalfFloatType,
         format: THREE.RedFormat,
@@ -407,7 +411,9 @@ export class CausticMap {
     // the rest of the way to featureless light.
     const sigmaMeters = Math.min(this.diffusion * 0.8, 0.62)
     const sigmaTexels = sigmaMeters / (CAUSTIC_EXTENT / CAUSTIC_RESOLUTION)
-    if (sigmaTexels > 0.5 && count > 0) {
+    // Below ~1.5 texels the blur is visually nothing (calm's clear-sky
+    // diffusion lands here): skip both passes outright.
+    if (sigmaTexels > 1.5 && count > 0) {
       // One tile of margin so the penumbra can spread past the splat
       // region; taps beyond it read the map's black, consistent with the
       // "no light computed" convention.

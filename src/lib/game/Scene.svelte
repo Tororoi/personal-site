@@ -14,9 +14,11 @@
 	} from './whitecaps';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
-	import { addFroth, FROTH_SIGMA, frothBlobs, frothGlsl, MAX_FROTH, updateFroth } from './froth';
+	// Froth currently has no live emitters (buoys rely on splash + foam);
+	// the machinery stays wired for future effects.
+	import { frothBlobs, frothGlsl, MAX_FROTH, updateFroth } from './froth';
 	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
-	import { FoamField, foamGlsl, FOAM_EXTENT } from './foam';
+	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -297,6 +299,7 @@ varying vec2 vRest;
 varying float vViewZ;
 varying float vChurn;
 varying float vRipple;
+varying float vJacobian;
 
 // Must match the <T.Mesh> sphere placement and caustics.ts uSphereCenter.
 const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
@@ -403,7 +406,7 @@ void main() {
 	// webbing tear-off. No whiteness is slaved to the instantaneous wave
 	// shape: foam that appeared and vanished with each passing peak read
 	// as unmotivated.
-	float foam = max(max(vChurn, vRipple), foamWeb(vRest, foamThicknessAt(vRest)));
+	float foam = max(max(vChurn, vRipple), foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
 	col = mix(col, uFoamColor, foam);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
@@ -447,10 +450,10 @@ void main() {
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
 	// water's material coordinates, making them swim with the passing waves
-	// instead of staying where the object poked. vRipple carries only
-	// churned water (lifted ripple water + splash froth bursts); smooth
-	// ripples stay uncolored.
-	vRipple = max(applyRipples(p, p.xz, uTime), applyFroth(p, p.xz, uTime));
+	// instead of staying where the object poked. Ripples are pure smooth
+	// displacement; vRipple whiteness comes only from froth bursts.
+	applyRipples(p, p.xz);
+	vRipple = applyFroth(p, p.xz, uTime);
 	vWorld = p;
 	// Rest (material) coordinates for surface-riding decals: foam is
 	// anchored to the WATER, not the world, so it must be sampled in the
@@ -589,13 +592,27 @@ void main() {
 	const sphereMaterial = new THREE.ShaderMaterial({
 		uniforms: sphereUniforms,
 		vertexShader: `
+uniform float uTime;
+uniform float uAmp;
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying float vViewZ;
+varying float vWaterY;
+
+${wavesGlsl()}
+
 void main() {
 	vec4 world = modelMatrix * vec4(position, 1.0);
 	vWorld = world.xyz;
 	vNormal = mat3(modelMatrix) * normal;
+	// The ACTUAL water surface above this vertex, not the resting plane:
+	// one fixed-point step undoes the Gerstner horizontal sway, same
+	// inversion the CPU sampler uses. Computed per VERTEX: the waterline
+	// varies at wave scale (meters), far smoother than the mesh, and the
+	// per-pixel version was two full wave sums for every sphere pixel.
+	vec3 D = waveDisplacement(world.xz, uTime, uAmp);
+	D = waveDisplacement(world.xz - D.xz, uTime, uAmp);
+	vWaterY = D.y;
 	vec4 view = viewMatrix * world;
 	vViewZ = -view.z;
 	gl_Position = projectionMatrix * view;
@@ -611,27 +628,21 @@ uniform sampler2D uCausticMap;
 uniform vec2 uCausticCenter;
 uniform float uCausticExtent;
 uniform float uCausticFlat;
-uniform float uTime;
-uniform float uAmp;
 varying vec3 vWorld;
 varying vec3 vNormal;
 varying float vViewZ;
+varying float vWaterY;
 
-${wavesGlsl()}
 ${underwaterShadeGlsl}
 
 void main() {
 	vec3 normal = normalize(vNormal);
 	vec3 sun = normalize(uSunDir);
 
-	// The ACTUAL water surface above this fragment, not the resting plane:
-	// one fixed-point step undoes the Gerstner horizontal sway, same
-	// inversion the CPU sampler uses. A crown standing proud of a storm
-	// trough is genuinely DRY: lit by direct sun, no caustics, no depth
-	// dimming.
-	vec3 D = waveDisplacement(vWorld.xz, uTime, uAmp);
-	D = waveDisplacement(vWorld.xz - D.xz, uTime, uAmp);
-	float waterY = D.y;
+	// True waterline interpolated from the vertex stage (see vertex
+	// shader): a crown standing proud of a storm trough is genuinely
+	// DRY - lit by direct sun, no caustics, no depth dimming.
+	float waterY = vWaterY;
 	float submerged = clamp((waterY - vWorld.y) / 0.35 + 0.5, 0.0, 1.0);
 
 	// --- Dry branch: direct sun with soft wrap so the terminator doesn't
@@ -724,6 +735,67 @@ void main() {
 	const UP = new THREE.Vector3(0, 1, 0);
 	const buoyNormal = new THREE.Vector3();
 
+	// ---------- Contact foam ----------
+	// Where an object meets the surface, aerated water collects: a dense
+	// collar of foam refreshed while contact lasts (the field's decay
+	// erases it a few seconds after contact ends). Buoys get a hull
+	// collar; the sphere gets its TRUE waterline circle — per angle, the
+	// radius where the wave surface crosses the sphere's crown, found by
+	// bisection — which only exists while the crown pokes above the
+	// local surface.
+	const CONTACT_FOAM_INTERVAL = 0.5;
+	let contactFoamClock = 0;
+	// Must match the <T.Mesh> sphere placement and the shader constants.
+	const SPHERE_CX = 3;
+	const SPHERE_CY = -6;
+	const SPHERE_CZ = 2;
+	const SPHERE_CR = 5;
+	function depositContactFoam(t: number) {
+		for (const b of buoys) {
+			const s = sampleOcean(b.x, b.z, t, 1, 1);
+			// Touching = riding the surface, not tossed clear of it.
+			if (Math.abs(b.y - (s.height + 0.15)) > 0.5) continue;
+			for (let k = 0; k < 6; k++) {
+				const a = (k / 6) * Math.PI * 2;
+				addFoam(
+					b.x - s.swayX + Math.cos(a) * 0.3,
+					b.z - s.swayZ + Math.sin(a) * 0.3,
+					0.14,
+					0.9
+				);
+			}
+		}
+
+		const crown = sampleOcean(SPHERE_CX, SPHERE_CZ, t, 1, 1);
+		if (crown.height >= SPHERE_CY + SPHERE_CR) return;
+		const ANGLES = 14;
+		for (let k = 0; k < ANGLES; k++) {
+			const a = (k / ANGLES) * Math.PI * 2;
+			const dx = Math.cos(a);
+			const dz = Math.sin(a);
+			// Bisect: inside the waterline the surface sits below the crown
+			// (exposed), outside it sits above; the crossing is the contact.
+			let lo = 0;
+			let hi = SPHERE_CR - 0.01;
+			for (let i = 0; i < 6; i++) {
+				const mid = (lo + hi) / 2;
+				const s = sampleOcean(SPHERE_CX + dx * mid, SPHERE_CZ + dz * mid, t, 1, 1);
+				const ySphere = SPHERE_CY + Math.sqrt(Math.max(SPHERE_CR * SPHERE_CR - mid * mid, 0));
+				if (s.height < ySphere) lo = mid;
+				else hi = mid;
+			}
+			const r = (lo + hi) / 2;
+			const s = sampleOcean(SPHERE_CX + dx * r, SPHERE_CZ + dz * r, t, 1, 1);
+			const spacing = (2 * Math.PI * Math.max(r, 0.5)) / ANGLES;
+			addFoam(
+				SPHERE_CX + dx * r - s.swayX,
+				SPHERE_CZ + dz * r - s.swayZ,
+				Math.max(0.16, spacing * 0.4),
+				0.95
+			);
+		}
+	}
+
 	// The whitewater churn is mesh displacement in the water shader, not
 	// particles; see applyChurn in whitecaps.ts. Spray was removed: revisit
 	// with the styled render if the storm still wants it.
@@ -760,6 +832,11 @@ void main() {
 				updateWhitecaps(STEP, waveTime);
 				updateFroth(STEP, waveTime);
 				updateSpray(STEP, waveTime);
+				contactFoamClock += STEP;
+				if (contactFoamClock >= CONTACT_FOAM_INTERVAL) {
+					contactFoamClock = 0;
+					// depositContactFoam(waveTime);
+				}
 			}
 
 			const env = computeEnv(game.time / DAY_SECONDS);
@@ -790,7 +867,7 @@ void main() {
 			}
 			// One foam-field update (decay + diffusion + drift + queued
 			// deposits), then point the water shader at the fresh side.
-			foamField.step(renderer, wind.x, wind.z);
+			foamField.step(renderer, wind.x, wind.z, waveTime, Math.min(delta, 0.1));
 			waterUniforms.uFoamTex.value = foamField.texture;
 
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
@@ -867,12 +944,12 @@ void main() {
 						const impact = Math.abs(riseRate - b.vy);
 						if (impact > 1.2) {
 							const amp = Math.min((impact - 1.2) / 3.5, 1);
-							// Three separate effects: the displacement hat (water
-							// pushed aside, wave equation), the froth burst
-							// (churn that boils in place, froth.ts), and the
-							// airborne crown (ballistic spray, spray.ts).
+							// Two effects: the displacement hat (water pushed
+							// aside, wave equation) and the airborne crown
+							// (ballistic spray, spray.ts) whose landings leave
+							// the foam. No froth boil: buoys rely on splash +
+							// foam alone.
 							injectRipple(px, pz, 0.8, 0.12 + amp * 0.35);
-							addFroth(waveTime, px, pz, FROTH_SIGMA, 0.5 + amp * 0.7);
 							emitImpactSpray(waveTime, px, pz, 0, 0, amp);
 						}
 						b.y = waterline;
@@ -940,7 +1017,6 @@ void main() {
 					const sideZ = pz + (b.wz / tipSpeed) * TIP_RIM;
 					const tip = Math.min((tipSpeed - TIP_SPLASH_THRESHOLD) / 3.5, 1);
 					injectRipple(sideX, sideZ, 0.3, 0.04 + tip * 0.08);
-					addFroth(waveTime, sideX, sideZ, 0.32, 0.15 + tip * 0.35);
 					// The rim digging in flicks water outward on that side.
 					emitImpactSpray(waveTime, sideX, sideZ, b.wx / tipSpeed, b.wz / tipSpeed, tip * 0.5);
 				}

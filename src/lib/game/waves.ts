@@ -86,14 +86,10 @@ export type WaveFieldConfig = {
   /**
    * How this sea renders the interactive ripple field (ripples.ts).
    * Omitted values fall back to the calm-water defaults there.
-   * churn: 0 = disturbances stay smooth rings; 1 = disturbance energy
-   * expresses as crest-style seething froth (choppy water tears rings up).
    */
   ripples?: {
     /** Visual amplification of the smooth ripple displacement. */
     displayGain?: number
-    /** 0..1: fraction of ripple energy rendered as seethe distortion. */
-    churn?: number
     /** Physical ripple propagation speed, m/s (resolution-independent). */
     speed?: number
     /** Per-step energy retention; lower = rings die faster. */
@@ -117,6 +113,17 @@ export type WaveFieldConfig = {
     maxLambda?: number
     /** Wave slope (amp * k); sets capillary energy. */
     slope?: number
+  }
+  /**
+   * Foam-field tuning for this sea (foam.ts). pinchJStart is the
+   * Jacobian below which crests GENERATE foam: it is effectively a
+   * coverage knob per sea state, because the J distribution differs
+   * wildly between presets — 0.65 gives largeSwell sparse elegant
+   * trails but describes most of a storm's surface most of the time
+   * (which saturated the whole sea white). Default 0.65.
+   */
+  foam?: {
+    pinchJStart?: number
   }
   /**
    * Reflected sky for this sea, sampled by the water's Wallace-style
@@ -155,13 +162,13 @@ export const SEA_PRESETS = {
     chop: 2.25,
     // Rings still readable, with some froth on energetic disturbances.
     ripples: {
-      displayGain: 3.2,
-      churn: 0.35,
-      speed: 1.5,
-      damping: 0.993,
+      displayGain: 1.6,
+      speed: 2.2,
+      damping: 0.96,
     },
     // Big weather brewing: a light overcast gray, sun well scattered.
     sky: { zenith: '#c3cbd1', horizon: '#e9edf0', diffusion: 0.4 },
+    foam: { pinchJStart: 0.3 },
     bands: [
       // Primary swell: the long rolling system on the wind heading.
       {
@@ -224,7 +231,11 @@ export const SEA_PRESETS = {
     timeScale: 1,
     // Clean water: smooth rings, no froth. These are the signed-off
     // calm-water interaction settings.
-    ripples: { displayGain: 3.5, churn: 0, speed: 1.2, damping: 0.96 },
+    ripples: {
+      displayGain: 1.6,
+      speed: 2.2,
+      damping: 0.96,
+    },
     // A gentle day mirrors a blue sky; near-point sun, crisp caustics.
     sky: { zenith: '#2e6fb2', horizon: '#a9cfe8', diffusion: 0.05 },
     bands: [
@@ -284,13 +295,15 @@ export const SEA_PRESETS = {
     // seething froth (crest-churn style), and ring energy dies fast.
     ripples: {
       displayGain: 1.6,
-      churn: 0,
       speed: 2.2,
       damping: 0.96,
     },
     // Heavy cloud deck: a medium gray, darker than the swell's overcast;
     // a ghost of the caustic web survives it.
     sky: { zenith: '#6b737a', horizon: '#98a0a7', diffusion: 0.7 },
+    // Storm J dips below 0.65 nearly everywhere; only genuinely breaking
+    // water (J < 0.3) may generate foam or the sea saturates white.
+    foam: { pinchJStart: 0.1 },
     bands: [
       // Dominant storm wind sea: big, steep, and disorganized.
       {

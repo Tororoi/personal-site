@@ -216,8 +216,20 @@ export function emitImpactSpray(
   }
 }
 
+// Landing checks alternate between particle halves each step (the
+// sampleOcean per particle is the module's dominant CPU cost, and a
+// clump moves ~5cm between checks — the extra latency is invisible).
+let checkParity = 0
+
 // One entry per event slot: which birth we've already burst for.
 const burstFor = new Float64Array(MAX_EVENTS).fill(-1)
+
+// NOTE: crest-foam painting moved INTO the foam field's sim shader
+// (foam.ts, PINCH_RATE): event-based CPU painting structurally missed
+// most visible pinches — the scan grid skipped narrow pinch lines, the
+// event threshold (J < 0.08) is far stricter than visible churn (0.28),
+// slots cap at 8, and events sit still while crests move. The field
+// evaluates pinch per texel, so every visible pinch grows foam.
 
 /** Fixed-step update: emission from live breaks, then ballistics. */
 export function updateSpray(dt: number, t: number) {
@@ -246,7 +258,9 @@ export function updateSpray(dt: number, t: number) {
     for (let k = 0; k < n; k++) emitCrest(t, e.x, e.z, e.sigma)
   }
 
-  for (const p of sprayParticles) {
+  checkParity ^= 1
+  for (let i = 0; i < sprayParticles.length; i++) {
+    const p = sprayParticles[i]
     if (p.size === 0) continue
     if (t - p.birth > LIFE_MAX) {
       p.size = 0
@@ -262,9 +276,10 @@ export function updateSpray(dt: number, t: number) {
     p.z += p.vz * dt
     // A submerged clump is dead REGARDLESS of rise or fall: a trough
     // emission can sit below the NEIGHBORING wave face for its entire
-    // arc, invisible behind the opaque water. Checked every frame, and
-    // only clumps that had a real airborne life hand anything back —
-    // foam appearing where no droplet was ever visible reads as haunted.
+    // arc, invisible behind the opaque water. Only clumps that had a
+    // real airborne life hand anything back — foam appearing where no
+    // droplet was ever visible reads as haunted.
+    if ((i & 1) !== checkParity) continue
     const s = sampleOcean(p.x, p.z, t, 1, 1)
     if (p.y < s.height - 0.02) {
       // Gate sized so trough-buried ghosts (dead in < 0.05s) still hand
