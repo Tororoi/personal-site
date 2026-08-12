@@ -15,7 +15,7 @@
 import { activeField } from './waves'
 import { windVector } from './whitecaps'
 
-export const MAX_FROTH = 16
+export const MAX_FROTH = 32
 
 /** Seconds for a burst to decay to 1/e. Life is ~4x this. */
 const FROTH_LIFE = 0.2
@@ -27,11 +27,11 @@ const FROTH_DRIFT = 0.06
  * Extra along-wind radius growth per m/s of wind: bursts smear into
  * windrow streaks instead of staying round, like the whitecap foam.
  */
-const FROTH_STRETCH = 0.042
+const FROTH_STRETCH = 0.062
 
 const SETTINGS = {
   /** Seethe displacement, meters at full intensity. */
-  frothAmplitude: 1.26,
+  frothAmplitude: 1.46,
   /** Whiteness gain: bursts paint solid white well before full seethe. */
   frothWhiteness: 4.2,
   /** Initial gaussian radius of a splashdown burst, meters. */
@@ -143,12 +143,25 @@ float applyFroth(inout vec3 p, vec2 worldXZ, float t) {
 		if (intensity > 0.01) {
 			float n1 = sin(worldXZ.x * 23.0 + t * 29.0) * sin(worldXZ.y * 17.0 - t * 25.0);
 			float n2 = sin(worldXZ.x * 9.5 - t * 31.0 + 1.7) * sin(worldXZ.y * 13.5 + t * 21.0);
-			// Base seethe at froth's own amplitude, then the crest-churn
-			// wind grip at the churn's amplitude: amplified along-wind
-			// seethe plus the downwind smear that, at storm strength,
-			// overlaps the mesh into the same torn, folded look as
-			// looping crests.
-			vec3 disp = vec3(n1 * 0.55, 0.5 + abs(n2), n2 * 0.55) * ${SETTINGS.frothAmplitude.toFixed(2)};
+			// Vertical spikes are BALLISTIC, same construction as the crest
+			// churn: parabolic arcs whose period scales with sqrt(height),
+			// making the fall acceleration exactly g for every spike (see
+			// applyChurn). Baked cycle: T = sqrt(8 * frothAmplitude * 1.5 / g).
+			float hA = abs(sin(worldXZ.x * 12.9) * sin(worldXZ.y * 15.7));
+			float hB = fract(hA * 61.7);
+			float heightFactor = 0.3 + 0.7 * hA;
+			float period = ${Math.sqrt((8 * SETTINGS.frothAmplitude * 1.5) / 9.8).toFixed(3)} * sqrt(heightFactor) * sqrt(uChurnLift + 0.001);
+			float tau = fract(t / max(period, 0.05) + hB * 7.31);
+			float arc = 4.0 * tau * (1.0 - tau);
+			// frothAmplitude sizes ONLY the vertical throw. Lateral jitter
+			// runs at the crest churn's scale (uChurnAmp): reusing the big
+			// froth amplitude laterally made vertices vibrate sideways by
+			// most of a meter, which read as jitter, and sideways shoves on
+			// sloped water dipped spikes below the surface. Vertical is a
+			// ballistic arc, always >= 0: froth only ever stands ABOVE the
+			// water it sits on.
+			vec3 disp = vec3(n1 * 0.55, 0.0, n2 * 0.55) * uChurnAmp;
+			disp.y = heightFactor * arc * 1.5 * uChurnLift * ${SETTINGS.frothAmplitude.toFixed(2)};
 			float alongT = disp.x * windDir.x + disp.z * windDir.y;
 			disp.xz += windDir * (abs(alongT) * uChurnWindAniso + uChurnWindPush) * windSpeed * uChurnAmp;
 			p += disp * min(intensity, 1.0);

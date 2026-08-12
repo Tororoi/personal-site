@@ -239,7 +239,7 @@ export const SEA_PRESETS = {
    */
   storm: {
     seed: 4242,
-    windAngle: 0.12,
+    windAngle: 0.32,
     windSpeed: 48,
     chop: 4.6,
     // Choppy water tears rings apart: disturbances render mostly as

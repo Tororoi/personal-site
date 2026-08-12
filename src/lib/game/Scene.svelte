@@ -85,6 +85,10 @@
 		uChurnStart: { value: 0.28 },
 		uChurnFull: { value: -0.15 },
 		uChurnAmp: { value: 0.22 },
+		// Multiplier on the UPWARD seethe component only, for both crest
+		// churn and splash froth. Raises the erupting height of white water
+		// without touching horizontal jitter or the wind push.
+		uChurnLift: { value: 2.0 },
 		// Wind's grip on the churn: uWind is refreshed each frame (gusts
 		// included). Aniso amplifies the downwind seethe component; push
 		// smears the churned mass downwind. Both are per m/s of wind, so

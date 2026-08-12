@@ -224,6 +224,7 @@ uniform float uChurnAmp;   // meters of turbulent displacement at full churn
 uniform vec2 uWind;            // live wind vector, m/s, gust- and wander-modulated
 uniform float uChurnWindAniso; // per m/s: how much the downwind seethe component amplifies
 uniform float uChurnWindPush;  // per m/s: steady downwind smear of churned water
+uniform float uChurnLift;      // multiplier on the UPWARD seethe component only
 uniform vec2 uWindShelter;     // heights (m): below x sheltered from wind, above y fully exposed
 uniform float uGustBoost;      // extra wind grip inside a traveling gust patch
 uniform vec2 uWindTravel;      // integrated wind displacement; advects the gust field
@@ -246,7 +247,21 @@ float applyChurn(inout vec3 p, vec2 worldXZ, float t, float jacobian) {
 	if (churn > 0.001) {
 		float n1 = sin(worldXZ.x * 13.7 + t * 21.0) * sin(worldXZ.y * 11.3 - t * 17.0);
 		float n2 = sin(worldXZ.x * 7.9 - t * 25.0 + 3.1) * sin(worldXZ.y * 15.1 + t * 19.0);
-		vec3 turb = vec3(n1 * 0.6, 0.4 + abs(n2), n2 * 0.6);
+		// Vertical spikes are BALLISTIC: each vertex repeatedly throws a
+		// spike along a parabolic arc (rise, decelerate, fall), so descent
+		// never outruns gravity. Static spatial hashes pick per-vertex
+		// height and phase; the period scales with sqrt(height), which
+		// makes the fall acceleration exactly g for EVERY spike:
+		//   peak H = uChurnAmp * uChurnLift * 1.4 * heightFactor
+		//   T = sqrt(8H/g)  ->  accel = 8H/T^2 = g, independent of hash.
+		// Horizontal shimmer stays fast; sideways spray is not gravity-bound.
+		float hA = abs(sin(worldXZ.x * 12.9) * sin(worldXZ.y * 15.7));
+		float hB = fract(hA * 61.7);
+		float heightFactor = 0.25 + 0.75 * hA;
+		float period = sqrt(uChurnAmp * uChurnLift * 1.143 * heightFactor);
+		float tau = fract(t / max(period, 0.05) + hB * 7.31);
+		float arc = 4.0 * tau * (1.0 - tau);
+		vec3 turb = vec3(n1 * 0.6, heightFactor * arc * 1.4 * uChurnLift, n2 * 0.6);
 		float windSpeed = length(uWind);
 		if (windSpeed > 0.001) {
 			vec2 windDir = uWind / windSpeed;
