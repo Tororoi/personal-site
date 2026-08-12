@@ -9,12 +9,12 @@
  *
  *   v += (average of neighbors - h) * propagation;  v *= damping;  h += v
  *
- * Objects interact by INJECTING gaussian pokes (injectRipple). Splash
- * rings, bow wakes, churn puddles, interference and everything else emerge
- * from propagation; nothing is choreographed.
+ * Objects interact by INJECTING displacement hats (injectRipple): water
+ * pushed down at the center, crowned up around it. Rings, wakes,
+ * interference and everything else emerge from propagation.
  *
- * The water vertex shader samples the field (ripplesGlsl) and adds it to
- * the surface, deriving whiteness from local wave energy.
+ * This module is ONLY the wave dynamics. The non-propagating burst of
+ * splash churn is a separate effect with separate machinery: froth.ts.
  *
  * Not CPU-twinned: ripples are centimeters and decorative; floaters ride
  * the ambient surface. The domain is world-anchored at uCenter (origin for
@@ -23,21 +23,30 @@
  */
 
 import * as THREE from 'three'
+import { activeField } from './waves'
 
 export const RIPPLE_RESOLUTION = 256
 /** Meters of world covered by the domain; cell = extent / resolution. */
 export const RIPPLE_EXTENT = 80
-/** Wave-equation step scale. Higher = faster ripples; keep under ~0.5. */
-const PROPAGATION = 0.14
-/** Per-step energy retention. Closer to 1 = ripples ring longer. */
-const DAMPING = 0.9955
+
 /**
- * Visual amplification of the field where the water mesh samples it. The
- * raw physics lives in honest meters (a hard splash ring is ~5-15cm, real
- * but invisible at 26px/m); this scales the DISPLAY without touching the
- * simulation, so propagation stays physical.
+ * Calm-water defaults; sea presets override via their `ripples` block (see
+ * WaveFieldConfig in waves.ts). displayGain scales the DISPLAY of the field
+ * without touching the simulation: the raw physics lives in honest meters
+ * (a hard splash ring is ~5-15cm, real but invisible at 26px/m). churn
+ * renders LIFTED ripple water as crest-style seethe: calm water makes clean
+ * rings, choppy water tears them into agitation.
  */
-const DISPLAY_GAIN = 3.5
+const SETTINGS = {
+  displayGain: 3.5,
+  churn: 0,
+  propagation: 0.14,
+  damping: 0.9955,
+  ...activeField.ripples,
+}
+/** Seethe displacement for churned lifted water, meters. */
+const LIFT_SEETHE_AMPLITUDE = 0.26
+
 /** Gaussian pokes applied per sim step. */
 const MAX_INJECT = 8
 
@@ -45,8 +54,9 @@ type Injection = { x: number; z: number; radius: number; strength: number }
 const pending: Injection[] = []
 
 /**
- * Poke the water at world (x, z): a gaussian push of `strength` meters over
- * `radius` meters. The wave equation turns it into an expanding ring.
+ * Disturb the water at world (x, z): a displacement "hat" of `strength`
+ * meters (down at center, crown around), which the wave equation evolves.
+ * For the non-propagating burst of splash churn, see froth.ts.
  */
 export function injectRipple(
   x: number,
@@ -96,7 +106,17 @@ void main() {
 		vec4 inj = uInject[i];
 		if (inj.w == 0.0) continue;
 		vec2 d = world - inj.xy;
-		h -= inj.w * exp(-dot(d, d) / (2.0 * inj.z * inj.z));
+		float dist2 = dot(d, d);
+		// Displacement-conserving "hat": the object pushes water DOWN at the
+		// center while the displaced volume piles UP in a crown around it,
+		// simultaneously. A splash is local displacement, not a wave launch;
+		// a balanced shape also radiates far less traveling ring than a
+		// single-signed poke.
+		float g = exp(-dist2 / (2.0 * inj.z * inj.z));
+		float dist = sqrt(dist2);
+		float rimSigma = 0.55 * inj.z;
+		float rim = exp(-pow(dist - 1.3 * inj.z, 2.0) / (2.0 * rimSigma * rimSigma));
+		h += inj.w * (0.85 * rim - g);
 	}
 
 	// Absorb near the domain boundary so ripples die instead of reflecting.
@@ -132,8 +152,8 @@ export class RippleSim {
       uniforms: {
         uPrev: { value: this.targets[0].texture },
         uTexel: { value: 1 / RIPPLE_RESOLUTION },
-        uPropagation: { value: PROPAGATION },
-        uDamping: { value: DAMPING },
+        uPropagation: { value: SETTINGS.propagation },
+        uDamping: { value: SETTINGS.damping },
         uCenter: { value: new THREE.Vector2(0, 0) },
         uExtent: { value: RIPPLE_EXTENT },
         uInject: {
@@ -184,8 +204,9 @@ export class RippleSim {
 }
 
 /**
- * Water-shader side: sample the field, displace, and derive whiteness from
- * local wave energy (fast-moving or tall ripple water is aerated).
+ * Water-shader side: sample the field, displace, and churn only LIFTED
+ * displaced water (churn-gated per sea); craters and troughs stay smooth.
+ * Splash bursts are froth.ts, not here.
  */
 export function ripplesGlsl(): string {
   return `
@@ -193,11 +214,17 @@ uniform sampler2D uRippleTex;
 uniform vec2 uRippleCenter;
 uniform float uRippleExtent;
 
-float applyRipples(inout vec3 p, vec2 worldXZ) {
+float applyRipples(inout vec3 p, vec2 worldXZ, float t) {
 	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
 	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return 0.0;
 	vec2 hv = texture2D(uRippleTex, ruv).xy;
-	p.y += hv.x * ${DISPLAY_GAIN.toFixed(2)};
-	return clamp(abs(hv.y) * 26.0 + max(abs(hv.x) - 0.04, 0.0) * 5.0, 0.0, 1.0);
+	p.y += hv.x * ${SETTINGS.displayGain.toFixed(2)};
+	float seethe = ${SETTINGS.churn.toFixed(2)} * clamp(max(hv.x, 0.0) * 10.0, 0.0, 1.0);
+	if (seethe > 0.003) {
+		float n1 = sin(worldXZ.x * 23.0 + t * 29.0) * sin(worldXZ.y * 17.0 - t * 25.0);
+		float n2 = sin(worldXZ.x * 9.5 - t * 31.0 + 1.7) * sin(worldXZ.y * 13.5 + t * 21.0);
+		p += vec3(n1 * 0.55, 0.45 + abs(n2), n2 * 0.55) * (${LIFT_SEETHE_AMPLITUDE.toFixed(2)} * seethe);
+	}
+	return seethe;
 }`
 }

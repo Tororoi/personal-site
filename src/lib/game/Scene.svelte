@@ -13,6 +13,7 @@
 		windVector
 	} from './whitecaps';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl } from './ripples';
+	import { addFroth, FROTH_SIGMA, frothBlobs, frothGlsl, MAX_FROTH } from './froth';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -111,7 +112,11 @@
 		// Texture re-pointed each frame after the sim step (ping-pong swap).
 		uRippleTex: { value: null as THREE.Texture | null },
 		uRippleCenter: { value: new THREE.Vector2(0, 0) },
-		uRippleExtent: { value: RIPPLE_EXTENT }
+		uRippleExtent: { value: RIPPLE_EXTENT },
+		// Splash froth blobs (froth.ts), refreshed each frame from the same
+		// array addFroth() writes.
+		uFrothA: { value: Array.from({ length: MAX_FROTH }, () => new THREE.Vector4()) },
+		uFrothB: { value: Array.from({ length: MAX_FROTH }, () => new THREE.Vector4()) }
 	};
 
 	// The wave-equation sim that owns uRippleTex's contents.
@@ -132,6 +137,7 @@ varying float vRipple;
 ${wavesGlsl()}
 ${whitecapsGlsl()}
 ${ripplesGlsl()}
+${frothGlsl()}
 
 void main() {
 	// Sample in world space: when the mesh recenters on the drifting boat,
@@ -146,8 +152,10 @@ void main() {
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
 	// water's material coordinates, making them swim with the passing waves
-	// instead of staying where the object poked.
-	vRipple = applyRipples(p, p.xz);
+	// instead of staying where the object poked. vRipple carries only
+	// churned water (lifted ripple water + splash froth bursts); smooth
+	// ripples stay uncolored.
+	vRipple = max(applyRipples(p, p.xz, uTime), applyFroth(p, p.xz, uTime));
 	vec4 view = viewMatrix * vec4(p, 1.0);
 	vViewZ = -view.z;
 	gl_Position = projectionMatrix * view;
@@ -177,8 +185,7 @@ void main() {
 	// the churn reads in isolation. To restore it:
 	// float foam = 1.0 - smoothstep(uFoamFull, uFoamStart, vJacobian);
 	// foam = max(foam, vChurn);
-	float foam = vChurn;
-	foam = max(foam, vRipple);
+	float foam = max(vChurn, vRipple);
 	col = mix(col, uFoamColor, foam);
 
 	// Distance fade into the page background, doubling as moire control.
@@ -213,13 +220,21 @@ void main() {
 	// ballistically until the surface catches it again.
 	// y/vy: vertical state. tx/tz: tilt (horizontal components of the up
 	// vector), wx/wz: tilt velocity, for the bottom-heavy pendulum dynamics.
-	// pw: previous waterline, for the surface's rise rate.
+	// pw: previous waterline, for the surface's rise rate. lt: time of the
+	// last directional tip splash (throttle).
 	const buoys = [
-		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0 },
-		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0 },
-		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0 }
+		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10 },
+		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10 },
+		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10 }
 	];
 	let buoyMeshes = $state<(THREE.Mesh | undefined)[]>([]);
+
+	// Disturbance hierarchy: the crest-fall splashdown is THE event; all
+	// other interactions sit far below it. Tip splashes are small,
+	// one-sided, and throttled; ambient bobbing barely registers.
+	const TIP_SPLASH_THRESHOLD = 2.0; // tilt speed (1/s) that counts as digging in
+	const TIP_SPLASH_COOLDOWN = 0.3; // seconds between tip splashes per buoy
+	const TIP_RIM = 0.38; // meters: splash lands off the rim, not the center
 
 	const BUOY_GRAVITY = 9.8; // m/s^2: the fall-rate clamp
 	// Cap on vertical velocity carried out of the water, so a violent crest
@@ -293,6 +308,11 @@ void main() {
 			// freshly written side of the ping-pong pair.
 			rippleSim.step(renderer);
 			waterUniforms.uRippleTex.value = rippleSim.texture;
+			for (let i = 0; i < MAX_FROTH; i++) {
+				const f = frothBlobs[i];
+				waterUniforms.uFrothA.value[i].set(f.x, f.z, f.birth, f.sigma);
+				waterUniforms.uFrothB.value[i].set(f.amp, 0, 0, 0);
+			}
 
 			if (sun) {
 				sun.position.set(env.lightDir[0] * 80, env.lightDir[1] * 80, env.lightDir[2] * 80);
@@ -338,12 +358,13 @@ void main() {
 					}
 					b.y = waterline;
 					// The hull pushing through the water is a continuous
-					// disturbance: the wave equation turns it into wake and
-					// churn. Strength follows how hard the surface works
-					// against the buoy, including breaking water (low J).
+					// disturbance, but a QUIET one: quadratic in rise rate
+					// so gentle bobbing injects nearly nothing, and capped
+					// far below a splashdown. Displacement only; froth is
+					// reserved for actual impacts.
 					const breaking = THREE.MathUtils.clamp((0.4 - surface.jacobian) / 0.8, 0, 1);
-					const agitation = Math.min(Math.abs(riseRate) * 0.022 + breaking * 0.035, 0.09);
-					injectRipple(px, pz, 0.45, agitation);
+					const agitation = Math.min(riseRate * riseRate * 0.005 + breaking * 0.012, 0.035);
+					if (agitation > 0.004) injectRipple(px, pz, 0.45, agitation);
 				} else {
 					// Off the crest: the surface fell faster than gravity
 					// allows. Fall ballistically until the water catches us.
@@ -357,7 +378,11 @@ void main() {
 						const impact = Math.abs(riseRate - b.vy);
 						if (impact > 1.2) {
 							const amp = Math.min((impact - 1.2) / 3.5, 1);
+							// Two separate effects: the displacement hat (water
+							// pushed aside, wave equation) and the froth burst
+							// (churn that boils in place, froth.ts).
 							injectRipple(px, pz, 0.8, 0.12 + amp * 0.35);
+							addFroth(waveTime, px, pz, FROTH_SIGMA, 0.5 + amp * 0.7);
 						}
 						b.y = waterline;
 						b.vy = 0;
@@ -401,6 +426,24 @@ void main() {
 				b.tz = THREE.MathUtils.clamp(b.tz + b.wz * buoyDt, -1.4, 1.4);
 				buoyNormal.set(b.tx, 1, b.tz).normalize();
 				mesh.quaternion.setFromUnitVectors(UP, buoyNormal);
+
+				// Directional tip splash: swinging hard means the rim digs
+				// into the water on the side the buoy is rotating toward, so
+				// a small one-sided splash lands off that rim. Throttled and
+				// far weaker than a crest-fall splashdown.
+				const tipSpeed = Math.hypot(b.wx, b.wz);
+				if (
+					!airborne &&
+					tipSpeed > TIP_SPLASH_THRESHOLD &&
+					waveTime - b.lt > TIP_SPLASH_COOLDOWN
+				) {
+					b.lt = waveTime;
+					const sideX = px + (b.wx / tipSpeed) * TIP_RIM;
+					const sideZ = pz + (b.wz / tipSpeed) * TIP_RIM;
+					const tip = Math.min((tipSpeed - TIP_SPLASH_THRESHOLD) / 3.5, 1);
+					injectRipple(sideX, sideZ, 0.3, 0.04 + tip * 0.08);
+					addFroth(waveTime, sideX, sideZ, 0.32, 0.15 + tip * 0.35);
+				}
 			}
 		},
 		{ autoStart: false }

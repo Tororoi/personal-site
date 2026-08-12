@@ -83,6 +83,28 @@ export type WaveFieldConfig = {
    * speeds between long and short waves stay physical.
    */
   timeScale?: number
+  /**
+   * How this sea renders the interactive ripple field (ripples.ts).
+   * Omitted values fall back to the calm-water defaults there.
+   * churn: 0 = disturbances stay smooth rings; 1 = disturbance energy
+   * expresses as crest-style seething froth (choppy water tears rings up).
+   */
+  ripples?: {
+    /** Visual amplification of the smooth ripple displacement. */
+    displayGain?: number
+    /** 0..1: fraction of ripple energy rendered as seethe distortion. */
+    churn?: number
+    /** Wave-equation step scale; higher = faster spreading. */
+    propagation?: number
+    /** Per-step energy retention; lower = rings die faster. */
+    damping?: number
+    /** Splash-froth seethe displacement, meters (consumed by froth.ts). */
+    frothAmplitude?: number
+    /** Splash-froth whiteness gain (consumed by froth.ts). */
+    frothWhiteness?: number
+    /** Splashdown froth burst radius, meters (consumed by froth.ts). */
+    frothSigma?: number
+  }
   bands: WaveBand[]
 }
 
@@ -97,6 +119,13 @@ export const SEA_PRESETS = {
     windAngle: 0.42,
     windSpeed: 9,
     chop: 2.25,
+    // Rings still readable, with some froth on energetic disturbances.
+    ripples: {
+      displayGain: 3.2,
+      churn: 0.35,
+      propagation: 0.14,
+      damping: 0.993,
+    },
     bands: [
       // Primary swell: the long rolling system on the wind heading.
       {
@@ -157,6 +186,9 @@ export const SEA_PRESETS = {
     windSpeed: 2,
     chop: 0.55,
     timeScale: 1,
+    // Clean water: smooth rings, no froth. These are the signed-off
+    // calm-water interaction settings.
+    ripples: { displayGain: 3.5, churn: 0, propagation: 0.14, damping: 0.9955 },
     bands: [
       // One long, low swell rolling through.
       {
@@ -210,6 +242,14 @@ export const SEA_PRESETS = {
     windAngle: 0.12,
     windSpeed: 48,
     chop: 4.6,
+    // Choppy water tears rings apart: disturbances render mostly as
+    // seething froth (crest-churn style), and ring energy dies fast.
+    ripples: {
+      displayGain: 2.6,
+      churn: 0.05,
+      propagation: 0.15,
+      damping: 0.988,
+    },
     bands: [
       // Dominant storm wind sea: big, steep, and disorganized.
       {
