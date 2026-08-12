@@ -13,7 +13,7 @@
 		windVector
 	} from './whitecaps';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl } from './ripples';
-	import { addFroth, FROTH_SIGMA, frothBlobs, frothGlsl, MAX_FROTH } from './froth';
+	import { addFroth, FROTH_SIGMA, frothBlobs, frothGlsl, MAX_FROTH, updateFroth } from './froth';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -286,8 +286,9 @@ void main() {
 				accumulator -= STEP;
 				waveTime += STEP;
 				game.time = (game.time + STEP) % DAY_SECONDS;
-				// Whitecap events and spray advance on the fixed step too.
+				// Whitecap events and froth drift advance on the fixed step too.
 				updateWhitecaps(STEP, waveTime);
+				updateFroth(STEP, waveTime);
 			}
 
 			const env = computeEnv(game.time / DAY_SECONDS);

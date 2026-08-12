@@ -13,6 +13,7 @@
  */
 
 import { activeField } from './waves'
+import { windVector } from './whitecaps'
 
 export const MAX_FROTH = 16
 
@@ -20,6 +21,13 @@ export const MAX_FROTH = 16
 const FROTH_LIFE = 0.2
 /** Meters/second the blob's radius grows (bubbles spreading). */
 const FROTH_SPREAD = 0.25
+/** Blob drift, as a fraction of wind speed (surface foam rides the wind). */
+const FROTH_DRIFT = 0.06
+/**
+ * Extra along-wind radius growth per m/s of wind: bursts smear into
+ * windrow streaks instead of staying round, like the whitecap foam.
+ */
+const FROTH_STRETCH = 0.042
 
 const SETTINGS = {
   /** Seethe displacement, meters at full intensity. */
@@ -67,6 +75,16 @@ export const frothBlobs: FrothBlob[] = Array.from(
   }),
 )
 
+/** Step live blobs: drift downwind with the gusting wind. Fixed-step. */
+export function updateFroth(dt: number, t: number) {
+  const wind = windVector(t)
+  for (const b of frothBlobs) {
+    if (b.amp === 0 || t - b.birth > FROTH_LIFE * 4) continue
+    b.x += wind.x * FROTH_DRIFT * dt
+    b.z += wind.z * FROTH_DRIFT * dt
+  }
+}
+
 export function addFroth(
   t: number,
   x: number,
@@ -95,8 +113,15 @@ export function frothGlsl(): string {
 uniform vec4 uFrothA[MAX_FROTH]; // x, z, birth, sigma0
 uniform vec4 uFrothB[MAX_FROTH]; // amp, unused...
 
+// NOTE: composed after whitecapsGlsl() in the water shader; reuses its
+// uWind, uChurnWindAniso, uChurnWindPush and uChurnAmp uniforms so froth's
+// wind grip matches the crest churn exactly: one tuning surface for how
+// wind tears white water, wherever it came from.
+
 float applyFroth(inout vec3 p, vec2 worldXZ, float t) {
 	float white = 0.0;
+	float windSpeed = length(uWind);
+	vec2 windDir = windSpeed > 0.001 ? uWind / windSpeed : vec2(1.0, 0.0);
 	for (int i = 0; i < MAX_FROTH; i++) {
 		float amp = uFrothB[i].x;
 		if (amp < 0.01) continue;
@@ -104,14 +129,29 @@ float applyFroth(inout vec3 p, vec2 worldXZ, float t) {
 		float age = t - A.z;
 		if (age < 0.0 || age > ${(FROTH_LIFE * 4).toFixed(2)}) continue;
 		float decay = exp(-age / ${FROTH_LIFE.toFixed(2)});
-		float sigma = A.w + age * ${FROTH_SPREAD.toFixed(2)};
+		// Teardrop spread: the tail grows DOWNWIND only; the upwind edge
+		// stays tight. Foam streaks trail the wind, they don't lead it.
+		float sigmaAcross = A.w + age * ${FROTH_SPREAD.toFixed(2)};
+		float sigmaTail = sigmaAcross + age * windSpeed * ${FROTH_STRETCH.toFixed(3)};
 		vec2 d = worldXZ - A.xy;
-		float intensity = amp * decay * exp(-dot(d, d) / (2.0 * sigma * sigma));
+		float along = dot(d, windDir);
+		float across = d.x * windDir.y - d.y * windDir.x;
+		float sigmaAlong = along > 0.0 ? sigmaTail : sigmaAcross;
+		float q = (along * along) / (2.0 * sigmaAlong * sigmaAlong)
+			+ (across * across) / (2.0 * sigmaAcross * sigmaAcross);
+		float intensity = amp * decay * exp(-q);
 		if (intensity > 0.01) {
 			float n1 = sin(worldXZ.x * 23.0 + t * 29.0) * sin(worldXZ.y * 17.0 - t * 25.0);
 			float n2 = sin(worldXZ.x * 9.5 - t * 31.0 + 1.7) * sin(worldXZ.y * 13.5 + t * 21.0);
-			p += vec3(n1 * 0.55, 0.5 + abs(n2), n2 * 0.55) *
-				(${SETTINGS.frothAmplitude.toFixed(2)} * min(intensity, 1.0));
+			// Base seethe at froth's own amplitude, then the crest-churn
+			// wind grip at the churn's amplitude: amplified along-wind
+			// seethe plus the downwind smear that, at storm strength,
+			// overlaps the mesh into the same torn, folded look as
+			// looping crests.
+			vec3 disp = vec3(n1 * 0.55, 0.5 + abs(n2), n2 * 0.55) * ${SETTINGS.frothAmplitude.toFixed(2)};
+			float alongT = disp.x * windDir.x + disp.z * windDir.y;
+			disp.xz += windDir * (abs(alongT) * uChurnWindAniso + uChurnWindPush) * windSpeed * uChurnAmp;
+			p += disp * min(intensity, 1.0);
 			white = max(white, intensity * ${SETTINGS.frothWhiteness.toFixed(2)});
 		}
 	}
