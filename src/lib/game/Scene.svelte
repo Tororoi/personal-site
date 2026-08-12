@@ -2,7 +2,7 @@
 	import * as THREE from 'three';
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { onDestroy } from 'svelte';
-	import { waves, sampleHeight, wavesGlsl } from './waves';
+	import { waves, wavesGlsl } from './waves';
 	import {
 		events,
 		MAX_EVENTS,
@@ -188,12 +188,39 @@ void main() {
 		gradientMap: toonGradient
 	});
 
+	// y/vy: vertical state for gravity-limited falling. Buoyancy is instant
+	// upward (rising water carries the float), but when a crest drops away
+	// faster than gravity can pull, the buoy separates and falls
+	// ballistically until the surface catches it again.
+	// y/vy: vertical state. tx/tz: tilt (horizontal components of the up
+	// vector), wx/wz: tilt velocity, for the bottom-heavy pendulum dynamics.
 	const buoys = [
-		{ x: 4, z: -3 },
-		{ x: -7, z: 5 },
-		{ x: 9, z: 8 }
+		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0 },
+		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0 },
+		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0 }
 	];
 	let buoyMeshes = $state<(THREE.Mesh | undefined)[]>([]);
+
+	const BUOY_GRAVITY = 9.8; // m/s^2: the fall-rate clamp
+	// Cap on vertical velocity carried out of the water, so a violent crest
+	// can toss a buoy, but only modestly.
+	const BUOY_MAX_CARRY = 3.5;
+
+	// Bottom-heavy pendulum tilt: the ballast is a righting spring toward
+	// the water-slope target, and angular momentum makes the buoy swing past
+	// and rock back instead of easing to a stop.
+	const BUOY_TILT = 1.2; // slope exaggeration so tilt reads at ortho distance
+	// Righting strength (spring, 1/s^2). sqrt of this is the rock frequency:
+	// 30 = ~1.1s per full rock, a small ballasted float.
+	const BUOY_RIGHTING = 60;
+	// Damping ratio: < 1 is underdamped. 0.25 = swings past and rocks 2-3
+	// times before settling; raise toward 1 for a heavier, deader float.
+	const BUOY_SWING_DAMPING = 0.25;
+	// Airborne there is no water to push against: momentum carries the tilt,
+	// trimmed only by this light air drag (1/s).
+	const BUOY_AIR_DRAG = 0.5;
+	const UP = new THREE.Vector3(0, 1, 0);
+	const buoyNormal = new THREE.Vector3();
 
 	// The whitewater churn is mesh displacement in the water shader, not
 	// particles; see applyChurn in whitecaps.ts. Spray was removed: revisit
@@ -253,26 +280,77 @@ void main() {
 				ambient.intensity = env.ambientIntensity * 1.6;
 			}
 
+			// Clamped so a background-tab hiccup can't integrate a huge fall.
+			const buoyDt = Math.min(delta, 0.1);
 			for (let i = 0; i < buoys.length; i++) {
 				const mesh = buoyMeshes[i];
 				if (!mesh) continue;
-				const { x, z } = buoys[i];
+				const b = buoys[i];
+				const { x, z } = b;
 				// ampScale 1 matches the water's tuning-mode uAmp; both must
 				// change together or the floats detach from the surface.
 				// sampleOcean includes whitecap crumble: a breaking crest
 				// passing under a float drops it with the collapsing water.
 				const surface = sampleOcean(x, z, waveTime);
+				const waterline = surface.height + 0.15;
+
+				let airborne = b.y > waterline + 0.001;
+				if (!airborne) {
+					// In the water: buoyancy wins instantly, ride the surface.
+					// Track the surface's climb rate (capped) so leaving a
+					// crest carries believable momentum into the fall.
+					if (buoyDt > 0) {
+						b.vy = Math.min((waterline - b.y) / buoyDt, BUOY_MAX_CARRY);
+					}
+					b.y = waterline;
+				} else {
+					// Off the crest: the surface fell faster than gravity
+					// allows. Fall ballistically until the water catches us.
+					b.vy -= BUOY_GRAVITY * buoyDt;
+					b.y += b.vy * buoyDt;
+					if (b.y <= waterline) {
+						b.y = waterline;
+						b.vy = 0;
+						airborne = false;
+					}
+				}
+
 				// Ride the surface, plus a fraction of the Gerstner orbital motion
 				// as horizontal sway: anchored floats trace small ellipses.
-				mesh.position.set(
-					x + surface.swayX * 0.4,
-					surface.height + 0.15,
-					z + surface.swayZ * 0.4
-				);
-				mesh.rotation.z =
-					(sampleHeight(x + 0.6, z, waveTime) - sampleHeight(x - 0.6, z, waveTime)) * -0.5;
-				mesh.rotation.x =
-					(sampleHeight(x, z + 0.6, waveTime) - sampleHeight(x, z - 0.6, waveTime)) * 0.5;
+				mesh.position.set(x + surface.swayX * 0.4, b.y, z + surface.swayZ * 0.4);
+
+				// Bottom-heavy pendulum tilt. In water, the ballast springs the
+				// buoy toward the water-slope target (gradient over a 1.2m
+				// baseline: rides the swell, ignores ripple); its momentum
+				// swings it past and rocks it back. Airborne there is no
+				// righting force at all: the tilt coasts on momentum with
+				// light air drag, so splashdown lands at whatever angle the
+				// toss left, and the mismatch excites the next rock. All
+				// forces act on tx/tz (up-vector horizontal components).
+				let targetX = 0;
+				let targetZ = 0;
+				if (!airborne) {
+					const gradX =
+						(sampleOcean(x + 0.6, z, waveTime, 1, 1).height -
+							sampleOcean(x - 0.6, z, waveTime, 1, 1).height) /
+						1.2;
+					const gradZ =
+						(sampleOcean(x, z + 0.6, waveTime, 1, 1).height -
+							sampleOcean(x, z - 0.6, waveTime, 1, 1).height) /
+						1.2;
+					targetX = -gradX * BUOY_TILT;
+					targetZ = -gradZ * BUOY_TILT;
+				}
+				const spring = airborne ? 0 : BUOY_RIGHTING;
+				const drag = airborne
+					? BUOY_AIR_DRAG
+					: 2 * BUOY_SWING_DAMPING * Math.sqrt(BUOY_RIGHTING);
+				b.wx += (spring * (targetX - b.tx) - drag * b.wx) * buoyDt;
+				b.wz += (spring * (targetZ - b.tz) - drag * b.wz) * buoyDt;
+				b.tx = THREE.MathUtils.clamp(b.tx + b.wx * buoyDt, -1.4, 1.4);
+				b.tz = THREE.MathUtils.clamp(b.tz + b.wz * buoyDt, -1.4, 1.4);
+				buoyNormal.set(b.tx, 1, b.tz).normalize();
+				mesh.quaternion.setFromUnitVectors(UP, buoyNormal);
 			}
 		},
 		{ autoStart: false }
