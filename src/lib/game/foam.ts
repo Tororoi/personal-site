@@ -50,7 +50,7 @@ export const FOAM_EXTENT = 100
  * spreading — and a plateau falls through the render floor everywhere
  * AT ONCE. Biggest footprint and complete fade are the same moment.
  */
-const DECAY_TAU_THIN = 8
+const DECAY_TAU_THIN = 12
 const DECAY_TAU_THICK = 2.5
 /**
  * Decay time constant where the water is actively BREAKING: churn tears
@@ -71,6 +71,22 @@ const TURB_J_FULL = -0.15
  * expansion 0.22 gave. (Still stable: it is a positive-weight average.)
  */
 const DIFFUSION = 0.88
+
+/**
+ * Soft capacity: a CPU-side running estimate of total foam mass (unit:
+ * amp x sigma^2 at deposit; decayed analytically — no GPU readback).
+ * Above OVERLOAD_START, THIN foam's decay accelerates toward
+ * DECAY_TAU_OLD, reaching it at OVERLOAD_FULL. Thin is the age proxy —
+ * deposits are born thick and only thin out — so pressure fades the OLD
+ * tails gracefully while new deposits always land at full strength.
+ */
+const DECAY_TAU_OLD = 3
+// Calibrated against a measured storm steady state of ~150 mass units
+// (window.foamMass()): pressure begins above normal-storm load and only
+// saturates at ~2.7x it.
+const OVERLOAD_START = 200
+const OVERLOAD_FULL = 400
+let massEst = 0
 /** Downwind drift as a fraction of wind speed. */
 const FOAM_DRIFT = 0.05
 
@@ -83,16 +99,20 @@ const pending: FoamDeposit[] = []
 /**
  * Deposit foam residue at REST-space (x, z). Accumulates: landing on an
  * existing bank raises it back toward solid (density top-up); landing on
- * bare water starts a new dot. Nothing is ever dropped.
+ * bare water starts a new dot. NEW deposits always win: when the queue
+ * is full the OLDEST queued deposit is dropped, never the incoming one.
  */
 export function addFoam(x: number, z: number, sigma: number, amp = 0.9) {
-  if (pending.length < 512) pending.push({ x, z, sigma, amp })
+  if (pending.length >= 512) pending.shift()
+  pending.push({ x, z, sigma, amp })
 }
 
 // Debug hook: paint foam from the console and watch it spread and die,
 // e.g. addFoam(0, 0, 1.5).
 if (typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).addFoam = addFoam
+  // foamMass() reads the capacity estimate — for calibrating OVERLOAD_*.
+  ;(window as unknown as Record<string, unknown>).foamMass = () => massEst
 }
 
 const simVertex = `
@@ -167,6 +187,8 @@ uniform float uTexel;
 uniform float uDecay;     // per-frame retention: calm + thin foam
 uniform float uDecayThick; // per-frame retention: calm + thick foam (faster)
 uniform float uDecayTurb; // per-frame retention on breaking water
+uniform float uDecayOld;  // per-frame retention for thin foam at FULL overload
+uniform float uOverload;  // 0-1 capacity pressure (see massEst)
 uniform float uDiffusion; // per-step neighbor mixing (dt-scaled)
 uniform float uDiffTexel; // diffusion tap distance in uv (see step())
 uniform float uDtScale;   // frame dt / (1/60): wall-clock rate correction
@@ -208,7 +230,15 @@ void main() {
 	// faster than skirts, so mounds flatten into spreading plateaus that
 	// die everywhere at once — expansion is continuous until the fade.
 	float thickBias = smoothstep(0.0, 0.6, spreadH);
-	float retain = mix(mix(uDecay, uDecayThick, thickBias), uDecayTurb, turb);
+	// Turbulence DECAY channel removed: pinned loop droplets deposit
+	// exactly where J is collapsed, so the 1.1s turb clock was shredding
+	// every fresh deposit in its own landing zone. turb still scales
+	// evaporation below.
+	float retain = mix(uDecay, uDecayThick, thickBias);
+	// Capacity pressure: accelerate the decay of THIN (= old) foam only,
+	// so approaching the budget fades the oldest tails instead of
+	// popping anything or blocking new deposits.
+	retain = mix(retain, min(retain, uDecayOld), uOverload * (1.0 - thickBias));
 	// The sea's own randomness: where the surface is horizontally
 	// COMPRESSED (J < 1) floating foam is squeezed together and persists;
 	// where it is stretched it disperses. Plus slow blobby pockets of
@@ -279,6 +309,8 @@ export class FoamField {
         uDecay: { value: Math.exp(-1 / (60 * DECAY_TAU_THIN)) },
         uDecayThick: { value: Math.exp(-1 / (60 * DECAY_TAU_THICK)) },
         uDecayTurb: { value: Math.exp(-1 / (60 * DECAY_TAU_TURB)) },
+        uDecayOld: { value: Math.exp(-1 / (60 * DECAY_TAU_OLD)) },
+        uOverload: { value: 0 },
         uDiffusion: { value: DIFFUSION },
         uDiffTexel: { value: 1 / FOAM_RESOLUTION },
         uDtScale: { value: 1 },
@@ -363,6 +395,16 @@ export class FoamField {
     u.uDecay.value = Math.exp(-d / DECAY_TAU_THIN)
     u.uDecayThick.value = Math.exp(-d / DECAY_TAU_THICK)
     u.uDecayTurb.value = Math.exp(-d / DECAY_TAU_TURB)
+    u.uDecayOld.value = Math.exp(-d / DECAY_TAU_OLD)
+    // Capacity pressure from the analytic mass estimate; the estimate's
+    // own decay clock speeds up with overload so it tracks the
+    // acceleration it causes in the field.
+    const overload = Math.min(
+      Math.max((massEst - OVERLOAD_START) / (OVERLOAD_FULL - OVERLOAD_START), 0),
+      1,
+    )
+    u.uOverload.value = overload
+    massEst *= Math.exp(-d / (DECAY_TAU_THIN * (1 - 0.7 * overload)))
     // Mixing saturates at ~1 per step, which would silently HALVE the
     // spread rate when steps are skipped (dt doubles). Compensation:
     // spread variance goes as mixing x tapDistance^2, so widen the taps
@@ -381,8 +423,10 @@ export class FoamField {
     const inject = this.material.uniforms.uInject.value as THREE.Vector4[]
     for (let i = 0; i < MAX_INJECT; i++) {
       const p = pending.shift()
-      if (p) inject[i].set(p.x, p.z, p.sigma, p.amp)
-      else inject[i].set(0, 0, 1, 0)
+      if (p) {
+        inject[i].set(p.x, p.z, p.sigma, p.amp)
+        massEst += p.amp * p.sigma * p.sigma
+      } else inject[i].set(0, 0, 1, 0)
     }
 
     const next = 1 - this.current
@@ -440,7 +484,10 @@ float foamWeb(vec2 worldXZ, float thickness, float jac) {
 	// whole top half of the range — fresh foam has NO holes, and a
 	// spreading patch stays dense for most of its growth — then dropping
 	// fast, compressing the lace-and-fade into the end of life.
-	float dens = smoothstep(0.04, 0.45, thickness);
+	// Upper edge raised 0.45 -> 0.65: full solidity now needs genuinely
+	// thick foam, so patches open into web earlier instead of sitting as
+	// dense white slabs.
+	float dens = smoothstep(0.04, 0.65, thickness);
 	// Cell merging follows the WAVES: compressed water (J < 1) packs the
 	// foam and holds the fine web longer; stretched water opens the
 	// cells early.
@@ -448,10 +495,14 @@ float foamWeb(vec2 worldXZ, float thickness, float jac) {
 	// Domain warp: baked Voronoi edges are dead straight and their
 	// junctions angular; a gentle sine warp curves every strand (the
 	// smooth-min baked into the tile rounds the joints).
+	// Warp wavelength must be LONGER than the largest strand: at the old
+	// ~1m period the merged coarse cells (2.2m) crossed several warp
+	// waves per strand and came out squiggly. One gentle bend per
+	// strand, slightly deeper to stay organic.
 	vec2 q = worldXZ + vec2(
-		sin(worldXZ.y * 7.3 + worldXZ.x * 2.1),
-		sin(worldXZ.x * 6.1 - worldXZ.y * 2.7)
-	) * 0.09;
+		sin(worldXZ.y * 2.1 + worldXZ.x * 0.7),
+		sin(worldXZ.x * 1.8 - worldXZ.y * 0.8)
+	) * 0.13;
 	// The skeleton distance field is BAKED into a tiling texture (see
 	// webBakeFragment): two bilinear fetches replace two live Voronoi
 	// evaluations, which at storm foam coverage was the difference

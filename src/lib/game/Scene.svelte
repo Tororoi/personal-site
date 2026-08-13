@@ -480,6 +480,9 @@ void main() {
 	// pays the wave loop, and the ribbon edges come out curved.
 	float foam = vPinchWhite;
 	if (foam > 0.01 && foam < 0.99) foam = pinchMask(vRest);
+	// Persistent foam residue (foam.ts): deposits from droplet landings,
+	// dissipating on their own clock with the webbing tear-off.
+	foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
 	col = mix(col, uFoamColor, foam);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);

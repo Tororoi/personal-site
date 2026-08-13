@@ -33,16 +33,15 @@ import { injectRipple } from './ripples'
 import { waves } from './waves'
 import { events, MAX_EVENTS, sampleOcean, windVector } from './whitecaps'
 
-export const MAX_SPRAY = 640
+export const MAX_SPRAY = 1280
 
 const GRAVITY = 9.8
 /**
- * Fraction of the wind a flying clump feels. Nearly zero: clumps are
- * heavy water and their flight is a GRAVITY arc; the wind gets a nudge,
- * not a ride. (0.7 sailed half the screen; 0.25 still read as wind-blown
- * rather than thrown-and-falling.)
+ * Fraction of the wind a flying clump feels. TEMP: zero — wind is OFF
+ * for the loop-splash study; flights are pure gravity arcs. (The tuned
+ * value before the study was 0.08.)
  */
-const WIND_CARRY = 0.08
+const WIND_CARRY = 0.0
 /** 1/s relaxation of velocity toward the carried wind (air drag). */
 const DRAG = 1.4
 /** Hard lifetime cap, seconds (safety net; landing is the real death). */
@@ -84,30 +83,31 @@ const CREST_TRIES = 4
 /** Wind speed (m/s) that counts as "full" emission energy. */
 const WIND_FULL = 15
 /**
- * COVER splash: thick, low, chunky clumps erupting exactly where the
- * folded polys are culled from the surface (J below the cull zone).
- * They ignore gravity and the submersion cull — they ARE the water in
- * the gap, a boil sitting in and trailing behind the hole — and each
- * deposits foam where it dies. Continuous re-emission at the fold's
- * current position is what keeps a MOVING gap covered.
+ * LOOP SPLASH: the breaking loop itself (the white looping mesh, J < 0)
+ * is the emitter. A jittered grid sweeps the sea several times a second;
+ * every sample inside a loop launches small, dense particles that hop
+ * up and forward along the WAVE HEADING and fall under pure gravity.
+ * Emission is proportional to loop LENGTH by construction (each grid
+ * cell a loop line crosses is one emission quantum, and the per-pass
+ * random offset makes a coarse grid find thin lines over a few passes),
+ * with a bonus chance at the LARGER parts of the loop (deeper J).
  */
-const COVER_SIZE_MIN = 0.16
-const COVER_SIZE_MAX = 0.55
-const COVER_LIFE = 0.7
+const LOOP_SCAN_INTERVAL = 0.1
+const LOOP_SCAN_STEP = 1.6
+const LOOP_SCAN_EXTENT = 40
+/** Same J test as the white loop render. */
+const LOOP_J = 0.02
+/** Bonus-emission depth scale: J this far below LOOP_J = guaranteed extra. */
+const LOOP_DEPTH_SPAN = 0.4
 /**
- * The cover boil has its OWN dense fold scanner — event-driven emission
- * (8 sparse whitecap patches) left folds outside any event culled but
- * uncovered. A jittered grid sweeps the visible sea several times a
- * second; every point inside a pinch's catch basin emits clumps sized
- * and counted by PINCH DEPTH: grazing pinches get a small dot or two,
- * hard folds get big boluses. The per-pass random grid offset is what
- * lets a coarse grid reliably find thin fold LINES over a few passes.
+ * The hop, RELATIVE to the loop: droplets inherit the loop's advance
+ * velocity as their base (pinned to its frame), and these constants are
+ * the small extra thrown AHEAD of it. Barely up, slightly forward.
  */
-const COVER_SCAN_INTERVAL = 0.12
-const COVER_SCAN_STEP = 2.2
-const COVER_SCAN_EXTENT = 40
-const COVER_J_START = 0.18
-const COVER_J_FULL = -0.35
+const LOOP_UP_MIN = 0.1
+const LOOP_UP_VAR = 0.1
+const LOOP_FORWARD_MIN = 1.0
+const LOOP_FORWARD_VAR = 1.0
 /**
  * Cover clumps SURF: the fold pattern travels at the phase velocity of
  * the dominant wave, so the boil advects at exactly that velocity to
@@ -116,8 +116,75 @@ const COVER_J_FULL = -0.35
  * boulders hanging in the air.)
  */
 const domWave = waves.reduce((a, b) => (b.amp > a.amp ? b : a), waves[0])
-const CREST_VX = domWave.dirX * (domWave.omega / domWave.k)
-const CREST_VZ = domWave.dirZ * (domWave.omega / domWave.k)
+/** Global fallback heading (dominant wave) for degenerate points. */
+const HEAD_X = domWave.dirX
+const HEAD_Z = domWave.dirZ
+
+/**
+ * The LOOP'S advance velocity at a rest-space point: each wave's phase
+ * velocity (omega/k along its heading), weighted by that wave's share
+ * of the PINCH. A loop is a Jacobian deficit, and wave i's contribution
+ * to it is qAk sin(theta) — k-weighted, so short crossing waves that
+ * pinch far beyond their amplitude get their due, and only the
+ * compression phase (sin > 0) votes at all. The share is squared for
+ * soft winner-take-all: the wave actually folding this spot should own
+ * the heading, not split it with the tall band that merely lifted it.
+ * (First attempt weighted by orbital drive |qAw sin| — the dominant
+ * band's bulk swamped every vote and bent loop headings toward it.)
+ */
+function loopVelocity(u: number, v: number, t: number) {
+  let vx = 0
+  let vz = 0
+  let wsum = 0
+  for (const w of waves) {
+    const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
+    const pinch = w.q * w.amp * w.k * Math.sin(theta)
+    if (pinch <= 0) continue
+    const contrib = pinch * pinch
+    const c = w.omega / w.k
+    vx += w.dirX * c * contrib
+    vz += w.dirZ * c * contrib
+    wsum += contrib
+  }
+  if (wsum < 0.001) {
+    const c = domWave.omega / domWave.k
+    return { x: HEAD_X * c, z: HEAD_Z * c }
+  }
+  return { x: vx / wsum, z: vz / wsum }
+}
+
+/**
+ * loopVelocity plus the Gerstner sway at the same rest point, in one
+ * wave pass — the per-frame kernel of PINNED flight. A loop particle's
+ * rest anchor advects at this velocity, and anchor + sway + its own
+ * small relative offset IS the particle's world position: it cannot
+ * fall behind the loop no matter how the frame accelerates.
+ */
+function loopFrame(u: number, v: number, t: number) {
+  let vx = 0
+  let vz = 0
+  let wsum = 0
+  let swayX = 0
+  let swayZ = 0
+  for (const w of waves) {
+    const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
+    const sway = w.q * w.amp * Math.cos(theta)
+    swayX += w.dirX * sway
+    swayZ += w.dirZ * sway
+    const pinch = w.q * w.amp * w.k * Math.sin(theta)
+    if (pinch <= 0) continue
+    const contrib = pinch * pinch
+    const c = w.omega / w.k
+    vx += w.dirX * c * contrib
+    vz += w.dirZ * c * contrib
+    wsum += contrib
+  }
+  if (wsum < 0.001) {
+    const c = domWave.omega / domWave.k
+    return { vx: HEAD_X * c, vz: HEAD_Z * c, swayX, swayZ }
+  }
+  return { vx: vx / wsum, vz: vz / wsum, swayX, swayZ }
+}
 
 export type SprayParticle = {
   x: number
@@ -131,8 +198,17 @@ export type SprayParticle = {
   size: number
   /** True for impact (buoy) spray, which may deposit foam on landing. */
   impact: boolean
-  /** True for cover splash: no gravity, no submersion cull (see above). */
-  cover: boolean
+  /** True for loop droplets: flight is PINNED to the loop's frame. */
+  loop: boolean
+  /** Rest-space anchor riding the loop (advected at loopFrame velocity). */
+  ax: number
+  az: number
+  /** Offset from the anchor, integrated from the relative hop below. */
+  ox: number
+  oz: number
+  /** Horizontal hop velocity RELATIVE to the loop frame. */
+  rvx: number
+  rvz: number
 }
 
 export const sprayParticles: SprayParticle[] = Array.from(
@@ -147,7 +223,13 @@ export const sprayParticles: SprayParticle[] = Array.from(
     birth: -10,
     size: 0,
     impact: false,
-    cover: false,
+    loop: false,
+    ax: 0,
+    az: 0,
+    ox: 0,
+    oz: 0,
+    rvx: 0,
+    rvz: 0,
   }),
 )
 
@@ -176,30 +258,44 @@ function launch(
   p.birth = t
   p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
   p.impact = impact
-  p.cover = false
+  p.loop = false
 }
 
-function launchCover(
+/**
+ * Loop-splash droplet, PINNED to the loop's frame: (ax, az) is the rest
+ * anchor, (ox, oz) the initial scatter around it, (rvx, rvz) the small
+ * hop velocity relative to the frame. World position is recomputed each
+ * step from the advected anchor; only the vertical is ballistic.
+ */
+function launchLoop(
   t: number,
-  x: number,
+  ax: number,
+  az: number,
   y: number,
-  z: number,
-  vx: number,
-  vz: number,
-  size: number,
+  ox: number,
+  oz: number,
+  rvx: number,
+  vy: number,
+  rvz: number,
 ) {
   const p = alloc()
   if (!p) return
-  p.x = x
+  p.ax = ax
+  p.az = az
+  p.ox = ox
+  p.oz = oz
+  p.rvx = rvx
+  p.rvz = rvz
+  p.x = ax + ox
   p.y = y
-  p.z = z
-  p.vx = vx
-  p.vy = 0
-  p.vz = vz
+  p.z = az + oz
+  p.vx = 0
+  p.vy = vy
+  p.vz = 0
   p.birth = t
-  p.size = size
+  p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
   p.impact = false
-  p.cover = true
+  p.loop = true
 }
 
 /**
@@ -286,34 +382,109 @@ export function emitImpactSpray(
   }
 }
 
+/**
+ * TEMP debug: every qualifying loop point's heading, refreshed per scan
+ * pass. The Scene renders these as pink arrows so emission targeting
+ * can be judged loop by loop.
+ */
+export type LoopHeading = {
+  x: number
+  y: number
+  z: number
+  hx: number
+  hz: number
+  speed: number
+  /** true = neighbors line up ALONG the heading (chain) — bad spray site */
+  chain: boolean
+  /** Rest anchor + droplet count, carried so emission can run AFTER
+   * classification (only pink points splash). */
+  ax: number
+  az: number
+  count: number
+}
+export const loopHeadings: LoopHeading[] = []
+
 let coverScanClock = 0
 
-function scanCoverFolds(t: number) {
-  const jx = Math.random() * COVER_SCAN_STEP
-  const jz = Math.random() * COVER_SCAN_STEP
-  for (let x = -COVER_SCAN_EXTENT + jx; x <= COVER_SCAN_EXTENT; x += COVER_SCAN_STEP) {
-    for (let z = -COVER_SCAN_EXTENT + jz; z <= COVER_SCAN_EXTENT; z += COVER_SCAN_STEP) {
+function scanLoopSplash(t: number) {
+  loopHeadings.length = 0
+  const jx = Math.random() * LOOP_SCAN_STEP
+  const jz = Math.random() * LOOP_SCAN_STEP
+  for (let x = -LOOP_SCAN_EXTENT + jx; x <= LOOP_SCAN_EXTENT; x += LOOP_SCAN_STEP) {
+    for (let z = -LOOP_SCAN_EXTENT + jz; z <= LOOP_SCAN_EXTENT; z += LOOP_SCAN_STEP) {
       const s = sampleOcean(x, z, t, 1, 1)
-      if (s.jacobian > COVER_J_START) continue
-      const pinch = Math.min(
-        (COVER_J_START - s.jacobian) / (COVER_J_START - COVER_J_FULL),
-        1,
-      )
-      const count = 1 + Math.round(pinch * 2)
-      for (let k = 0; k < count; k++) {
-        const size =
-          (COVER_SIZE_MIN + (COVER_SIZE_MAX - COVER_SIZE_MIN) * pinch) *
-          (0.75 + Math.random() * 0.5)
-        launchCover(
-          t,
-          x + (Math.random() * 2 - 1) * 0.9,
-          s.height + 0.05 + Math.random() * 0.2,
-          z + (Math.random() * 2 - 1) * 0.9,
-          CREST_VX + (Math.random() * 2 - 1) * 0.3,
-          CREST_VZ + (Math.random() * 2 - 1) * 0.3,
-          size,
-        )
+      if (s.jacobian > LOOP_J) continue
+      // One droplet per loop-length quantum, plus a bonus at the LARGER
+      // parts of the loop (deeper inversion).
+      const depth = Math.min((LOOP_J - s.jacobian) / LOOP_DEPTH_SPAN, 1)
+      const count = 4 + (Math.random() < depth ? 4 : 0)
+      // Rest coords for the evaluation: the sample's sway is the
+      // inversion we already paid for.
+      const lv = loopVelocity(x - s.swayX, z - s.swayZ, t)
+      const lvLen = Math.hypot(lv.x, lv.z)
+      const hx = lvLen > 0.01 ? lv.x / lvLen : HEAD_X
+      const hz = lvLen > 0.01 ? lv.z / lvLen : HEAD_Z
+      if (loopHeadings.length < 160) {
+        loopHeadings.push({
+          x,
+          y: s.height,
+          z,
+          hx,
+          hz,
+          speed: lvLen,
+          chain: false,
+          ax: x - s.swayX,
+          az: z - s.swayZ,
+          count,
+        })
       }
+    }
+  }
+  // Classify each point by how its NEIGHBORS sit relative to its own
+  // heading. A real crest line reads as points BESIDE each other
+  // (offset perpendicular to heading) — good spray. A ribbon running
+  // ALONG its own travel direction reads as points ahead/behind each
+  // other — looks wrong whitened, worse sprayed. Majority vote inside
+  // a 4 m disc; the 0.45-0.7 |cos| deadband keeps diagonals from
+  // voting both ways.
+  for (let i = 0; i < loopHeadings.length; i++) {
+    const a = loopHeadings[i]
+    let along = 0
+    let beside = 0
+    for (let j = 0; j < loopHeadings.length; j++) {
+      if (j === i) continue
+      const b = loopHeadings[j]
+      const dx = b.x - a.x
+      const dz = b.z - a.z
+      const d2 = dx * dx + dz * dz
+      if (d2 > 16 || d2 < 0.01) continue
+      const cosT = Math.abs((dx * a.hx + dz * a.hz) / Math.sqrt(d2))
+      if (cosT > 0.8) along++
+      else if (cosT < 0.6) beside++
+    }
+    // Lean pink for real lines: only a clear fore/aft pattern (2+
+    // votes, outnumbering the beside votes) condemns a group point as
+    // a chain. ISOLATED points (no neighbors in the disc at all) also
+    // go green — a lone grid hit is noise, not a crest line.
+    a.chain = (along >= 2 && along > beside) || along + beside === 0
+  }
+  // Emission — from PINK points only. These are the primary crashing
+  // particles: pinned to the loop's frame, thrown slightly ahead of it.
+  for (const a of loopHeadings) {
+    if (a.chain) continue
+    for (let k = 0; k < a.count; k++) {
+      const forward = LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR
+      launchLoop(
+        t,
+        a.ax,
+        a.az,
+        a.y + 0.1,
+        (Math.random() * 2 - 1) * 0.6,
+        (Math.random() * 2 - 1) * 0.6,
+        a.hx * forward + (Math.random() * 2 - 1) * 0.1,
+        LOOP_UP_MIN + Math.random() * LOOP_UP_VAR,
+        a.hz * forward + (Math.random() * 2 - 1) * 0.1,
+      )
     }
   }
 }
@@ -360,48 +531,48 @@ export function updateSpray(dt: number, t: number) {
     for (let k = 0; k < n; k++) emitCrest(t, e.x, e.z, e.sigma)
   }
 
-  // TEMP: natural-pinch viewing — cover boil off so the bare crests
-  // show. Restore by removing this flag.
-  const COVER_ENABLED = false
   coverScanClock += dt
-  if (COVER_ENABLED && coverScanClock >= COVER_SCAN_INTERVAL) {
+  if (coverScanClock >= LOOP_SCAN_INTERVAL) {
     coverScanClock = 0
-    scanCoverFolds(t)
+    scanLoopSplash(t)
   }
 
   checkParity ^= 1
   for (let i = 0; i < sprayParticles.length; i++) {
     const p = sprayParticles[i]
     if (p.size === 0) continue
-    if (p.cover) {
-      // Cover splash: SURFS at the fold's own speed (crest phase
-      // velocity), riding the live surface with a seething bob — never
-      // culled, it stands in for the water the fold removed.
-      p.x += p.vx * dt
-      p.z += p.vz * dt
-      const sc = sampleOcean(p.x, p.z, t, 1, 1)
-      const boil =
-        Math.sin(t * 9.1 + p.birth * 53.7) * 0.1 +
-        Math.sin(t * 15.3 + p.birth * 91.3) * 0.06
-      p.y = sc.height + 0.12 + boil
-      if (t - p.birth > COVER_LIFE) {
-        addFoam(p.x - sc.swayX, p.z - sc.swayZ, 0.1 + p.size * 0.4)
-        p.size = 0
-      }
-      continue
-    }
     if (t - p.birth > LIFE_MAX) {
       p.size = 0
       continue
     }
-    // Drag toward the carried wind; gravity owns the vertical.
-    const k = Math.min(DRAG * dt, 1)
-    p.vx += (wind.x * WIND_CARRY - p.vx) * k
-    p.vz += (wind.z * WIND_CARRY - p.vz) * k
-    p.vy -= GRAVITY * dt
-    p.x += p.vx * dt
-    p.y += p.vy * dt
-    p.z += p.vz * dt
+    if (p.loop) {
+      // PINNED flight: the rest anchor advects at the loop frame's
+      // velocity, the droplet's own hop integrates on top, and world
+      // position is rebuilt from anchor + sway + offset. Horizontal
+      // motion can never lag the loop; gravity owns the vertical.
+      const fr = loopFrame(p.ax, p.az, t)
+      p.ax += fr.vx * dt
+      p.az += fr.vz * dt
+      p.ox += p.rvx * dt
+      p.oz += p.rvz * dt
+      p.vy -= GRAVITY * dt
+      p.y += p.vy * dt
+      p.x = p.ax + fr.swayX + p.ox
+      p.z = p.az + fr.swayZ + p.oz
+    } else {
+      // Drag toward the carried wind; gravity owns the vertical. With
+      // the wind study OFF (WIND_CARRY 0) drag would relax droplets
+      // toward a world-still frame and bleed launch velocity — skip it.
+      if (WIND_CARRY > 0) {
+        const k = Math.min(DRAG * dt, 1)
+        p.vx += (wind.x * WIND_CARRY - p.vx) * k
+        p.vz += (wind.z * WIND_CARRY - p.vz) * k
+      }
+      p.vy -= GRAVITY * dt
+      p.x += p.vx * dt
+      p.y += p.vy * dt
+      p.z += p.vz * dt
+    }
     // A submerged clump is dead REGARDLESS of rise or fall: a trough
     // emission can sit below the NEIGHBORING wave face for its entire
     // arc, invisible behind the opaque water. Only clumps that had a
@@ -420,7 +591,11 @@ export function updateSpray(dt: number, t: number) {
         injectRipple(p.x, p.z, 0.1 + p.size, 0.02 + p.size * 0.18)
         if (!p.impact) {
           // Foam's ONLY source now — the field is emergent from landings.
-        addFoam(p.x - s.swayX, p.z - s.swayZ, 0.07 + p.size * 0.5)
+        // Sigma floor: the field's texel is ~0.2m, and a sub-texel dot
+        // dies to one diffusion pass no matter how slow the clocks are.
+        // (0.2 base read as too much total foam; ~1 texel is the sweet
+        // spot between resolvable and restrained.)
+        addFoam(p.x - s.swayX, p.z - s.swayZ, 0.13 + p.size * 0.5)
         } else if (Math.random() < 0.4) {
           // Buoy (impact) spray leaves far less residue than a breaking
           // crest: a bobbing float was painting a solid disc around
