@@ -225,7 +225,9 @@
 		uFoamCenter: { value: new THREE.Vector2(0, 0) },
 		uFoamExtent: { value: FOAM_EXTENT },
 		// Baked tiling web-skeleton distance field (set after first bake).
-		uFoamWebTex: { value: null as THREE.Texture | null }
+		uFoamWebTex: { value: null as THREE.Texture | null },
+		// Dominant-band amplitude, for the sprite-size twin in the vertex.
+		uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) }
 	};
 
 	// The visible ocean "floor" depth; also the miss plane of the water's
@@ -332,6 +334,7 @@ varying vec3 vWorld;
 varying vec2 vRest;
 varying vec2 vSlope;
 varying float vOverhang;
+uniform float uDomAmp;
 varying float vPinchWhite;
 varying float vViewZ;
 varying float vJacobian;
@@ -359,6 +362,8 @@ float pinchMask(vec2 restXZ) {
 	float txz = 0.0;
 	float tzy = 0.0;
 	float tzz = 0.0;
+	float wAmp = 0.0;
+	float wsum = 0.0;
 	for (int i = 0; i < WAVE_COUNT; i++) {
 		vec4 wa = uWaveA[i];
 		vec3 wb = uWaveB[i];
@@ -372,12 +377,25 @@ float pinchMask(vec2 restXZ) {
 		txz -= qak * wa.x * wa.y * sn;
 		tzy += ak * wa.y * cs;
 		tzz -= qak * wa.y * wa.y * sn;
+		float pw = max(qak * sn, 0.0);
+		pw *= pw;
+		wAmp += wb.x * pw;
+		wsum += pw;
 	}
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
 	vec3 Na = cross(Tv, Tu);
 	float ny = Na.y / max(length(Na), 0.0001);
-	return max(1.0 - smoothstep(0.0, 0.04, Na.y), 1.0 - smoothstep(0.02, 0.12, ny));
+	// Shared sprite-criterion gate (twin of the vertex).
+	float ampK = clamp((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.3, 1.0);
+	float intK = mix(0.4, 1.0, clamp((0.1 - Na.y) / 0.55, 0.0, 1.0));
+	float sk = ampK * intK;
+	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
+	float vis = smoothstep(0.1, 0.16, sk);
+	return max(
+		max(1.0 - smoothstep(0.0, 0.04, Na.y), 1.0 - smoothstep(0.02, 0.12, ny)),
+		1.0 - smoothstep(0.0, 0.3, Na.y)
+	) * vis;
 }
 
 // Ray vs a buoy's oriented box: slab test in the box's local frame.
@@ -485,9 +503,9 @@ void main() {
 	// pays the wave loop, and the ribbon edges come out curved.
 	float foam = vPinchWhite;
 	if (foam > 0.01 && foam < 0.99) foam = pinchMask(vRest);
-	// Persistent foam residue (foam.ts): deposits from droplet landings,
-	// dissipating on their own clock with the webbing tear-off.
-	foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
+	// TEMP: foam FIELD render disabled for sprite-line diagnosis (sim
+	// still runs; re-enable by restoring the foamWeb max).
+	// foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
 	col = mix(col, uFoamColor, foam);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
@@ -509,6 +527,7 @@ void main() {
 		side: THREE.DoubleSide,
 		vertexShader: `
 uniform float uTime;
+uniform float uDomAmp;
 uniform float uAmp;
 varying float vViewZ;
 varying float vHeight;
@@ -549,6 +568,10 @@ void main() {
 	float txz = 0.0;
 	float tzy = 0.0;
 	float tzz = 0.0;
+	float wAmp = 0.0;
+	float wsum = 0.0;
+	float hwx = 0.0;
+	float hwz = 0.0;
 	for (int i = 0; i < WAVE_COUNT; i++) {
 		vec4 wa = uWaveA[i];
 		vec3 wb = uWaveB[i];
@@ -562,6 +585,14 @@ void main() {
 		txz -= qak * wa.x * wa.y * sn;
 		tzy += ak * wa.y * cs;
 		tzz -= qak * wa.y * wa.y * sn;
+		// Pinch-weighted amplitude + heading votes (sprite-size twin and
+		// the stretch's stable pull direction).
+		float pw = max(qak * sn, 0.0);
+		pw *= pw;
+		wAmp += wb.x * pw;
+		hwx += wa.x * pw;
+		hwz += wa.y * pw;
+		wsum += pw;
 	}
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
@@ -582,6 +613,39 @@ void main() {
 		1.0 - smoothstep(0.0, 0.04, vJacobian),
 		1.0 - smoothstep(0.02, 0.12, vOverhang)
 	);
+	// STRETCH the pinched loop toward the foam sprite centers: the flat
+	// discs depth-test at their centers ~0.8r behind the surface along
+	// -normal, and the sheet in front of that plane showed as a dark
+	// line slicing them. Pulling the pinch-zone surface along -normal
+	// fills the wedge between fold and sprite plane with WHITE water.
+	// SHARED SPRITE CRITERION: the same smoothstep(0.1, 0.42) gate the
+	// sprites use — a loop that generates no sprites neither whitens
+	// nor stretches, so all three systems agree on which pinches count.
+	float ampK = clamp((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.3, 1.0);
+	float intK = mix(0.4, 1.0, clamp((0.1 - vJacobian) / 0.55, 0.0, 1.0));
+	float sk = ampK * intK;
+	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
+	// NEAR-BINARY gate for the water: the 0.1 criterion decides WHICH
+	// pinches whiten, but qualifying ones whiten at full harshness (the
+	// narrow 0.1-0.16 ramp only smooths the on/off boundary; the
+	// sprites keep their own wider size-ease ramp).
+	float vis = smoothstep(0.1, 0.16, sk);
+	float stretchGate = (1.0 - smoothstep(0.0, 0.3, vJacobian)) * vis;
+	if (stretchGate > 0.001) {
+		// Pull by 0.8 x the reconstructed local sprite radius, along a
+		// STABLE direction: backward against the pinch-weighted heading
+		// and down into the wave body. The raw normal swings wildly
+		// between adjacent vertices at a fold — pulling along it painted
+		// a squiggly sheet, worst on crests diagonal to the mesh grid.
+		float spriteR = 1.08 * min(sk, 1.2);
+		vec2 hd = wsum > 0.0001 ? normalize(vec2(hwx, hwz)) : vec2(1.0, 0.0);
+		vec3 pullDir = normalize(vec3(-hd.x * 0.8, -0.65, -hd.y * 0.8));
+		p += pullDir * (spriteR * 0.8 * stretchGate);
+	}
+	// The stretched region must BE white (it exists to cover the wedge);
+	// the whole mask is gated by the shared criterion. Fragment twin
+	// carries the same terms.
+	vPinchWhite = max(vPinchWhite, stretchGate) * vis;
 	// Sample ripples at the DISPLACED position: Gerstner slides vertices
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
@@ -829,20 +893,26 @@ void main() {
 	// the sheet overturns; the steepness gate scales both the offset and
 	// the pixel size. position = (anchorX, radius, anchorZ).
 	function buildSpikeGeometry() {
-		const S = 0.5;
+		// Dense base lattice; the shader thins it dynamically by sprite
+		// size (small beads pack tight, big masses stay sparse).
+		const S = 0.25;
 		const half =
 			0.71 * (window.innerWidth / zoom / 2) +
 			1.34 * (window.innerHeight / zoom / 2) +
 			EDGE_MARGIN;
 		const pos: number[] = [];
+		const rank: number[] = [];
 		for (let gx = -half; gx <= half; gx += S) {
 			for (let gz = -half; gz <= half; gz += S) {
 				const h2 = Math.abs(Math.sin(gx * 37.719 + gz * 53.117) * 24634.6345) % 1;
-				pos.push(gx, 0.3 + 0.12 * h2, gz);
+				const h3 = Math.abs(Math.sin(gx * 91.331 + gz * 17.923) * 15731.743) % 1;
+				pos.push(gx, (0.3 + 0.12 * h2) * 3.0, gz);
+				rank.push(h3);
 			}
 		}
 		const g = new THREE.BufferGeometry();
 		g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+		g.setAttribute('aRank', new THREE.Float32BufferAttribute(rank, 1));
 		return g;
 	}
 	let underSpikeGeometry = buildSpikeGeometry();
@@ -855,19 +925,23 @@ void main() {
 			uColor: { value: new THREE.Color('#eef6fc') },
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
-			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) }
+			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) },
+			uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) }
 		},
 		vertexShader: `
 uniform float uTime;
 uniform float uAmp;
 uniform float uPointPx;
+uniform float uDomAmp;
 ${wavesGlsl()}
+attribute float aRank;
 varying float vViewZ;
 void main() {
 	vec2 anchor = position.xz;
 	float r = position.y;
 	vec3 d = waveDisplacement(anchor, uTime, uAmp);
 	float txx = 0.0; float txy = 0.0; float txz = 0.0; float tzy = 0.0; float tzz = 0.0;
+	float wAmp = 0.0; float wsum = 0.0;
 	for (int i = 0; i < WAVE_COUNT; i++) {
 		vec4 wa = uWaveA[i];
 		vec3 wb = uWaveB[i];
@@ -881,12 +955,66 @@ void main() {
 		txz -= qak * wa.x * wa.y * sn;
 		tzy += ak * wa.y * cs;
 		tzz -= qak * wa.y * wa.y * sn;
+		// Pinch-weighted amplitude vote: which wave is folding here, and
+		// how BIG is it? (Same weighting as the CPU's loopVelocity.)
+		float pw = max(qak * sn, 0.0);
+		pw *= pw;
+		wAmp += wb.x * pw;
+		wsum += pw;
 	}
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
 	vec3 Na = cross(Tv, Tu);
 	vec3 Nn = Na / max(length(Na), 0.0001);
-	float g = 1.0 - smoothstep(0.15, 0.45, Na.y);
+	// EASED motion, statelessly: a WIDER J band stretches growth over
+	// the fold's whole approach (J moves smoothly in time, so a wider
+	// spatial window IS a slower temporal ramp), and a second Jacobian
+	// evaluated 0.35s in the PAST gives a release tail — sprites deflate
+	// gently after the fold passes instead of snapping shut with it.
+	float gNow = 1.0 - smoothstep(0.08, 0.6, Na.y);
+	float jxx = 1.0; float jzz = 1.0; float jxz = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 wa = uWaveA[i];
+		vec3 wb = uWaveB[i];
+		float th = (anchor.x * wa.x + anchor.y * wa.y) * wa.z - wa.w * (uTime - 0.35) + wb.z;
+		float qak = wb.y * wb.x * uAmp * wa.z * sin(th);
+		jxx -= qak * wa.x * wa.x;
+		jzz -= qak * wa.y * wa.y;
+		jxz -= qak * wa.x * wa.y;
+	}
+	float Jp = jxx * jzz - jxz * jxz;
+	float gPast = 1.0 - smoothstep(0.08, 0.6, Jp);
+	float g = max(gNow, gPast * 0.9);
+	// Size = BOTH metrics multiplied: the folder's amplitude ratio sets
+	// the ceiling (a small crossing wave's tongue is small no matter how
+	// hard it folds), and pinch intensity modulates within it (a barely-
+	// grazing fold of the big band still starts as beads). Intensity
+	// keeps the now/past composition so the release tail deflates at
+	// its earned size.
+	float loopAmp = wsum > 0.0001 ? wAmp / wsum : 0.0;
+	float ampK = clamp(loopAmp / uDomAmp, 0.3, 1.0);
+	float iNow = clamp((0.1 - Na.y) / 0.55, 0.0, 1.0);
+	float iPast = clamp((0.1 - Jp) / 0.55, 0.0, 1.0);
+	float intK = mix(0.4, 1.0, max(iNow, iPast * 0.9));
+	// Response curve favoring the medium-and-up range: never shrinks
+	// (baseline 1.0), boosts from ~0.15 up to +50%, capped so the
+	// biggest masses stay sane.
+	float sk = ampK * intK;
+	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
+	// GENERATION THRESHOLD: weak pinches get NO sprite at all — the
+	// combined factor must clear ~0.3 before anything shows, ramping in
+	// smoothly by 0.42 so arrivals still ease rather than pop.
+	float visible = smoothstep(0.1, 0.42, sk);
+	// DYNAMIC DENSITY: each point has a baked rank; the keep-fraction
+	// falls as sprite size rises, so small beads pack the full 0.25m
+	// lattice while big masses thin to ~55% of it (the old spacing).
+	float dens = mix(1.0, 0.55, smoothstep(0.15, 0.5, sk));
+	float keep = smoothstep(0.0, 0.1, dens - aRank);
+	// Smooth ease-in/out preserved; only the very smallest specks are
+	// CULLED (below the splash droplets' minimum clump, 0.07m) — they
+	// read as noise rather than foam.
+	r = r * min(sk, 1.2) * visible * keep;
+	if (r < 0.07) r = 0.0;
 	vec3 surf = vec3(anchor.x + d.x, d.y, anchor.y + d.z);
 	vec3 world = surf - Nn * (r * 0.8 * g);
 	vec4 view = viewMatrix * vec4(world, 1.0);
@@ -910,6 +1038,8 @@ void main() {
 	});
 	const underSpikeMesh = new THREE.Points(underSpikeGeometry, underSpikeMaterial);
 	underSpikeMesh.frustumCulled = false;
+	// TEMP: hidden to inspect the loop stretching in isolation.
+	underSpikeMesh.visible = true;
 
 
 
