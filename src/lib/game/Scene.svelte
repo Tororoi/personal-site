@@ -1,6 +1,7 @@
 <script lang="ts">
 	import * as THREE from 'three';
 	import { T, useTask, useThrelte } from '@threlte/core';
+	import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 	import { onDestroy } from 'svelte';
 	import { activeField, causticsGlsl, significantAmplitude, waves, wavesGlsl } from './waves';
 	import {
@@ -82,6 +83,9 @@
 		resizeTimer = window.setTimeout(() => {
 			waterGeometry.dispose();
 			waterGeometry = buildWaterGeometry();
+			underSpikeGeometry.dispose();
+			underSpikeGeometry = buildSpikeGeometry();
+			underSpikeMesh.geometry = underSpikeGeometry;
 		}, 200);
 	}
 	window.addEventListener('resize', onWindowResize);
@@ -578,16 +582,6 @@ void main() {
 		1.0 - smoothstep(0.0, 0.04, vJacobian),
 		1.0 - smoothstep(0.02, 0.12, vOverhang)
 	);
-	// SPIKY loops: the folding mesh itself grows short quills — each
-	// vertex in the pinch zone offsets along the fold's normal by a
-	// fixed hash of its REST coords (material-stable: no flicker, and
-	// the spikes churn as the loop travels through the material).
-	if (vPinchWhite > 0.01) {
-		float sh = fract(sin(dot(world.xz, vec2(127.1, 311.7))) * 43758.5453);
-		vec3 nD = Na / max(length(Na), 0.0001);
-		nD *= nD.y < 0.0 ? -1.0 : 1.0;
-		p += nD * (vPinchWhite * sh * sh * 0.75);
-	}
 	// Sample ripples at the DISPLACED position: Gerstner slides vertices
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
@@ -827,6 +821,96 @@ void main() {
 	const sprayDummy = new THREE.Object3D();
 	const sprayDir = new THREE.Vector3();
 	const sprayUp = new THREE.Vector3(0, 1, 0);
+
+	// UNDERSIDE FOAM POINTS: one scaled-up POINT SPRITE per grid
+	// intersection instead of sphere meshes — a single vertex each, so
+	// the field is ~20x lighter than the octa version. The sprite's
+	// center rides under the surface (hidden by depth) and pops out when
+	// the sheet overturns; the steepness gate scales both the offset and
+	// the pixel size. position = (anchorX, radius, anchorZ).
+	function buildSpikeGeometry() {
+		const S = 0.5;
+		const half =
+			0.71 * (window.innerWidth / zoom / 2) +
+			1.34 * (window.innerHeight / zoom / 2) +
+			EDGE_MARGIN;
+		const pos: number[] = [];
+		for (let gx = -half; gx <= half; gx += S) {
+			for (let gz = -half; gz <= half; gz += S) {
+				const h2 = Math.abs(Math.sin(gx * 37.719 + gz * 53.117) * 24634.6345) % 1;
+				pos.push(gx, 0.3 + 0.12 * h2, gz);
+			}
+		}
+		const g = new THREE.BufferGeometry();
+		g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+		return g;
+	}
+	let underSpikeGeometry = buildSpikeGeometry();
+	const underSpikeMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			uTime: waterUniforms.uTime,
+			uAmp: waterUniforms.uAmp,
+			uWaveA: waterUniforms.uWaveA,
+			uWaveB: waterUniforms.uWaveB,
+			uColor: { value: new THREE.Color('#eef6fc') },
+			uFogColor: waterUniforms.uFogColor,
+			uFogDensity: waterUniforms.uFogDensity,
+			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) }
+		},
+		vertexShader: `
+uniform float uTime;
+uniform float uAmp;
+uniform float uPointPx;
+${wavesGlsl()}
+varying float vViewZ;
+void main() {
+	vec2 anchor = position.xz;
+	float r = position.y;
+	vec3 d = waveDisplacement(anchor, uTime, uAmp);
+	float txx = 0.0; float txy = 0.0; float txz = 0.0; float tzy = 0.0; float tzz = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 wa = uWaveA[i];
+		vec3 wb = uWaveB[i];
+		float th = (anchor.x * wa.x + anchor.y * wa.y) * wa.z - wa.w * uTime + wb.z;
+		float sn = sin(th);
+		float cs = cos(th);
+		float qak = wb.y * wb.x * uAmp * wa.z;
+		float ak = wb.x * uAmp * wa.z;
+		txx -= qak * wa.x * wa.x * sn;
+		txy += ak * wa.x * cs;
+		txz -= qak * wa.x * wa.y * sn;
+		tzy += ak * wa.y * cs;
+		tzz -= qak * wa.y * wa.y * sn;
+	}
+	vec3 Tu = vec3(1.0 + txx, txy, txz);
+	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
+	vec3 Na = cross(Tv, Tu);
+	vec3 Nn = Na / max(length(Na), 0.0001);
+	float g = 1.0 - smoothstep(0.15, 0.45, Na.y);
+	vec3 surf = vec3(anchor.x + d.x, d.y, anchor.y + d.z);
+	vec3 world = surf - Nn * (r * 0.8 * g);
+	vec4 view = viewMatrix * vec4(world, 1.0);
+	vViewZ = -view.z;
+	gl_PointSize = r * 2.0 * uPointPx * g;
+	gl_Position = projectionMatrix * view;
+}`,
+		fragmentShader: `
+uniform vec3 uColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+varying float vViewZ;
+void main() {
+	// Opaque round sprite: discard outside the disc keeps depth honest
+	// (no transparency sorting), so the water still occludes correctly.
+	float dd = length(gl_PointCoord - 0.5) * 2.0;
+	if (dd > 1.0) discard;
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	gl_FragColor = vec4(mix(uColor, uFogColor, fog), 1.0);
+}`
+	});
+	const underSpikeMesh = new THREE.Points(underSpikeGeometry, underSpikeMaterial);
+	underSpikeMesh.frustumCulled = false;
+
 
 
 	// Mist FLUID (mistfield.ts): Dobryakov-style velocity+dye solver.
@@ -1297,6 +1381,8 @@ void main() {
 		buoyMaterial.dispose();
 		sprayGeometry.dispose();
 		sprayMaterial.dispose();
+		underSpikeGeometry.dispose();
+		underSpikeMaterial.dispose();
 		mistGeometry.dispose();
 		mistMaterial.dispose();
 		mistField.dispose();
@@ -1321,6 +1407,8 @@ void main() {
 <T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
 
 <T is={sprayMesh} />
+
+<T is={underSpikeMesh} />
 
 <T is={mistMesh} />
 <T.Mesh geometry={waterGeometry} material={waterMaterial} />
