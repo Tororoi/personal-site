@@ -570,10 +570,24 @@ void main() {
 	// Raw Na.y would be wrong here: unnormalized, it IS approximately
 	// the Jacobian determinant again.
 	vOverhang = Na.y / max(length(Na), 0.0001);
+	// Wider J ramp: whiteness now BLEEDS onto the compressed crest tops
+	// just below a loop (J approaching collapse), fading in from 0.2 so
+	// the froth cap grows out of the wave instead of appearing only at
+	// the exact fold.
 	vPinchWhite = max(
 		1.0 - smoothstep(0.0, 0.04, vJacobian),
 		1.0 - smoothstep(0.02, 0.12, vOverhang)
 	);
+	// SPIKY loops: the folding mesh itself grows short quills — each
+	// vertex in the pinch zone offsets along the fold's normal by a
+	// fixed hash of its REST coords (material-stable: no flicker, and
+	// the spikes churn as the loop travels through the material).
+	if (vPinchWhite > 0.01) {
+		float sh = fract(sin(dot(world.xz, vec2(127.1, 311.7))) * 43758.5453);
+		vec3 nD = Na / max(length(Na), 0.0001);
+		nD *= nD.y < 0.0 ? -1.0 : 1.0;
+		p += nD * (vPinchWhite * sh * sh * 0.75);
+	}
 	// Sample ripples at the DISPLACED position: Gerstner slides vertices
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
@@ -811,6 +825,9 @@ void main() {
 	sprayMesh.frustumCulled = false;
 	sprayMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 	const sprayDummy = new THREE.Object3D();
+	const sprayDir = new THREE.Vector3();
+	const sprayUp = new THREE.Vector3(0, 1, 0);
+
 
 	// Mist FLUID (mistfield.ts): Dobryakov-style velocity+dye solver.
 	// Rendered as a translucent overlay plane that rides the wave
@@ -835,6 +852,10 @@ void main() {
 		},
 		transparent: true,
 		depthWrite: false,
+		// The plane FOLDS with the waves at a pinch, and folded triangles
+		// invert winding — front-side culling deleted the mist exactly
+		// over the loops (same lesson the water mesh learned).
+		side: THREE.DoubleSide,
 		vertexShader: `
 uniform float uTime;
 uniform float uAmp;
@@ -1222,13 +1243,31 @@ void main() {
 				}
 			}
 
-			// Mirror the spray pool into the instanced mesh.
+			// Mirror the spray pool into the instanced mesh: birth ease-in,
+			// death ease-out, and velocity STREAKING — the clump elongates
+			// along its motion (volume-preserving), which reads as flying
+			// water and hides frame-to-frame position hops.
 			for (let i = 0; i < MAX_SPRAY; i++) {
 				const p = sprayParticles[i];
-				if (p.size === 0) {
+				if (p.size === 0 || waveTime < p.birth) {
 					sprayDummy.scale.setScalar(0);
+					sprayDummy.quaternion.identity();
 				} else {
-					sprayDummy.scale.setScalar(p.size);
+					const grow = Math.min((waveTime - p.birth) / 0.05, 1);
+					const shrink =
+						p.dying >= 0 ? Math.max(1 - (waveTime - p.dying) / 0.08, 0) : 1;
+					const size = p.size * grow * shrink;
+					const speed = Math.hypot(p.vx, p.vy, p.vz);
+					if (speed > 0.5) {
+						sprayDir.set(p.vx / speed, p.vy / speed, p.vz / speed);
+						sprayDummy.quaternion.setFromUnitVectors(sprayUp, sprayDir);
+						const stretch = Math.min(1 + speed * 0.1, 2.1);
+						const thin = size / Math.sqrt(stretch);
+						sprayDummy.scale.set(thin, size * stretch, thin);
+					} else {
+						sprayDummy.quaternion.identity();
+						sprayDummy.scale.setScalar(size);
+					}
 					sprayDummy.position.set(p.x, p.y, p.z);
 				}
 				sprayDummy.updateMatrix();

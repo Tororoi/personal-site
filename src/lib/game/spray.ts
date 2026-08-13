@@ -184,11 +184,13 @@ function loopFrame(u: number, v: number, t: number) {
   let wsum = 0
   let swayX = 0
   let swayZ = 0
+  let h = 0
   for (const w of waves) {
     const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
     const sway = w.q * w.amp * Math.cos(theta)
     swayX += w.dirX * sway
     swayZ += w.dirZ * sway
+    h += w.amp * Math.sin(theta)
     const pinch = w.q * w.amp * w.k * Math.sin(theta)
     if (pinch <= 0) continue
     const contrib = pinch * pinch
@@ -199,9 +201,9 @@ function loopFrame(u: number, v: number, t: number) {
   }
   if (wsum < 0.001) {
     const c = domWave.omega / domWave.k
-    return { vx: HEAD_X * c, vz: HEAD_Z * c, swayX, swayZ }
+    return { vx: HEAD_X * c, vz: HEAD_Z * c, swayX, swayZ, h }
   }
-  return { vx: vx / wsum, vz: vz / wsum, swayX, swayZ }
+  return { vx: vx / wsum, vz: vz / wsum, swayX, swayZ, h }
 }
 
 export type SprayParticle = {
@@ -218,6 +220,9 @@ export type SprayParticle = {
   impact: boolean
   /** True for loop droplets: flight is PINNED to the loop's frame. */
   loop: boolean
+  /** Time the landing was detected; -1 airborne. The clump shrinks out
+   * over a beat instead of blinking off the frame it touches water. */
+  dying: number
   /** Rest-space anchor riding the loop (advected at loopFrame velocity). */
   ax: number
   az: number
@@ -242,6 +247,7 @@ export const sprayParticles: SprayParticle[] = Array.from(
     size: 0,
     impact: false,
     loop: false,
+    dying: -1,
     ax: 0,
     az: 0,
     ox: 0,
@@ -291,6 +297,7 @@ function launch(
   p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
   p.impact = impact
   p.loop = false
+  p.dying = -1
 }
 
 /**
@@ -324,10 +331,14 @@ function launchLoop(
   p.vx = 0
   p.vy = vy
   p.vz = 0
-  p.birth = t
+  // Birth STAGGER: the scan fires every 0.1s, and a whole pass born on
+  // one frame reads as strobing volleys. A random activation delay
+  // spreads the same droplets across the interval — continuous spray.
+  p.birth = t + Math.random() * 0.1
   p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
   p.impact = false
   p.loop = true
+  p.dying = -1
 }
 
 /**
@@ -433,6 +444,8 @@ export type LoopHeading = {
   ax: number
   az: number
   count: number
+  /** 0..1 inversion depth (drives oval target size). */
+  depth: number
 }
 export const loopHeadings: LoopHeading[] = []
 
@@ -442,8 +455,16 @@ function scanLoopSplash(t: number) {
   loopHeadings.length = 0
   const jx = Math.random() * LOOP_SCAN_STEP
   const jz = Math.random() * LOOP_SCAN_STEP
-  for (let x = -LOOP_SCAN_EXTENT + jx; x <= LOOP_SCAN_EXTENT; x += LOOP_SCAN_STEP) {
-    for (let z = -LOOP_SCAN_EXTENT + jz; z <= LOOP_SCAN_EXTENT; z += LOOP_SCAN_STEP) {
+  for (
+    let x = -LOOP_SCAN_EXTENT + jx;
+    x <= LOOP_SCAN_EXTENT;
+    x += LOOP_SCAN_STEP
+  ) {
+    for (
+      let z = -LOOP_SCAN_EXTENT + jz;
+      z <= LOOP_SCAN_EXTENT;
+      z += LOOP_SCAN_STEP
+    ) {
       const s1 = sampleOcean(x, z, t, 1, 1)
       if (s1.jacobian > LOOP_J) continue
       // Qualifying points get a REFINED sample for their ANCHOR: the
@@ -480,6 +501,7 @@ function scanLoopSplash(t: number) {
           ax: x - s.swayX,
           az: z - s.swayZ,
           count,
+          depth,
         })
       }
     }
@@ -527,7 +549,7 @@ function scanLoopSplash(t: number) {
     // splat per pink site per scan. Amount scales with the emission
     // count (deep loops breathe more mist), the impulse pushes the dye
     // along the loop's heading so the curtain travels with the break.
-    queueMistSplat(a.x, a.z, 0.025 * a.count, a.hx * 1.5, a.hz * 1.5, 1.4)
+    // queueMistSplat(a.x, a.z, 0.025 * a.count, a.hx * 1.5, a.hz * 1.5, 1.4)
     for (let k = 0; k < a.count; k++) {
       const forward = LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR
       launchLoop(
@@ -601,6 +623,13 @@ export function updateSpray(dt: number, t: number) {
       p.size = 0
       continue
     }
+    // Not yet activated (birth stagger).
+    if (t < p.birth) continue
+    // Dying: keep riding the water while the render shrinks it out.
+    if (p.dying >= 0) {
+      if (t - p.dying > 0.08) p.size = 0
+      continue
+    }
     if (p.loop) {
       // PINNED flight: the rest anchor advects at the loop frame's
       // velocity, the droplet's own hop integrates on top, and world
@@ -615,6 +644,10 @@ export function updateSpray(dt: number, t: number) {
       p.y += p.vy * dt
       p.x = p.ax + fr.swayX + p.ox
       p.z = p.az + fr.swayZ + p.oz
+      // Publish the true horizontal motion for the render's velocity
+      // streaking (pinned droplets don't integrate vx/vz themselves).
+      p.vx = fr.vx + p.rvx
+      p.vz = fr.vz + p.rvz
     } else {
       // Drag toward the carried wind; gravity owns the vertical. With
       // the wind study OFF (WIND_CARRY 0) drag would relax droplets
@@ -669,11 +702,11 @@ export function updateSpray(dt: number, t: number) {
         }
         if (!p.impact) {
           // Foam's ONLY source now — the field is emergent from landings.
-        // Sigma floor: the field's texel is ~0.2m, and a sub-texel dot
-        // dies to one diffusion pass no matter how slow the clocks are.
-        // (0.2 base read as too much total foam; ~1 texel is the sweet
-        // spot between resolvable and restrained.)
-        addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.5)
+          // Sigma floor: the field's texel is ~0.2m, and a sub-texel dot
+          // dies to one diffusion pass no matter how slow the clocks are.
+          // (0.2 base read as too much total foam; ~1 texel is the sweet
+          // spot between resolvable and restrained.)
+          addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.5)
         } else {
           // Buoy (impact) spray: EVERY clump deposits, but at low amp so
           // the float doesn't paint a solid disc around itself. Sigma
@@ -683,7 +716,7 @@ export function updateSpray(dt: number, t: number) {
           addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.3, 0.35)
         }
       }
-      p.size = 0
+      p.dying = t
     }
   }
 }
