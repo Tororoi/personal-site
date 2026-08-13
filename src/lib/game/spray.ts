@@ -104,8 +104,8 @@ const LOOP_DEPTH_SPAN = 0.4
  * velocity as their base (pinned to its frame), and these constants are
  * the small extra thrown AHEAD of it. Barely up, slightly forward.
  */
-const LOOP_UP_MIN = 0.1
-const LOOP_UP_VAR = 0.1
+const LOOP_UP_MIN = 0.3
+const LOOP_UP_VAR = 0.3
 const LOOP_FORWARD_MIN = 1.0
 const LOOP_FORWARD_VAR = 1.0
 /**
@@ -151,6 +151,23 @@ function loopVelocity(u: number, v: number, t: number) {
     return { x: HEAD_X * c, z: HEAD_Z * c }
   }
   return { x: vx / wsum, z: vz / wsum }
+}
+
+/**
+ * Vertical velocity of the surface at a rest point: d/dt of the Gerstner
+ * height sum. A breaking crest RISES at ~amp*omega (1.5-2 m/s in storm)
+ * — far faster than the droplets' 0.3-0.6 m/s hop, and the horizontal
+ * pinning means they can't escape sideways. Without inheriting this,
+ * the wave climbs over its own spray and culls it within a frame or two
+ * (measured: ~780 insta-culls/s vs ~100 alive) — the droplet flicker.
+ */
+function surfaceRise(u: number, v: number, t: number) {
+  let rise = 0
+  for (const w of waves) {
+    const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
+    rise -= w.amp * w.omega * Math.cos(theta)
+  }
+  return rise
 }
 
 /**
@@ -233,8 +250,22 @@ export const sprayParticles: SprayParticle[] = Array.from(
   }),
 )
 
+let allocFails = 0
+let culledYoung = 0
+
 function alloc(): SprayParticle | undefined {
-  return sprayParticles.find((p) => p.size === 0)
+  const p = sprayParticles.find((p) => p.size === 0)
+  if (!p) allocFails++
+  return p
+}
+
+// Debug: flicker forensics — pool pressure vs spawn-buried insta-culls.
+if (typeof window !== 'undefined') {
+  ;(window as unknown as Record<string, unknown>).sprayStats = () => ({
+    active: sprayParticles.filter((p) => p.size > 0).length,
+    allocFails,
+    culledYoung,
+  })
 }
 
 function launch(
@@ -412,11 +443,19 @@ function scanLoopSplash(t: number) {
   const jz = Math.random() * LOOP_SCAN_STEP
   for (let x = -LOOP_SCAN_EXTENT + jx; x <= LOOP_SCAN_EXTENT; x += LOOP_SCAN_STEP) {
     for (let z = -LOOP_SCAN_EXTENT + jz; z <= LOOP_SCAN_EXTENT; z += LOOP_SCAN_STEP) {
-      const s = sampleOcean(x, z, t, 1, 1)
-      if (s.jacobian > LOOP_J) continue
+      const s1 = sampleOcean(x, z, t, 1, 1)
+      if (s1.jacobian > LOOP_J) continue
+      // Qualifying points get a REFINED sample for their ANCHOR: the
+      // 1-iteration rest inversion is centimeter-grade on calm water but
+      // worst exactly at a pinch (the sway gradient there is ~1 by
+      // definition), and this anchor drives the pinned flight and the
+      // heading. Qualification and depth stay on the COARSE sample —
+      // re-testing J at the refined rest point silently culled sites
+      // (the two samples straddle the pinch and disagree near its edge).
+      const s = sampleOcean(x, z, t, 1, 3)
       // One droplet per loop-length quantum, plus a bonus at the LARGER
       // parts of the loop (deeper inversion).
-      const depth = Math.min((LOOP_J - s.jacobian) / LOOP_DEPTH_SPAN, 1)
+      const depth = Math.min((LOOP_J - s1.jacobian) / LOOP_DEPTH_SPAN, 1)
       const count = 4 + (Math.random() < depth ? 4 : 0)
       // Rest coords for the evaluation: the sample's sway is the
       // inversion we already paid for.
@@ -472,6 +511,10 @@ function scanLoopSplash(t: number) {
   // particles: pinned to the loop's frame, thrown slightly ahead of it.
   for (const a of loopHeadings) {
     if (a.chain) continue
+    // The hop is RELATIVE to the rising crest, like the horizontal is
+    // relative to the advancing loop: droplets inherit the surface's
+    // upward velocity so the wave can't climb over its own spray.
+    const rise = Math.max(surfaceRise(a.ax, a.az, t), 0)
     for (let k = 0; k < a.count; k++) {
       const forward = LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR
       launchLoop(
@@ -482,7 +525,7 @@ function scanLoopSplash(t: number) {
         (Math.random() * 2 - 1) * 0.6,
         (Math.random() * 2 - 1) * 0.6,
         a.hx * forward + (Math.random() * 2 - 1) * 0.1,
-        LOOP_UP_MIN + Math.random() * LOOP_UP_VAR,
+        rise + LOOP_UP_MIN + Math.random() * LOOP_UP_VAR,
         a.hz * forward + (Math.random() * 2 - 1) * 0.1,
       )
     }
@@ -579,28 +622,46 @@ export function updateSpray(dt: number, t: number) {
     // real airborne life hand anything back — foam appearing where no
     // droplet was ever visible reads as haunted.
     if ((i & 1) !== checkParity) continue
+    // Loop droplets skip the submersion test while young: at a fold the
+    // surface is MULTI-SHEETED and the sampler returns whichever sheet
+    // the inversion lands on — often the tongue ABOVE the droplet — so
+    // the test insta-culled healthy spray (~740/s measured, the
+    // flicker). A genuinely buried droplet is occluded by the opaque
+    // water meanwhile; the test resumes once the flight matures.
+    if (p.loop && t - p.birth < 0.25) continue
     const s = sampleOcean(p.x, p.z, t, 1, 1)
     if (p.y < s.height - 0.02) {
+      if (t - p.birth < 0.1) culledYoung++
       // Gate sized so trough-buried ghosts (dead in < 0.05s) still hand
       // nothing back, while the low skimmers' short real flights do.
-      if (t - p.birth > 0.12) {
+      // LOOP droplets are exempt: they launch from a visible break and
+      // land ahead of a RISING face, so their real flights are often
+      // shorter than the gate — it was silently eating exactly the
+      // crash-front deposits (droplet visibly hits, no foam appears).
+      if (p.loop || t - p.birth > 0.12) {
         // Landing: hand the water back (O'Brien & Hodgins). The clump
         // rings the surface and leaves a slow-dying dot of foam residue,
         // anchored in REST coordinates — the material water point under
         // the landing — so it rides the Gerstner sway with the surface.
         injectRipple(p.x, p.z, 0.1 + p.size, 0.02 + p.size * 0.18)
+        // The deposit's REST anchor uses a refined 3-iteration inversion:
+        // the cheap landing-check sample (1 iteration) misses by up to a
+        // large fraction of a meter near a pinch, smearing crash-front
+        // foam away from where the droplet visibly struck. Deposits are
+        // rare (once per landing), so the extra sample costs nothing.
+        const r = sampleOcean(p.x, p.z, t, 1, 3)
         if (!p.impact) {
           // Foam's ONLY source now — the field is emergent from landings.
         // Sigma floor: the field's texel is ~0.2m, and a sub-texel dot
         // dies to one diffusion pass no matter how slow the clocks are.
         // (0.2 base read as too much total foam; ~1 texel is the sweet
         // spot between resolvable and restrained.)
-        addFoam(p.x - s.swayX, p.z - s.swayZ, 0.13 + p.size * 0.5)
+        addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.5)
         } else if (Math.random() < 0.4) {
           // Buoy (impact) spray leaves far less residue than a breaking
           // crest: a bobbing float was painting a solid disc around
           // itself.
-          addFoam(p.x - s.swayX, p.z - s.swayZ, 0.04 + p.size * 0.3, 0.3)
+          addFoam(p.x - r.swayX, p.z - r.swayZ, 0.04 + p.size * 0.3, 0.3)
         }
       }
       p.size = 0

@@ -780,7 +780,32 @@ void main() {
 	// Detail 1: rounder clumps (the big cover boils read as boulders at
 	// detail 0) while staying low-poly.
 	const sprayGeometry = new THREE.OctahedronGeometry(1, 1);
-	const sprayMaterial = new THREE.MeshBasicMaterial({ color: '#eef6fc' });
+	// Plain solid clumps (mist is a separate system). Fog uniforms are
+	// SHARED with the water material (same objects) so preset changes
+	// propagate — unfogged particles read whiter than the foam below.
+	const sprayMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			uColor: { value: new THREE.Color('#eef6fc') },
+			uFogColor: waterUniforms.uFogColor,
+			uFogDensity: waterUniforms.uFogDensity
+		},
+		vertexShader: `
+varying float vViewZ;
+void main() {
+	vec4 view = viewMatrix * modelMatrix * instanceMatrix * vec4(position, 1.0);
+	vViewZ = -view.z;
+	gl_Position = projectionMatrix * view;
+}`,
+		fragmentShader: `
+uniform vec3 uColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+varying float vViewZ;
+void main() {
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	gl_FragColor = vec4(mix(uColor, uFogColor, fog), 1.0);
+}`
+	});
 	const sprayMesh = new THREE.InstancedMesh(sprayGeometry, sprayMaterial, MAX_SPRAY);
 	sprayMesh.frustumCulled = false;
 	sprayMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
