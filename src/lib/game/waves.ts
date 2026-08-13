@@ -290,7 +290,8 @@ export const SEA_PRESETS = {
     seed: 4242,
     windAngle: 0.32,
     windSpeed: 48,
-    chop: 4.6,
+    chop: 5,
+    timeScale: 0.8,
     // Choppy water tears rings apart: disturbances render mostly as
     // seething froth (crest-churn style), and ring energy dies fast.
     ripples: {

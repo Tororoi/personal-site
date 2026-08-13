@@ -453,10 +453,14 @@ function scanLoopSplash(t: number) {
       // re-testing J at the refined rest point silently culled sites
       // (the two samples straddle the pinch and disagree near its edge).
       const s = sampleOcean(x, z, t, 1, 3)
-      // One droplet per loop-length quantum, plus a bonus at the LARGER
-      // parts of the loop (deeper inversion).
+      // Exponential in loop size: emission doubles per half-depth, so
+      // shallow grazes stay at 4 while the deepest inversions throw 16
+      // (2x the old flat-bonus max). Stochastic rounding keeps the
+      // fractional part honest instead of stair-stepping.
       const depth = Math.min((LOOP_J - s1.jacobian) / LOOP_DEPTH_SPAN, 1)
-      const count = 4 + (Math.random() < depth ? 4 : 0)
+      const raw = 4 * Math.pow(2, 2 * depth)
+      let count = Math.floor(raw)
+      if (Math.random() < raw - count) count++
       // Rest coords for the evaluation: the sample's sway is the
       // inversion we already paid for.
       const lv = loopVelocity(x - s.swayX, z - s.swayZ, t)
