@@ -15,6 +15,7 @@
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
 	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
+	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
@@ -811,6 +812,76 @@ void main() {
 	sprayMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 	const sprayDummy = new THREE.Object3D();
 
+	// Mist FLUID (mistfield.ts): Dobryakov-style velocity+dye solver.
+	// Rendered as a translucent overlay plane that rides the wave
+	// heights, sampling the dye field in world space — the mist drapes
+	// over the swells and swirls with real fluid motion.
+	const mistField = new MistField();
+	const mistGeometry = new THREE.PlaneGeometry(MIST_EXTENT, MIST_EXTENT, 96, 96);
+	mistGeometry.rotateX(-Math.PI / 2);
+	const mistMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			uTime: waterUniforms.uTime,
+			uAmp: waterUniforms.uAmp,
+			uWaveA: waterUniforms.uWaveA,
+			uWaveB: waterUniforms.uWaveB,
+			uMistTex: { value: null as THREE.Texture | null },
+			uFogColor: waterUniforms.uFogColor,
+			uFogDensity: waterUniforms.uFogDensity,
+			uColor: { value: new THREE.Color('#e9f3fb') },
+			uRippleTex: waterUniforms.uRippleTex,
+			uRippleCenter: waterUniforms.uRippleCenter,
+			uRippleExtent: waterUniforms.uRippleExtent
+		},
+		transparent: true,
+		depthWrite: false,
+		vertexShader: `
+uniform float uTime;
+uniform float uAmp;
+${wavesGlsl()}
+${ripplesGlsl()}
+varying vec2 vWorldXZ;
+varying float vViewZ;
+void main() {
+	vec2 rest = position.xz;
+	vec3 d = waveDisplacement(rest, uTime, uAmp);
+	vec3 world = vec3(rest.x + d.x, d.y, rest.y + d.z);
+	// Ride the RIPPLED surface: the water adds ripple displacement, and
+	// buoy ripple crests were poking through a waves-only mist plane —
+	// raised rings depth-tested in FRONT of the haze behind them.
+	applyRipples(world, world.xz);
+	// Hover just above the surface so the haze reads as ON the water.
+	world.y += 0.3;
+	vWorldXZ = world.xz;
+	vec4 view = viewMatrix * vec4(world, 1.0);
+	vViewZ = -view.z;
+	gl_Position = projectionMatrix * view;
+}`,
+		fragmentShader: `
+uniform sampler2D uMistTex;
+uniform vec3 uColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+varying vec2 vWorldXZ;
+varying float vViewZ;
+void main() {
+	vec2 uv = vWorldXZ / ${MIST_EXTENT.toFixed(1)} + 0.5;
+	float m = texture2D(uMistTex, uv).r;
+	// Soft saturation: dense cores go toward solid haze, tails feather.
+	// Steep enough that real mist OCCLUDES the surface detail beneath it
+	// (buoy ripple rings were punching through the translucency).
+	float a = 1.0 - exp(-m * 1.9);
+	// Fade at the field's border so the domain edge never shows.
+	vec2 e = min(uv, 1.0 - uv);
+	a *= smoothstep(0.0, 0.04, min(e.x, e.y));
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	gl_FragColor = vec4(mix(uColor, uFogColor, fog), a * 0.88);
+}`
+	});
+	const mistMesh = new THREE.Mesh(mistGeometry, mistMaterial);
+	mistMesh.frustumCulled = false;
+	mistMesh.renderOrder = 4;
+
 	// y/vy: vertical state for gravity-limited falling. Buoyancy is instant
 	// upward (rising water carries the float), but when a crest drops away
 	// faster than gravity can pull, the buoy separates and falls
@@ -989,6 +1060,15 @@ void main() {
 				waterUniforms.uFoamTex.value = foamField.texture;
 				waterUniforms.uFoamWebTex.value = foamField.webTexture;
 			}
+			mistField.step(
+				renderer,
+				wind.x,
+				wind.z,
+				waveTime,
+				waterUniforms.uAmp.value,
+				Math.min(delta, 0.1)
+			);
+			mistMaterial.uniforms.uMistTex.value = mistField.texture;
 
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
@@ -1155,6 +1235,7 @@ void main() {
 				sprayMesh.setMatrixAt(i, sprayDummy.matrix);
 			}
 			sprayMesh.instanceMatrix.needsUpdate = true;
+
 		},
 		{ autoStart: false }
 	);
@@ -1177,6 +1258,9 @@ void main() {
 		buoyMaterial.dispose();
 		sprayGeometry.dispose();
 		sprayMaterial.dispose();
+		mistGeometry.dispose();
+		mistMaterial.dispose();
+		mistField.dispose();
 		toonGradient.dispose();
 		rippleSim.dispose();
 		foamField.dispose();
@@ -1198,6 +1282,8 @@ void main() {
 <T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
 
 <T is={sprayMesh} />
+
+<T is={mistMesh} />
 <T.Mesh geometry={waterGeometry} material={waterMaterial} />
 
 {#each buoys as buoy, i (i)}

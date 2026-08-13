@@ -29,6 +29,7 @@
  */
 
 import { addFoam } from './foam'
+import { queueMistSplat } from './mistfield'
 import { injectRipple } from './ripples'
 import { waves } from './waves'
 import { events, MAX_EVENTS, sampleOcean, windVector } from './whitecaps'
@@ -519,6 +520,14 @@ function scanLoopSplash(t: number) {
     // relative to the advancing loop: droplets inherit the surface's
     // upward velocity so the wave can't climb over its own spray.
     const rise = Math.max(surfaceRise(a.ax, a.az, t), 0)
+    // Spume: each break tears off a small CLOUD of mist that the wind
+    // owns immediately (a few points per site per scan reads as a puff;
+    // a lone 1-2px dot was invisible).
+    // Spume feeds the mist FLUID (mistfield.ts): one dye + impulse
+    // splat per pink site per scan. Amount scales with the emission
+    // count (deep loops breathe more mist), the impulse pushes the dye
+    // along the loop's heading so the curtain travels with the break.
+    queueMistSplat(a.x, a.z, 0.025 * a.count, a.hx * 1.5, a.hz * 1.5, 1.4)
     for (let k = 0; k < a.count; k++) {
       const forward = LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR
       launchLoop(
@@ -654,6 +663,10 @@ export function updateSpray(dt: number, t: number) {
         // foam away from where the droplet visibly struck. Deposits are
         // rare (once per landing), so the extra sample costs nothing.
         const r = sampleOcean(p.x, p.z, t, 1, 3)
+        // Impact atomization: some crashes puff a little mist.
+        if (p.loop && Math.random() < 0.5) {
+          queueMistSplat(p.x, p.z, 0.05, 0, 0, 0.6)
+        }
         if (!p.impact) {
           // Foam's ONLY source now — the field is emergent from landings.
         // Sigma floor: the field's texel is ~0.2m, and a sub-texel dot
@@ -661,11 +674,13 @@ export function updateSpray(dt: number, t: number) {
         // (0.2 base read as too much total foam; ~1 texel is the sweet
         // spot between resolvable and restrained.)
         addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.5)
-        } else if (Math.random() < 0.4) {
-          // Buoy (impact) spray leaves far less residue than a breaking
-          // crest: a bobbing float was painting a solid disc around
-          // itself.
-          addFoam(p.x - r.swayX, p.z - r.swayZ, 0.04 + p.size * 0.3, 0.3)
+        } else {
+          // Buoy (impact) spray: EVERY clump deposits, but at low amp so
+          // the float doesn't paint a solid disc around itself. Sigma
+          // floor matters here too: the old 0.04-0.11m deposits were
+          // sub-texel and died to one diffusion pass — buoy spray never
+          // visibly foamed at all.
+          addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.3, 0.35)
         }
       }
       p.size = 0
