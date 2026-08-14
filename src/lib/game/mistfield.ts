@@ -24,23 +24,24 @@
 
 import * as THREE from 'three'
 import { waves, wavesGlsl } from './waves'
+import { ENABLE, MIST } from './tuning'
 
 /** Full domain width, meters, centered on the origin. */
-export const MIST_EXTENT = 100
+export const MIST_EXTENT = MIST.extent
 
-const SIM_RES = 128
-const DYE_RES = 256
-const PRESSURE_ITERS = 12
+const SIM_RES = MIST.simRes
+const DYE_RES = MIST.dyeRes
+const PRESSURE_ITERS = MIST.pressureIters
 /** 1/s exponential dissipation. Dye ~2s visible life. */
-const VEL_DISSIPATION = 0.4
-const DYE_DISSIPATION = 0.55
+const VEL_DISSIPATION = MIST.velDissipation
+const DYE_DISSIPATION = MIST.dyeDissipation
 /** Vorticity confinement strength (Dobryakov's "curl"). */
-const VORTICITY = 14
+const VORTICITY = MIST.vorticity
 /** Wind coupling: the ORIGINAL steady relaxation — the best-looking
  * baseline so far; its interplay with windVector's slow multi-sine
  * gustiness is what produced the organic sweeps. */
-const WIND_CARRY = 0.45
-const WIND_GRIP = 0.5
+const WIND_CARRY = MIST.windCarry
+const WIND_GRIP = MIST.windGrip
 /**
  * Gusts, fourth iteration: DOWNSLOPE FLOW. Uniform forces translate
  * (iteration 2), random splats are diffused noise (iteration 1), a
@@ -54,14 +55,14 @@ const WIND_GRIP = 0.5
  * rolls up into heavy swirls. All structure is the sea's own.
  */
 /** Peak downslope acceleration on steep backs, m/s^2 (x slope). */
-const GUST_SLIDE = 50
+const GUST_SLIDE = MIST.gustSlide
 /** Vorticity multiplier at gust peak (heavy swirling). */
-const GUST_SWIRL = 0.9
+const GUST_SWIRL = MIST.gustSwirl
 /** Seconds between gusts (uniform range) and gust length. */
-const GUST_GAP_MIN = 6
-const GUST_GAP_VAR = 10
-const GUST_DUR_MIN = 1.2
-const GUST_DUR_VAR = 2.0
+const GUST_GAP_MIN = MIST.gustGapMin
+const GUST_GAP_VAR = MIST.gustGapVar
+const GUST_DUR_MIN = MIST.gustDurMin
+const GUST_DUR_VAR = MIST.gustDurVar
 const MAX_SPLATS = 8
 
 type MistSplat = {
@@ -464,7 +465,7 @@ export class MistField {
     )
     this.advectVelMat.uniforms.uTime.value = t
     this.advectVelMat.uniforms.uAmpScale.value = ampScale
-    this.advectVelMat.uniforms.uGust.value = gust
+    this.advectVelMat.uniforms.uGust.value = ENABLE.mistGusts ? gust : 0
     // Heavy swirling while the gust blows: the downslope shear gets
     // rolled up harder by a raised confinement strength.
     this.vortMat.uniforms.uCurlStrength.value =

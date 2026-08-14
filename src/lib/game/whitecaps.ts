@@ -20,6 +20,7 @@
  * frame and the CPU twin reads it directly: the twins cannot disagree.
  */
 
+import { ENABLE } from './tuning'
 import { activeField, sampleSurface, type SurfaceSample } from './waves'
 
 export const MAX_EVENTS = 8
@@ -171,7 +172,7 @@ export function update(dt: number, t: number) {
   // the crests and no event-driven spray obscuring them, consistently
   // for both the GPU surface and the CPU floaters. Restore by removing
   // this flag.
-  const SPAWN_EVENTS = false
+  const SPAWN_EVENTS = ENABLE.whitecapEvents
   scanClock += dt
   if (SPAWN_EVENTS && scanClock >= SCAN_INTERVAL) {
     scanClock = 0

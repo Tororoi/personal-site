@@ -18,7 +18,7 @@
 	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
-	import { f, LOOP, PLUME, SPRITE } from './tuning';
+	import { DROPLET, ENABLE, f, LOOP, MIST, PLUME, SPRITE } from './tuning';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -502,11 +502,11 @@ void main() {
 	// sub-quad feature), so pixels in the TRANSITION band re-evaluate the
 	// exact mask at fragment resolution — a thin sliver of the screen
 	// pays the wave loop, and the ribbon edges come out curved.
-	float foam = vPinchWhite;
+	float foam = ${ENABLE.loopWhite ? 'vPinchWhite' : '0.0'};
 	if (foam > 0.01 && foam < 0.99) foam = pinchMask(vRest);
 	// Persistent foam residue (foam.ts): deposits from droplet landings,
 	// dissipating on their own clock with the webbing tear-off.
-	foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
+	${ENABLE.foamField ? 'foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));' : ''}
 	col = mix(col, uFoamColor, foam);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
@@ -631,7 +631,7 @@ void main() {
 	// narrow 0.1-0.16 ramp only smooths the on/off boundary; the
 	// sprites keep their own wider size-ease ramp).
 	float vis = smoothstep(0.1, 0.16, sk);
-	float stretchGate = (1.0 - smoothstep(0.0, 0.3, vJacobian)) * vis;
+	float stretchGate = ${ENABLE.loopStretch ? `(1.0 - smoothstep(0.0, ${f(LOOP.stretchJRamp)}, vJacobian)) * vis` : '0.0'};
 	if (stretchGate > 0.001) {
 		// Pull by 0.8 x the reconstructed local sprite radius, along a
 		// STABLE direction: backward against the pinch-weighted heading
@@ -1198,6 +1198,8 @@ void main() {
 	const crestSprayMesh = new THREE.Points(underSpikeGeometry, crestSprayMaterial);
 	crestSprayMesh.frustumCulled = false;
 	crestSprayMesh.renderOrder = 6;
+	crestSprayMesh.visible = ENABLE.crestPlumes;
+	underSpikeMesh.visible = ENABLE.foamSprites;
 
 
 
@@ -1249,7 +1251,7 @@ void main() {
 	// waves-only mist plane.
 	applyRipples(world, world.xz);
 	// Hover just above the surface so the haze reads as ON the water.
-	world.y += 0.3;
+	world.y += ${f(MIST.hover)};
 	vWorldXZ = world.xz;
 	vec4 view = viewMatrix * vec4(world, 1.0);
 	vViewZ = -view.z;
@@ -1267,9 +1269,9 @@ void main() {
 	float m = texture2D(uMistTex, uv).r;
 	// Soft saturation: dense cores go toward solid haze, tails feather.
 	// Steep enough that real mist OCCLUDES the surface detail beneath it.
-	float a = 1.0 - exp(-m * 3.2);
+	float a = 1.0 - exp(-m * ${f(MIST.opacityGain)});
 	// Dense cores read BRIGHTER, not just more opaque.
-	vec3 mistCol = mix(uColor, vec3(1.0), smoothstep(0.35, 1.1, m));
+	vec3 mistCol = mix(uColor, vec3(1.0), smoothstep(${f(MIST.brightStart)}, ${f(MIST.brightEnd)}, m));
 	// Fade at the field's border so the domain edge never shows.
 	vec2 e = min(uv, 1.0 - uv);
 	a *= smoothstep(0.0, 0.04, min(e.x, e.y));
@@ -1280,6 +1282,7 @@ void main() {
 	const mistMesh = new THREE.Mesh(mistGeometry, mistMaterial);
 	mistMesh.frustumCulled = false;
 	mistMesh.renderOrder = 4;
+	mistMesh.visible = ENABLE.mist;
 
 	// y/vy: vertical state for gravity-limited falling. Buoyancy is instant
 	// upward (rising water carries the float), but when a crest drops away
@@ -1473,7 +1476,8 @@ void main() {
 				);
 				crestSprayMaterial.uniforms.uWindSpeed.value = ws;
 			}
-			mistField.step(
+			if (ENABLE.mist)
+				mistField.step(
 				renderer,
 				wind.x,
 				wind.z,
@@ -1563,7 +1567,7 @@ void main() {
 							// the foam. No froth boil: buoys rely on splash +
 							// foam alone.
 							injectRipple(px, pz, 0.8, 0.12 + amp * 0.35);
-							emitImpactSpray(waveTime, px, pz, 0, 0, amp);
+							if (ENABLE.buoySpray) emitImpactSpray(waveTime, px, pz, 0, 0, amp);
 						}
 						b.y = waterline;
 						b.vy = 0;
@@ -1631,7 +1635,8 @@ void main() {
 					const tip = Math.min((tipSpeed - TIP_SPLASH_THRESHOLD) / 3.5, 1);
 					injectRipple(sideX, sideZ, 0.3, 0.04 + tip * 0.08);
 					// The rim digging in flicks water outward on that side.
-					emitImpactSpray(waveTime, sideX, sideZ, b.wx / tipSpeed, b.wz / tipSpeed, tip * 0.5);
+					if (ENABLE.buoySpray)
+						emitImpactSpray(waveTime, sideX, sideZ, b.wx / tipSpeed, b.wz / tipSpeed, tip * 0.5);
 				}
 			}
 
@@ -1645,15 +1650,15 @@ void main() {
 					sprayDummy.scale.setScalar(0);
 					sprayDummy.quaternion.identity();
 				} else {
-					const grow = Math.min((waveTime - p.birth) / 0.05, 1);
+					const grow = Math.min((waveTime - p.birth) / DROPLET.growTime, 1);
 					const shrink =
-						p.dying >= 0 ? Math.max(1 - (waveTime - p.dying) / 0.08, 0) : 1;
+						p.dying >= 0 ? Math.max(1 - (waveTime - p.dying) / DROPLET.dieTime, 0) : 1;
 					const size = p.size * grow * shrink;
 					const speed = Math.hypot(p.vx, p.vy, p.vz);
 					if (speed > 0.5) {
 						sprayDir.set(p.vx / speed, p.vy / speed, p.vz / speed);
 						sprayDummy.quaternion.setFromUnitVectors(sprayUp, sprayDir);
-						const stretch = Math.min(1 + speed * 0.1, 2.1);
+						const stretch = Math.min(1 + speed * DROPLET.streakPerSpeed, DROPLET.streakCap);
 						const thin = size / Math.sqrt(stretch);
 						sprayDummy.scale.set(thin, size * stretch, thin);
 					} else {

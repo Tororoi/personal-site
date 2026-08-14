@@ -7,14 +7,42 @@
  * they live together, named, instead of scattered as bare literals
  * through a thousand lines of shader string.
  *
- * Physical constants and simulation invariants deliberately stay where
- * they are: the wave spectrum in waves.ts, the foam field's decay
- * clocks in foam.ts, the fluid solver's parameters in mistfield.ts.
- * This file is for the LOOK of the crest white water.
+ * The wave SPECTRUM stays in waves.ts (it defines the sea itself, and
+ * each preset owns its bands); everything downstream of it — the white
+ * water's look AND its physics — lives here.
  */
 
 /** GLSL literal helper: GLSL needs `1.0`, JS prints `1`. */
 export const f = (n: number, digits = 4) => n.toFixed(digits)
+
+/**
+ * MASTER SWITCHES — turn each effect off to see the others in
+ * isolation. Shader-side flags bake in at material build (reload to
+ * apply); CPU-side ones take effect immediately.
+ */
+export const ENABLE = {
+  /** White ribbon on the folding mesh itself. */
+  loopWhite: true,
+  /** Pull of the pinch zone toward the sprite plane. */
+  loopStretch: true,
+  /** Foam masses surfacing from under the fold. */
+  foamSprites: true,
+  /** Vertical spray thrown off each foam mass. */
+  crestPlumes: true,
+  /** Ballistic droplets launched from inside the loops. */
+  splashDroplets: true,
+  /** Spray kicked up by the buoys. */
+  buoySpray: true,
+  /** Persistent foam residue field (deposits from landings). */
+  foamField: true,
+  /** 2D fluid mist field and its overlay. */
+  mist: false,
+  /** Downslope gusts shaping the mist. */
+  mistGusts: true,
+  /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
+   * study replaced them with loop-driven emission. */
+  whitecapEvents: false,
+} as const
 
 /**
  * FOAM SPRITES — the white masses that surface as a crest overturns.
@@ -150,4 +178,125 @@ export const LOOP = {
   /** Near-binary gate: pinches below the sprite criterion stay dark. */
   gateStart: 0.1,
   gateFull: 0.16,
+} as const
+
+/**
+ * SPLASH DROPLETS — the ballistic clumps thrown from inside a loop.
+ * Physics: pinned horizontally to the loop's advancing frame, gravity
+ * owns the vertical (spray.ts).
+ */
+export const DROPLET = {
+  /** Pool size. Exhaustion shows as missing spray, not a crash. */
+  maxCount: 1280,
+  /** m/s^2. Real gravity: these are water, not dust. */
+  gravity: 9.8,
+  /** Fraction of the wind a flying clump feels (0 = pure ballistics). */
+  windCarry: 0.0,
+  /** 1/s relaxation toward the carried wind (air drag). */
+  drag: 1.4,
+  /** Hard lifetime cap, s (landing is the real death). */
+  lifeMax: 3,
+  /** Art-scaled clump radii, m. */
+  sizeMin: 0.07,
+  sizeMax: 0.24,
+
+  /** Loop scan: cadence (s), grid pitch and half-extent (m). */
+  scanInterval: 0.1,
+  scanStep: 1.6,
+  scanExtent: 40,
+  /** Jacobian below which a sample counts as a loop. */
+  scanJ: 0.02,
+  /** Depth normalisation for the emission-count curve. */
+  depthSpan: 0.4,
+
+  /** Hop RELATIVE to the loop frame: up, then forward. */
+  hopUpMin: 0.3,
+  hopUpVar: 0.3,
+  hopFwdMin: 1.0,
+  hopFwdVar: 1.0,
+
+  /** Birth stagger (s): de-synchronises the 0.1s scan volleys. */
+  birthStagger: 0.1,
+  /** Render ease in/out (s) and death shrink. */
+  growTime: 0.05,
+  dieTime: 0.08,
+  /** Motion streaking: stretch per m/s, and its cap. */
+  streakPerSpeed: 0.1,
+  streakCap: 2.1,
+  /** Submersion test grace for young loop droplets (s): the surface is
+   * multi-sheeted at a fold and insta-culled healthy spray. */
+  submergeGrace: 0.25,
+  /** Foam deposit radius: floor + per unit clump size. */
+  depositBase: 0.13,
+  depositPerSize: 0.5,
+} as const
+
+/**
+ * FOAM FIELD — persistent residue left by droplet landings (foam.ts).
+ * Decay clocks are exponential time constants in seconds.
+ */
+export const FOAM = {
+  /** Thin foam's lifetime, s (the long linger). */
+  decayThin: 12,
+  /** Thick foam's, s: peaks erode faster so mounds flatten. */
+  decayThick: 4,
+  /** Turbulence window on the Jacobian probe. */
+  turbJStart: 0.28,
+  turbJFull: -0.15,
+  /** Spread rate: AREA growth, not decay, is the main thinning force. */
+  diffusion: 0.88,
+  /** Flat evaporation per step, x(1 + 5*turb). */
+  evaporation: 0.0002,
+  /** Drift as a fraction of wind speed. */
+  drift: 0.05,
+  /** Soft capacity: above `overloadStart` mass, thin foam's decay
+   * accelerates toward `decayOld`, saturating at `overloadFull`. */
+  decayOld: 3,
+  overloadStart: 200,
+  overloadFull: 400,
+  /** Web render: density remap window and cell sizes (m). */
+  densStart: 0.04,
+  densEnd: 0.65,
+  cellFine: 0.4,
+  cellCoarse: 2.2,
+} as const
+
+/**
+ * MIST FIELD — the 2D fluid solver (mistfield.ts) and its sources.
+ */
+export const MIST = {
+  /** Domain width, m, and grid resolutions. */
+  extent: 100,
+  simRes: 128,
+  dyeRes: 256,
+  /** Jacobi iterations for the pressure solve. */
+  pressureIters: 12,
+  /** 1/s exponential dissipation. */
+  velDissipation: 0.4,
+  dyeDissipation: 0.55,
+  /** Vorticity confinement: the billowing curls. */
+  vorticity: 14,
+  /** Steady wind coupling: fraction carried, and grip 1/s. */
+  windCarry: 0.45,
+  windGrip: 0.5,
+  /** Gusts: downslope acceleration on wave BACKS, and the swirl boost. */
+  gustSlide: 50,
+  gustSwirl: 0.9,
+  /** Gust timing, s. */
+  gustGapMin: 6,
+  gustGapVar: 10,
+  gustDurMin: 1.2,
+  gustDurVar: 2.0,
+  /** Spume injectors: dye per second at full strength, and how many
+   * injectors are fed per frame. */
+  spumeRate: 1.0,
+  spumePerFrame: 8,
+  /** Share of the feed dumped as a tight plume at the crest. */
+  spumeCrestShare: 0.65,
+  /** Overlay: opacity response and brightness window. */
+  opacityGain: 3.2,
+  brightStart: 0.35,
+  brightEnd: 1.1,
+  /** Height the overlay plane hovers above the surface, m. */
+  hover: 0.3,
 } as const

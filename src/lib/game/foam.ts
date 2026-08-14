@@ -26,6 +26,7 @@
  */
 
 import * as THREE from 'three'
+import { FOAM } from './tuning'
 import { waves, wavesGlsl } from './waves'
 
 export const FOAM_RESOLUTION = 512
@@ -50,8 +51,8 @@ export const FOAM_EXTENT = 100
  * spreading — and a plateau falls through the render floor everywhere
  * AT ONCE. Biggest footprint and complete fade are the same moment.
  */
-const DECAY_TAU_THIN = 12
-const DECAY_TAU_THICK = 2.5
+const DECAY_TAU_THIN = FOAM.decayThin
+const DECAY_TAU_THICK = FOAM.decayThick
 /**
  * Decay time constant where the water is actively BREAKING: churn tears
  * foam apart. The sim shader probes the local instantaneous Jacobian
@@ -61,8 +62,8 @@ const DECAY_TAU_THICK = 2.5
  */
 const DECAY_TAU_TURB = 1.1
 /** Jacobian ramp for the turbulence probe; matches the churn's. */
-const TURB_J_START = 0.28
-const TURB_J_FULL = -0.15
+const TURB_J_START = FOAM.turbJStart
+const TURB_J_FULL = FOAM.turbJFull
 /**
  * Per-frame neighbor mixing, 0..1: the spread rate. Diffusion is the
  * dissipation mechanism — mass leaves the peak and widens the skirt,
@@ -70,7 +71,7 @@ const TURB_J_FULL = -0.15
  * Spread radius scales with sqrt of this: 0.88 doubles the maximum
  * expansion 0.22 gave. (Still stable: it is a positive-weight average.)
  */
-const DIFFUSION = 0.88
+const DIFFUSION = FOAM.diffusion
 
 /**
  * Soft capacity: a CPU-side running estimate of total foam mass (unit:
@@ -80,15 +81,15 @@ const DIFFUSION = 0.88
  * deposits are born thick and only thin out — so pressure fades the OLD
  * tails gracefully while new deposits always land at full strength.
  */
-const DECAY_TAU_OLD = 3
+const DECAY_TAU_OLD = FOAM.decayOld
 // Calibrated against a measured storm steady state of ~150 mass units
 // (window.foamMass()): pressure begins above normal-storm load and only
 // saturates at ~2.7x it.
-const OVERLOAD_START = 200
-const OVERLOAD_FULL = 400
+const OVERLOAD_START = FOAM.overloadStart
+const OVERLOAD_FULL = FOAM.overloadFull
 let massEst = 0
 /** Downwind drift as a fraction of wind speed. */
-const FOAM_DRIFT = 0.05
+const FOAM_DRIFT = FOAM.drift
 
 /** Gaussian deposits consumed per sim step. */
 const MAX_INJECT = 24
@@ -254,7 +255,7 @@ void main() {
 	// main thinning force (double the radius = a quarter the thickness),
 	// and heavy evaporation was cutting the long thin phase short.
 	// uDtScale makes rates WALL-CLOCK true at any framerate.
-	float h = max(spreadH * retain - 0.0002 * uDtScale * (1.0 + 5.0 * turb), 0.0);
+	float h = max(spreadH * retain - ${FOAM.evaporation.toFixed(5)} * uDtScale * (1.0 + 5.0 * turb), 0.0);
 
 	// NO in-field crest generation: foam is EMERGENT from spray alone.
 	// Every deposit below entered through a landing clump; crests read as
@@ -449,8 +450,8 @@ export class FoamField {
 // ---- Rendering ----
 
 /** Voronoi web cell sizes, meters: the three-rung ladder (see foamGlsl). */
-const CELL_FINE = 0.4
-const CELL_COARSE = 2.2
+const CELL_FINE = FOAM.cellFine
+const CELL_COARSE = FOAM.cellCoarse
 /**
  * Strand half-width at full thickness, in cell units. The farthest
  * interior point of a cell sits ~0.5 from an edge, so 0.55 fuses the
@@ -487,7 +488,7 @@ float foamWeb(vec2 worldXZ, float thickness, float jac) {
 	// Upper edge raised 0.45 -> 0.65: full solidity now needs genuinely
 	// thick foam, so patches open into web earlier instead of sitting as
 	// dense white slabs.
-	float dens = smoothstep(0.04, 0.65, thickness);
+	float dens = smoothstep(${FOAM.densStart.toFixed(3)}, ${FOAM.densEnd.toFixed(3)}, thickness);
 	// Cell merging follows the WAVES: compressed water (J < 1) packs the
 	// foam and holds the fine web longer; stretched water opens the
 	// cells early.

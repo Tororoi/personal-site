@@ -30,26 +30,27 @@
 
 import { addFoam } from './foam'
 import { queueMistSplat } from './mistfield'
+import { DROPLET, ENABLE, MIST } from './tuning'
 import { injectRipple } from './ripples'
 import { waves } from './waves'
 import { events, MAX_EVENTS, sampleOcean, windVector } from './whitecaps'
 
-export const MAX_SPRAY = 1280
+export const MAX_SPRAY = DROPLET.maxCount
 
-const GRAVITY = 9.8
+const GRAVITY = DROPLET.gravity
 /**
  * Fraction of the wind a flying clump feels. TEMP: zero — wind is OFF
  * for the loop-splash study; flights are pure gravity arcs. (The tuned
  * value before the study was 0.08.)
  */
-const WIND_CARRY = 0.0
+const WIND_CARRY = DROPLET.windCarry
 /** 1/s relaxation of velocity toward the carried wind (air drag). */
-const DRAG = 1.4
+const DRAG = DROPLET.drag
 /** Hard lifetime cap, seconds (safety net; landing is the real death). */
-const LIFE_MAX = 3
+const LIFE_MAX = DROPLET.lifeMax
 /** Art-scaled clump radii, meters. */
-const SIZE_MIN = 0.07
-const SIZE_MAX = 0.24
+const SIZE_MIN = DROPLET.sizeMin
+const SIZE_MAX = DROPLET.sizeMax
 /** Burst size when a crest first lets go, scaled by windFactor. */
 const BURST_BASE = 20
 const BURST_WIND = 36
@@ -93,22 +94,22 @@ const WIND_FULL = 15
  * random offset makes a coarse grid find thin lines over a few passes),
  * with a bonus chance at the LARGER parts of the loop (deeper J).
  */
-const LOOP_SCAN_INTERVAL = 0.1
-const LOOP_SCAN_STEP = 1.6
-const LOOP_SCAN_EXTENT = 40
+const LOOP_SCAN_INTERVAL = DROPLET.scanInterval
+const LOOP_SCAN_STEP = DROPLET.scanStep
+const LOOP_SCAN_EXTENT = DROPLET.scanExtent
 /** Same J test as the white loop render. */
-const LOOP_J = 0.02
+const LOOP_J = DROPLET.scanJ
 /** Bonus-emission depth scale: J this far below LOOP_J = guaranteed extra. */
-const LOOP_DEPTH_SPAN = 0.4
+const LOOP_DEPTH_SPAN = DROPLET.depthSpan
 /**
  * The hop, RELATIVE to the loop: droplets inherit the loop's advance
  * velocity as their base (pinned to its frame), and these constants are
  * the small extra thrown AHEAD of it. Barely up, slightly forward.
  */
-const LOOP_UP_MIN = 0.3
-const LOOP_UP_VAR = 0.3
-const LOOP_FORWARD_MIN = 1.0
-const LOOP_FORWARD_VAR = 1.0
+const LOOP_UP_MIN = DROPLET.hopUpMin
+const LOOP_UP_VAR = DROPLET.hopUpVar
+const LOOP_FORWARD_MIN = DROPLET.hopFwdMin
+const LOOP_FORWARD_VAR = DROPLET.hopFwdVar
 /**
  * Cover clumps SURF: the fold pattern travels at the phase velocity of
  * the dominant wave, so the boil advects at exactly that velocity to
@@ -334,7 +335,7 @@ function launchLoop(
   // Birth STAGGER: the scan fires every 0.1s, and a whole pass born on
   // one frame reads as strobing volleys. A random activation delay
   // spreads the same droplets across the interval — continuous spray.
-  p.birth = t + Math.random() * 0.1
+  p.birth = t + Math.random() * DROPLET.birthStagger
   p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
   p.impact = false
   p.loop = true
@@ -543,6 +544,7 @@ function scanLoopSplash(t: number) {
     // upward velocity so the wave can't climb over its own spray.
     const rise = Math.max(surfaceRise(a.ax, a.az, t), 0)
 
+    if (!ENABLE.splashDroplets) continue
     for (let k = 0; k < a.count; k++) {
       const forward = LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR
       launchLoop(
@@ -608,12 +610,12 @@ const injectors: SpumeInjector[] = Array.from(
 )
 
 /** Dye per second at full strength, per injector. */
-const SPUME_RATE = 1.0
+const SPUME_RATE = MIST.spumeRate
 /** Fraction of the feed dumped as a TIGHT plume right at the crest. */
-const SPUME_CREST_SHARE = 0.65
+const SPUME_CREST_SHARE = MIST.spumeCrestShare
 // Two splats per injector now, so half the previous per-frame count
 // keeps the field's 16-splat budget intact.
-const SPUME_PER_FRAME = 8
+const SPUME_PER_FRAME = MIST.spumePerFrame
 let spumeCursor = 0
 
 function refreshInjectors(t: number) {
@@ -783,7 +785,7 @@ export function updateSpray(dt: number, t: number) {
     if (t < p.birth) continue
     // Dying: keep riding the water while the render shrinks it out.
     if (p.dying >= 0) {
-      if (t - p.dying > 0.08) p.size = 0
+      if (t - p.dying > DROPLET.dieTime) p.size = 0
       continue
     }
     if (p.loop) {
@@ -830,7 +832,7 @@ export function updateSpray(dt: number, t: number) {
     // the test insta-culled healthy spray (~740/s measured, the
     // flicker). A genuinely buried droplet is occluded by the opaque
     // water meanwhile; the test resumes once the flight matures.
-    if (p.loop && t - p.birth < 0.25) continue
+    if (p.loop && t - p.birth < DROPLET.submergeGrace) continue
     const s = sampleOcean(p.x, p.z, t, 1, 1)
     if (p.y < s.height - 0.02) {
       if (t - p.birth < 0.1) culledYoung++
@@ -862,7 +864,11 @@ export function updateSpray(dt: number, t: number) {
           // dies to one diffusion pass no matter how slow the clocks are.
           // (0.2 base read as too much total foam; ~1 texel is the sweet
           // spot between resolvable and restrained.)
-          addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.5)
+          addFoam(
+          p.x - r.swayX,
+          p.z - r.swayZ,
+          DROPLET.depositBase + p.size * DROPLET.depositPerSize,
+        )
         } else {
           // Buoy (impact) spray: EVERY clump deposits, but at low amp so
           // the float doesn't paint a solid disc around itself. Sigma
