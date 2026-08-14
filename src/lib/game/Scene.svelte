@@ -1084,6 +1084,7 @@ void main() {
 	float hSum = 0.0;
 	float aSum = 0.0;
 	float vY = 0.0;
+	vec3 vel = vec3(0.0);
 	for (int i = 0; i < WAVE_COUNT; i++) {
 		vec4 wa = uWaveA[i];
 		vec3 wb = uWaveB[i];
@@ -1092,7 +1093,13 @@ void main() {
 		hSum += amp * sin(th);
 		aSum += amp;
 		vY -= amp * wa.w * cos(th);
+		// Orbital velocity of the water this sprite rides: d/dt of the
+		// Gerstner displacement (horizontal qAw sin, vertical -Aw cos).
+		float qaw = wb.y * amp * wa.w;
+		vel.x += qaw * wa.x * sin(th);
+		vel.z += qaw * wa.y * sin(th);
 	}
+	vel.y = vY;
 	float hn = hSum / max(aSum, 0.0001);
 	// The throw is the PEAK and the FALL: nothing before the crest tops
 	// out, full strength through the descent while the water is still
@@ -1119,10 +1126,16 @@ void main() {
 	vFrac = bubblePx / quadPx;
 	vSeed = fract(sin(position.x * 12.9898 + position.z * 78.233) * 43758.5453);
 	vSize = r;
-	// Wind shear, expressed in the sprite's own quad units: how far the
-	// plume's top is blown sideways per unit of height.
-	vShear = uWindScreen.x / max(quadPx * (2.0 / uViewH), 0.0001);
-	vGale = uWindSpeed;
+	// MOMENTUM, not wind: the plume trails OPPOSITE the sprite's own
+	// motion, like spray thrown off a moving mass. Project the sprite's
+	// world velocity to screen, negate it, and express the sideways part
+	// in the sprite's own quad units.
+	vec4 c0 = projectionMatrix * view;
+	vec4 c1 = projectionMatrix * viewMatrix * vec4(world + vel, 1.0);
+	vec2 velScreen = c1.xy / c1.w - c0.xy / c0.w;
+	vShear = -velScreen.x / max(quadPx * (2.0 / uViewH), 0.0001);
+	// Speed drives amplitude and tattering (fast water throws more).
+	vGale = length(vel);
 }`,
 		fragmentShader: `
 uniform vec3 uColor;
@@ -1154,7 +1167,7 @@ void main() {
 	// SHEARS downwind: the top is blown sideways in proportion to how
 	// high it has risen, so plumes rake over rather than standing up.
 	float sway = sin(uTime * 1.7 + vSeed * 20.0 + h * 2.6) * 0.09 * h;
-	float lean = vShear * h * h * 0.35;
+	float lean = vShear * h * h * 1.0;
 	float halfW = rr * (0.75 + 1.5 * h);
 	float x = (pc.x - 0.5 - sway - lean) / halfW;
 	float body = 1.0 - clamp(abs(x), 0.0, 1.0);
@@ -1163,18 +1176,17 @@ void main() {
 	// Gale tatters the plume: the wisp threshold rises and the streaks
 	// scroll faster, so hard wind shreds spray into rags.
 	float n = hash(vec2(
-		floor(x * (3.0 + vGale * 0.35) + vSeed * 17.0),
-		floor(h * 7.0 + uTime * (2.3 + vGale * 0.5) + vSeed * 9.0)
+		floor(x * (3.0 + vGale * 0.3) + vSeed * 17.0),
+		floor(h * 7.0 + uTime * (2.3 + vGale * 0.4) + vSeed * 9.0)
 	));
-	float wisp = smoothstep(0.35 + min(vGale * 0.02, 0.2), 0.9, n * (1.0 - h * 0.55) + body * 0.5);
+	float wisp = smoothstep(0.35 + min(vGale * 0.018, 0.05), 0.9, n * (1.0 - h * 0.55) + body * 0.5);
 	// Fade out toward the top, and hold density at the base.
 	// The burst envelope drives BOTH density and reach: an early plume
 	// is a short faint puff, a peaking crest throws a full column.
-	// AMPLITUDE (reach and density) rises with WIND: 0.25 in still air —
-	// a subtle fringe lifting off the foam — climbing linearly to 1.0 at
-	// 40 m/s, where spray is thrown a full sprite-quad high. Beyond that
-	// it keeps growing, gently, so a freak gale still escalates.
-	float amp = 0.25 + 0.75 * min(vGale / 40.0, 1.0) + max(vGale - 40.0, 0.0) * 0.006;
+	// AMPLITUDE (reach and density) rises with the sprite's own SPEED:
+	// 0.25 for slow water, reaching 1.0 at 8 m/s of orbital motion —
+	// momentum throws the spray, so the fastest-moving foam sprays most.
+	float amp = 0.25 + 0.75 * min(vGale / 8.0, 1.0);
 	if (h > vBurst * amp) discard;
 	float a = wisp * body * (1.0 - h) * (1.0 - h) * 0.85 * vBurst * amp;
 	if (a < 0.02) discard;
