@@ -20,7 +20,7 @@
  * frame and the CPU twin reads it directly: the twins cannot disagree.
  */
 
-import { ENABLE } from './tuning'
+import { ENABLE, WIND } from './tuning'
 import { activeField, sampleSurface, type SurfaceSample } from './waves'
 
 export const MAX_EVENTS = 8
@@ -56,9 +56,14 @@ export const events: WhitecapEvent[] = Array.from(
 const windAngle = activeField.windAngle
 const windSpeed = activeField.windSpeed ?? 5
 
-/** Slow multi-sine gust factor, ~0.7..1.4. Deterministic in waveTime. */
+/** Slow multi-sine breathing on the BASE wind, around 1. Deterministic
+ * in waveTime. (Gusts are a separate component — see windGust.) */
 export function gust(t: number): number {
-  return 1 + 0.25 * Math.sin(t * 0.31) + 0.15 * Math.sin(t * 0.73 + 2.1)
+  return (
+    1 +
+    WIND.baseBreath * Math.sin(t * 0.31) +
+    WIND.baseBreath * 0.6 * Math.sin(t * 0.73 + 2.1)
+  )
 }
 
 /**
@@ -66,13 +71,48 @@ export function gust(t: number): number {
  * over the course of a minute or two. Deterministic in waveTime.
  */
 function windWander(t: number): number {
-  return 0.22 * Math.sin(t * 0.111) + 0.13 * Math.sin(t * 0.043 + 1.7)
+  return WIND.baseWander * Math.sin(t * 0.111) + 0.13 * Math.sin(t * 0.043 + 1.7)
 }
 
-export function windVector(t: number): { x: number; z: number } {
+function hash1(n: number): number {
+  return ((Math.sin(n * 127.1 + 311.7) * 43758.5453) % 1 + 1) % 1
+}
+
+/** The steady breeze: direction wanders slowly, speed breathes gently. */
+export function windBase(t: number): { x: number; z: number } {
   const a = windAngle + windWander(t)
   const g = windSpeed * gust(t)
   return { x: Math.cos(a) * g, z: Math.sin(a) * g }
+}
+
+/**
+ * The GUST: episodic, arriving at a markedly different angle and much
+ * stronger than the base while it lasts. Zero between episodes.
+ * Deterministic in waveTime; each episode's turn, duration and strength
+ * come from a hash of its index.
+ */
+export function windGust(t: number): { x: number; z: number } {
+  const idx = Math.floor(t / WIND.gustCycle)
+  const frac = t / WIND.gustCycle - idx
+  const h1 = hash1(idx)
+  const h2 = hash1(idx + 91.3)
+  const h3 = hash1(idx + 17.7)
+  const dur = WIND.gustDurMin + WIND.gustDurVar * h1
+  if (frac >= dur) return { x: 0, z: 0 }
+  // Fast attack, slow release — a gust arrives, peaks, and passes.
+  const u = frac / dur
+  const env = Math.min(u / 0.2, 1) * (1 - Math.max((u - 0.35) / 0.65, 0))
+  const turn = (h2 < 0.5 ? -1 : 1) * (WIND.gustTurnMin + WIND.gustTurnVar * h3)
+  const a = windAngle + windWander(t) + turn
+  const g = windSpeed * (WIND.gustSpeedMin + WIND.gustSpeedVar * h2) * env
+  return { x: Math.cos(a) * g, z: Math.sin(a) * g }
+}
+
+/** Base + gust: what everything except the crest plumes sees. */
+export function windVector(t: number): { x: number; z: number } {
+  const b = windBase(t)
+  const g = windGust(t)
+  return { x: b.x + g.x, z: b.z + g.z }
 }
 
 /**

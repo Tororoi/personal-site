@@ -111,7 +111,7 @@ export const PLUME = {
    * where it is used (1 bubble + reach/2), since a quad taller than the
    * reach is wasted fill and a shorter one cuts the plume off.
    */
-  reachRadii: 2.8,
+  reachRadii: 3.8,
   /**
    * Where the plume's base sits on the bubble: 0 = the bubble's top,
    * 1 = its centre. Rooting it partway down overlaps the foam mass so
@@ -146,14 +146,17 @@ export const PLUME = {
 
   /** Trailing lean opposite the sprite's motion (quad units). */
   leanStrength: 1.0,
+  /** How hard a GUST rakes the plume, per m/s of gust wind. Plumes see
+   * only the gust component, never the base breeze. */
+  gustLean: 0.06,
   /** Slow per-sprite wander of the plume. */
   swayAmp: 0.09,
   swayRate: 1.7,
   swayHeightPhase: 2.6,
 
   /** Plume half-width at the base and how much it grows with height. */
-  widthBase: 0.75,
-  widthGrowth: 4.5,
+  widthBase: 1.75,
+  widthGrowth: 3.5,
 
   /**
    * RISE SPEED — how fast the spray appears to travel UP the plume.
@@ -185,14 +188,14 @@ export const PLUME = {
    * (e.g. 0.05-0.9) fades every cell in gradually, which is what made
    * the plumes look smooth and airbrushed.
    */
-  wispCut: 0.4,
-  wispCutEnd: 0.68,
+  wispCut: 0.5,
+  wispCutEnd: 0.9,
   /**
    * How much the plume's solid body pushes cells over the threshold.
    * High values fill the core in solid; low values let the speckle
    * reach all the way through the middle.
    */
-  bodyBias: 0.5,
+  bodyBias: 0.4,
 
   /**
    * COHERENCE (0-1): how much the streak pattern is anchored in WORLD
@@ -212,7 +215,7 @@ export const PLUME = {
   edgeFade: 0.3,
 
   /** Overall opacity multiplier. */
-  alpha: 0.85,
+  alpha: 1.0,
   /** Fragments below this alpha are discarded. */
   alphaCull: 0.02,
 } as const
@@ -242,6 +245,33 @@ export const LOOP = {
   /** Near-binary gate: pinches below the sprite criterion stay dark. */
   gateStart: 0.1,
   gateFull: 0.16,
+} as const
+
+/**
+ * WIND — two components. The BASE is the steady breeze: it sets the
+ * mean drift of mist and foam and barely changes. GUSTS are episodic
+ * and violent, arriving at a noticeably different angle and outrunning
+ * the base wind while they last. `windVector` is their sum, so existing
+ * consumers see one wind; the crest plumes read the GUST alone, so
+ * spray whips only when a gust is actually blowing through.
+ */
+export const WIND = {
+  /** Base wander: slow heading drift, radians. */
+  baseWander: 0.22,
+  /** Slow multi-sine breathing on the base speed (fraction). */
+  baseBreath: 0.18,
+
+  /** Mean seconds between gust onsets. */
+  gustCycle: 8,
+  /** Fraction of the cycle a gust lasts (min + random var). */
+  gustDurMin: 0.1,
+  gustDurVar: 0.15,
+  /** Gust heading offset from the base wind, radians (sign random). */
+  gustTurnMin: 0,
+  gustTurnVar: 2.1,
+  /** Gust strength as a multiple of base wind speed. */
+  gustSpeedMin: 1.4,
+  gustSpeedVar: 1.6,
 } as const
 
 /**

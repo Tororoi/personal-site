@@ -1144,8 +1144,11 @@ void main() {
 	vec4 c1 = projectionMatrix * viewMatrix * vec4(world + vel, 1.0);
 	vec2 velScreen = c1.xy / c1.w - c0.xy / c0.w;
 	// Normalised by the BUBBLE, not the quad: lean should scale with the
-	// foam mass, not with how much spare canvas its sprite has.
-	vShear = -velScreen.x / max(bubblePx * (2.0 / uViewH), 0.0001);
+	// foam mass, not with how much spare canvas its sprite has. Momentum
+	// sets the trailing rake; a GUST adds to it (the steady breeze is
+	// deliberately absent — only gusts move spray).
+	float bubbleNdc = max(bubblePx * (2.0 / uViewH), 0.0001);
+	vShear = (-velScreen.x + uWindScreen.x * ${f(PLUME.gustLean)}) / bubbleNdc;
 	// Speed drives amplitude and tattering (fast water throws more).
 	vGale = length(vel);
 }`,
