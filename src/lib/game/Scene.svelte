@@ -1048,7 +1048,11 @@ void main() {
 			uColor: { value: new THREE.Color('#f2f8ff') },
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
-			uViewH: { value: 900 }
+			uViewH: { value: 900 },
+			// Wind in SCREEN space (NDC per metre of drift) plus its
+			// speed, so plumes shear downwind and tatter in a gale.
+			uWindScreen: { value: new THREE.Vector2(0, 0) },
+			uWindSpeed: { value: 0 }
 		},
 		transparent: true,
 		depthWrite: false,
@@ -1058,6 +1062,8 @@ uniform float uAmp;
 uniform float uPointPx;
 uniform float uDomAmp;
 uniform float uViewH;
+uniform vec2 uWindScreen;
+uniform float uWindSpeed;
 ${wavesGlsl()}
 ${spriteFrameGlsl}
 attribute float aRank;
@@ -1066,6 +1072,8 @@ varying float vFrac;
 varying float vSeed;
 varying float vSize;
 varying float vBurst;
+varying float vShear;
+varying float vGale;
 void main() {
 	vec3 surf; vec3 Nn; float g;
 	float r = spriteFrame(position.xz, position.y, aRank, surf, Nn, g);
@@ -1111,6 +1119,10 @@ void main() {
 	vFrac = bubblePx / quadPx;
 	vSeed = fract(sin(position.x * 12.9898 + position.z * 78.233) * 43758.5453);
 	vSize = r;
+	// Wind shear, expressed in the sprite's own quad units: how far the
+	// plume's top is blown sideways per unit of height.
+	vShear = uWindScreen.x / max(quadPx * (2.0 / uViewH), 0.0001);
+	vGale = uWindSpeed;
 }`,
 		fragmentShader: `
 uniform vec3 uColor;
@@ -1122,6 +1134,8 @@ varying float vFrac;
 varying float vSeed;
 varying float vSize;
 varying float vBurst;
+varying float vShear;
+varying float vGale;
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -1136,25 +1150,39 @@ void main() {
 	float top = bc.y - rr;
 	float h = (top - pc.y) / max(top, 0.0001);
 	if (h <= 0.0) discard;
-	// Plume widens with height and wanders on a slow per-sprite phase.
+	// Plume widens with height, wanders on a slow per-sprite phase, and
+	// SHEARS downwind: the top is blown sideways in proportion to how
+	// high it has risen, so plumes rake over rather than standing up.
 	float sway = sin(uTime * 1.7 + vSeed * 20.0 + h * 2.6) * 0.09 * h;
+	float lean = vShear * h * h * 0.35;
 	float halfW = rr * (0.75 + 1.5 * h);
-	float x = (pc.x - 0.5 - sway) / halfW;
+	float x = (pc.x - 0.5 - sway - lean) / halfW;
 	float body = 1.0 - clamp(abs(x), 0.0, 1.0);
 	if (body <= 0.0) discard;
 	// Wispy structure: streaks along the plume, breaking up with height.
-	float n = hash(vec2(floor(x * 3.0 + vSeed * 17.0), floor(h * 7.0 + uTime * 2.3 + vSeed * 9.0)));
-	float wisp = smoothstep(0.35, 0.9, n * (1.0 - h * 0.55) + body * 0.5);
+	// Gale tatters the plume: the wisp threshold rises and the streaks
+	// scroll faster, so hard wind shreds spray into rags.
+	float n = hash(vec2(
+		floor(x * (3.0 + vGale * 0.35) + vSeed * 17.0),
+		floor(h * 7.0 + uTime * (2.3 + vGale * 0.5) + vSeed * 9.0)
+	));
+	float wisp = smoothstep(0.35 + min(vGale * 0.02, 0.2), 0.9, n * (1.0 - h * 0.55) + body * 0.5);
 	// Fade out toward the top, and hold density at the base.
 	// The burst envelope drives BOTH density and reach: an early plume
 	// is a short faint puff, a peaking crest throws a full column.
-	if (h > vBurst) discard;
-	float a = wisp * body * (1.0 - h) * (1.0 - h) * 0.85 * vBurst;
+	// AMPLITUDE (reach and density) is the still-air baseline for now —
+	// half the previous height — with wind scaling to be layered on top
+	// once this baseline reads right.
+	float amp = 0.25;
+	if (h > vBurst * amp) discard;
+	float a = wisp * body * (1.0 - h) * (1.0 - h) * 0.85 * vBurst * amp;
 	if (a < 0.02) discard;
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
 	gl_FragColor = vec4(mix(uColor, uFogColor, fog), a);
 }`
 	});
+	const sprayWindA = new THREE.Vector3();
+	const sprayWindB = new THREE.Vector3();
 	const crestSprayMesh = new THREE.Points(underSpikeGeometry, crestSprayMaterial);
 	crestSprayMesh.frustumCulled = false;
 	crestSprayMesh.renderOrder = 6;
@@ -1420,6 +1448,18 @@ void main() {
 				foamAccum = 0;
 				waterUniforms.uFoamTex.value = foamField.texture;
 				waterUniforms.uFoamWebTex.value = foamField.webTexture;
+			}
+			// Wind projected to screen: NDC offset for a 1m downwind drift.
+			{
+				const wcam = camera.current;
+				sprayWindA.set(0, 0, 0).project(wcam);
+				sprayWindB.set(wind.x, 0, wind.z).project(wcam);
+				const ws = Math.hypot(wind.x, wind.z);
+				(crestSprayMaterial.uniforms.uWindScreen.value as THREE.Vector2).set(
+					sprayWindB.x - sprayWindA.x,
+					sprayWindB.y - sprayWindA.y
+				);
+				crestSprayMaterial.uniforms.uWindSpeed.value = ws;
 			}
 			mistField.step(
 				renderer,
