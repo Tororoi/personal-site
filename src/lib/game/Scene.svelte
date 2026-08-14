@@ -1028,6 +1028,137 @@ void main() {
 	const underSpikeMesh = new THREE.Points(underSpikeGeometry, underSpikeMaterial);
 	underSpikeMesh.frustumCulled = false;
 
+	// CREST SPRAY: a second pass over the SAME points. Each sprite's
+	// quad is enlarged upward and the fragment paints a vertical plume
+	// above the bubble — spray lifting off that specific foam mass. The
+	// bubble region is discarded here (the opaque pass already drew it),
+	// and this pass is transparent with no depth write, so plumes layer
+	// over each other without sorting artefacts.
+	// Slightly tighter than the first pass: bursts mean fewer plumes are
+	// live at once, and the quad's area is the fill cost.
+	const PLUME_K = 2.8;
+	const crestSprayMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			uTime: waterUniforms.uTime,
+			uAmp: waterUniforms.uAmp,
+			uWaveA: waterUniforms.uWaveA,
+			uWaveB: waterUniforms.uWaveB,
+			uDomAmp: underSpikeMaterial.uniforms.uDomAmp,
+			uPointPx: underSpikeMaterial.uniforms.uPointPx,
+			uColor: { value: new THREE.Color('#f2f8ff') },
+			uFogColor: waterUniforms.uFogColor,
+			uFogDensity: waterUniforms.uFogDensity,
+			uViewH: { value: 900 }
+		},
+		transparent: true,
+		depthWrite: false,
+		vertexShader: `
+uniform float uTime;
+uniform float uAmp;
+uniform float uPointPx;
+uniform float uDomAmp;
+uniform float uViewH;
+${wavesGlsl()}
+${spriteFrameGlsl}
+attribute float aRank;
+varying float vViewZ;
+varying float vFrac;
+varying float vSeed;
+varying float vSize;
+varying float vBurst;
+void main() {
+	vec3 surf; vec3 Nn; float g;
+	float r = spriteFrame(position.xz, position.y, aRank, surf, Nn, g);
+	// BURST at the wave's peak: analytic surface height (normalised by
+	// the total amplitude) and its time derivative. Spray fires as the
+	// crest tops out and trails off on the way down — a throw, not a
+	// steady emission.
+	float hSum = 0.0;
+	float aSum = 0.0;
+	float vY = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 wa = uWaveA[i];
+		vec3 wb = uWaveB[i];
+		float th = (position.x * wa.x + position.z * wa.y) * wa.z - wa.w * uTime + wb.z;
+		float amp = wb.x * uAmp;
+		hSum += amp * sin(th);
+		aSum += amp;
+		vY -= amp * wa.w * cos(th);
+	}
+	float hn = hSum / max(aSum, 0.0001);
+	// The throw is the PEAK and the FALL: nothing before the crest tops
+	// out, full strength through the descent while the water is still
+	// high, tapering as the surface drops away. Rising water is silent.
+	float high = smoothstep(-0.1, 0.55, hn);
+	float falling = smoothstep(0.0, -0.35, vY / max(aSum, 0.0001) * 3.0);
+	vBurst = high * mix(0.15, 1.0, falling);
+	if (r <= 0.0 || g <= 0.001 || vBurst <= 0.01) {
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		gl_PointSize = 0.0;
+		return;
+	}
+	vec3 world = surf - Nn * (r * 0.8 * g);
+	vec4 view = viewMatrix * vec4(world, 1.0);
+	vViewZ = -view.z;
+	float bubblePx = r * 2.0 * uPointPx * g;
+	float quadPx = bubblePx * ${PLUME_K.toFixed(1)};
+	// Bubble sits at the BOTTOM of the enlarged quad; shift the centre
+	// up by the extra half-height so the bubble stays put on screen.
+	vec4 clip = projectionMatrix * view;
+	clip.y += (quadPx - bubblePx) * 0.5 * (2.0 / uViewH) * clip.w;
+	gl_Position = clip;
+	gl_PointSize = quadPx;
+	vFrac = bubblePx / quadPx;
+	vSeed = fract(sin(position.x * 12.9898 + position.z * 78.233) * 43758.5453);
+	vSize = r;
+}`,
+		fragmentShader: `
+uniform vec3 uColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform float uTime;
+varying float vViewZ;
+varying float vFrac;
+varying float vSeed;
+varying float vSize;
+varying float vBurst;
+
+float hash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+void main() {
+	// Point coords: y runs DOWN, so the plume occupies small y.
+	vec2 pc = gl_PointCoord;
+	float rr = vFrac * 0.5;
+	vec2 bc = vec2(0.5, 1.0 - rr);
+	// Height above the bubble's top, 0..1 over the plume's reach.
+	float top = bc.y - rr;
+	float h = (top - pc.y) / max(top, 0.0001);
+	if (h <= 0.0) discard;
+	// Plume widens with height and wanders on a slow per-sprite phase.
+	float sway = sin(uTime * 1.7 + vSeed * 20.0 + h * 2.6) * 0.09 * h;
+	float halfW = rr * (0.75 + 1.5 * h);
+	float x = (pc.x - 0.5 - sway) / halfW;
+	float body = 1.0 - clamp(abs(x), 0.0, 1.0);
+	if (body <= 0.0) discard;
+	// Wispy structure: streaks along the plume, breaking up with height.
+	float n = hash(vec2(floor(x * 3.0 + vSeed * 17.0), floor(h * 7.0 + uTime * 2.3 + vSeed * 9.0)));
+	float wisp = smoothstep(0.35, 0.9, n * (1.0 - h * 0.55) + body * 0.5);
+	// Fade out toward the top, and hold density at the base.
+	// The burst envelope drives BOTH density and reach: an early plume
+	// is a short faint puff, a peaking crest throws a full column.
+	if (h > vBurst) discard;
+	float a = wisp * body * (1.0 - h) * (1.0 - h) * 0.85 * vBurst;
+	if (a < 0.02) discard;
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	gl_FragColor = vec4(mix(uColor, uFogColor, fog), a);
+}`
+	});
+	const crestSprayMesh = new THREE.Points(underSpikeGeometry, crestSprayMaterial);
+	crestSprayMesh.frustumCulled = false;
+	crestSprayMesh.renderOrder = 6;
+
 
 
 
@@ -1258,6 +1389,8 @@ void main() {
 
 			const env = computeEnv(game.time / DAY_SECONDS);
 
+			crestSprayMaterial.uniforms.uViewH.value =
+				renderer.domElement.height || window.innerHeight;
 			waterUniforms.uTime.value = waveTime;
 
 			const wind = windVector(waveTime);
@@ -1506,6 +1639,7 @@ void main() {
 		sprayMaterial.dispose();
 		underSpikeGeometry.dispose();
 		underSpikeMaterial.dispose();
+		crestSprayMaterial.dispose();
 		mistGeometry.dispose();
 		mistMaterial.dispose();
 		mistField.dispose();
@@ -1532,6 +1666,8 @@ void main() {
 <T is={sprayMesh} />
 
 <T is={underSpikeMesh} />
+
+<T is={crestSprayMesh} />
 
 <T is={mistMesh} />
 <T.Mesh geometry={waterGeometry} material={waterMaterial} />
