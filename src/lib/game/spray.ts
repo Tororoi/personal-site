@@ -542,14 +542,7 @@ function scanLoopSplash(t: number) {
     // relative to the advancing loop: droplets inherit the surface's
     // upward velocity so the wave can't climb over its own spray.
     const rise = Math.max(surfaceRise(a.ax, a.az, t), 0)
-    // Spume: each break tears off a small CLOUD of mist that the wind
-    // owns immediately (a few points per site per scan reads as a puff;
-    // a lone 1-2px dot was invisible).
-    // Spume feeds the mist FLUID (mistfield.ts): one dye + impulse
-    // splat per pink site per scan. Amount scales with the emission
-    // count (deep loops breathe more mist), the impulse pushes the dye
-    // along the loop's heading so the curtain travels with the break.
-    // queueMistSplat(a.x, a.z, 0.025 * a.count, a.hx * 1.5, a.hz * 1.5, 1.4)
+
     for (let k = 0; k < a.count; k++) {
       const forward = LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR
       launchLoop(
@@ -564,6 +557,166 @@ function scanLoopSplash(t: number) {
         a.hz * forward + (Math.random() * 2 - 1) * 0.1,
       )
     }
+  }
+}
+
+/**
+ * SPUME INJECTORS: persistent entities that feed the mist field.
+ *
+ * Feeding straight off the scan puffed badly — the qualifying point SET
+ * churns every 0.1s (jittered grid), so dye kept starting up at NEW
+ * locations with no history. Injectors fix it the way the droplets and
+ * crest ovals were fixed: spawned once, advected with loopFrame between
+ * scans, strength EASED up and down, and only retired when their loop
+ * is gone. Dye is then fed continuously at a smoothly moving point, so
+ * the mist accumulates into a wall instead of popping.
+ */
+type SpumeInjector = {
+  active: boolean
+  ax: number
+  az: number
+  hx: number
+  hz: number
+  /** Eased 0..1 feed strength and its scan-driven target. */
+  strength: number
+  target: number
+  lastSeen: number
+  x: number
+  z: number
+  /** Loop advance velocity, handed to the splats as impulse. */
+  vx: number
+  vz: number
+}
+
+const MAX_INJECTORS = 48
+const injectors: SpumeInjector[] = Array.from(
+  { length: MAX_INJECTORS },
+  () => ({
+    active: false,
+    ax: 0,
+    az: 0,
+    hx: 1,
+    hz: 0,
+    strength: 0,
+    target: 0,
+    lastSeen: -10,
+    x: 0,
+    z: 0,
+    vx: 0,
+    vz: 0,
+  }),
+)
+
+/** Dye per second at full strength, per injector. */
+const SPUME_RATE = 1.0
+/** Fraction of the feed dumped as a TIGHT plume right at the crest. */
+const SPUME_CREST_SHARE = 0.65
+// Two splats per injector now, so half the previous per-frame count
+// keeps the field's 16-splat budget intact.
+const SPUME_PER_FRAME = 8
+let spumeCursor = 0
+
+function refreshInjectors(t: number) {
+  for (const a of loopHeadings) {
+    if (a.chain) continue
+    const ease = Math.min(Math.max((a.depth - 0.1) / 0.25, 0), 1)
+    if (ease <= 0) continue
+    let best: SpumeInjector | null = null
+    let bestD = 4
+    for (const o of injectors) {
+      if (!o.active) continue
+      const dx = o.ax - a.ax
+      const dz = o.az - a.az
+      const d2 = dx * dx + dz * dz
+      if (d2 < bestD) {
+        bestD = d2
+        best = o
+      }
+    }
+    const target = ease * ease * Math.min(a.count / 8, 1.5)
+    if (best) {
+      best.target = Math.max(best.target, target)
+      best.lastSeen = t
+      best.ax += (a.ax - best.ax) * 0.2
+      best.az += (a.az - best.az) * 0.2
+      best.hx += (a.hx - best.hx) * 0.3
+      best.hz += (a.hz - best.hz) * 0.3
+    } else {
+      const o = injectors.find((o) => !o.active)
+      if (!o) continue
+      o.active = true
+      o.ax = a.ax
+      o.az = a.az
+      o.hx = a.hx
+      o.hz = a.hz
+      o.strength = 0
+      o.target = target
+      o.lastSeen = t
+      o.x = a.x
+      o.z = a.z
+    }
+  }
+  // Targets decay between refreshes so an unmatched injector eases out.
+  for (const o of injectors) {
+    if (o.active && t - o.lastSeen > 0.25) o.target = 0
+  }
+}
+
+function updateInjectors(dt: number, t: number) {
+  for (const o of injectors) {
+    if (!o.active) continue
+    const rate = o.target > o.strength ? 2.5 : 1.5
+    o.strength += (o.target - o.strength) * Math.min(rate * dt, 1)
+    if (o.strength < 0.02 && o.target === 0) {
+      o.active = false
+      continue
+    }
+    const fr = loopFrame(o.ax, o.az, t)
+    o.ax += fr.vx * dt
+    o.az += fr.vz * dt
+    o.x = o.ax + fr.swayX
+    o.z = o.az + fr.swayZ
+    o.vx = fr.vx
+    o.vz = fr.vz
+  }
+}
+
+/** Feed the mist field: a rotating subset per frame, dt-scaled. The
+ * impulse is the LOOP'S OWN advance velocity, so the dye RIDES with the
+ * break — the field is Eulerian, dye goes where the velocity field
+ * takes it, and the old backward impulse literally parked it. */
+function emitSpume(dt: number) {
+  const live = injectors.filter((o) => o.active && o.strength > 0.02)
+  if (live.length === 0) return
+  const served = Math.min(live.length, SPUME_PER_FRAME)
+  const share = live.length / served
+  for (let i = 0; i < served; i++) {
+    const o = live[spumeCursor % live.length]
+    spumeCursor++
+    const feed = SPUME_RATE * o.strength * dt * share
+    // TIGHT plume AT the crest, where the foam sprites are: most of the
+    // feed goes here in a small radius, so it reads dense and bright
+    // right off the foam. It thins fast on its own — the solver spreads
+    // a concentrated blob far quicker than a wide one, so crest
+    // prominence decays into haze behind it.
+    queueMistSplat(
+      o.x,
+      o.z,
+      feed * SPUME_CREST_SHARE,
+      o.vx,
+      o.vz,
+      0.8,
+    )
+    // The tail: wider, weaker, travelling a little slower than the
+    // crest so it strings out behind instead of stalling.
+    queueMistSplat(
+      o.x - o.hx * 1.6,
+      o.z - o.hz * 1.6,
+      feed * (1.0 - SPUME_CREST_SHARE),
+      o.vx * 0.7,
+      o.vz * 0.7,
+      1.8,
+    )
   }
 }
 
@@ -613,7 +766,10 @@ export function updateSpray(dt: number, t: number) {
   if (coverScanClock >= LOOP_SCAN_INTERVAL) {
     coverScanClock = 0
     scanLoopSplash(t)
+    refreshInjectors(t)
   }
+  updateInjectors(dt, t)
+  emitSpume(dt)
 
   checkParity ^= 1
   for (let i = 0; i < sprayParticles.length; i++) {

@@ -145,8 +145,18 @@ void main() {
 	for (int i = 0; i < ${MAX_SPLATS}; i++) {
 		vec4 sp = uSplatPos[i];
 		vec2 d = world - sp.xy;
-		v += uSplatVel[i] * exp(-dot(d, d) / (sp.z * sp.z));
+		// BLEND toward the splat velocity, never accumulate. Additive
+		// impulses suit Dobryakov's mouse drags, but the crest injectors
+		// fire EVERY FRAME: adding ~8 m/s of loop velocity 60 times a
+		// second built an unbounded velocity field that blew the mist
+		// apart after a few seconds. A saturating blend gives the same
+		// "dye rides the crest" behaviour with a fixed ceiling.
+		float w = exp(-dot(d, d) / (sp.z * sp.z));
+		v = mix(v, uSplatVel[i], min(w, 1.0));
 	}
+	// Safety net: nothing here should ever exceed a gale.
+	float spd = length(v);
+	if (spd > 25.0) v *= 25.0 / spd;
 	gl_FragColor = vec4(v, 0.0, 1.0);
 }`
 
@@ -390,6 +400,7 @@ export class MistField {
   get texture(): THREE.Texture {
     return this.dye[this.dyeIdx].texture
   }
+
 
   private pass(
     renderer: THREE.WebGLRenderer,

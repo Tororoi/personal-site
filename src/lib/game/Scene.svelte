@@ -503,9 +503,9 @@ void main() {
 	// pays the wave loop, and the ribbon edges come out curved.
 	float foam = vPinchWhite;
 	if (foam > 0.01 && foam < 0.99) foam = pinchMask(vRest);
-	// TEMP: foam FIELD render disabled for sprite-line diagnosis (sim
-	// still runs; re-enable by restoring the foamWeb max).
-	// foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
+	// Persistent foam residue (foam.ts): deposits from droplet landings,
+	// dissipating on their own clock with the webbing tear-off.
+	foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));
 	col = mix(col, uFoamColor, foam);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
@@ -916,29 +916,10 @@ void main() {
 		return g;
 	}
 	let underSpikeGeometry = buildSpikeGeometry();
-	const underSpikeMaterial = new THREE.ShaderMaterial({
-		uniforms: {
-			uTime: waterUniforms.uTime,
-			uAmp: waterUniforms.uAmp,
-			uWaveA: waterUniforms.uWaveA,
-			uWaveB: waterUniforms.uWaveB,
-			uColor: { value: new THREE.Color('#eef6fc') },
-			uFogColor: waterUniforms.uFogColor,
-			uFogDensity: waterUniforms.uFogDensity,
-			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) },
-			uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) }
-		},
-		vertexShader: `
-uniform float uTime;
-uniform float uAmp;
-uniform float uPointPx;
-uniform float uDomAmp;
-${wavesGlsl()}
-attribute float aRank;
-varying float vViewZ;
-void main() {
-	vec2 anchor = position.xz;
-	float r = position.y;
+	// Shared sprite frame/sizing GLSL — the mist EMITTER runs the exact
+	// same function, so every plume is born at a real sprite's centre.
+	const spriteFrameGlsl = `
+float spriteFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 Nn, out float g) {
 	vec3 d = waveDisplacement(anchor, uTime, uAmp);
 	float txx = 0.0; float txy = 0.0; float txz = 0.0; float tzy = 0.0; float tzz = 0.0;
 	float wAmp = 0.0; float wsum = 0.0;
@@ -965,12 +946,10 @@ void main() {
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
 	vec3 Na = cross(Tv, Tu);
-	vec3 Nn = Na / max(length(Na), 0.0001);
+	Nn = Na / max(length(Na), 0.0001);
 	// EASED motion, statelessly: a WIDER J band stretches growth over
-	// the fold's whole approach (J moves smoothly in time, so a wider
-	// spatial window IS a slower temporal ramp), and a second Jacobian
-	// evaluated 0.35s in the PAST gives a release tail — sprites deflate
-	// gently after the fold passes instead of snapping shut with it.
+	// the fold's whole approach, and a second Jacobian evaluated 0.35s
+	// in the PAST gives a release tail.
 	float gNow = 1.0 - smoothstep(0.08, 0.6, Na.y);
 	float jxx = 1.0; float jzz = 1.0; float jxz = 0.0;
 	for (int i = 0; i < WAVE_COUNT; i++) {
@@ -984,38 +963,48 @@ void main() {
 	}
 	float Jp = jxx * jzz - jxz * jxz;
 	float gPast = 1.0 - smoothstep(0.08, 0.6, Jp);
-	float g = max(gNow, gPast * 0.9);
-	// Size = BOTH metrics multiplied: the folder's amplitude ratio sets
-	// the ceiling (a small crossing wave's tongue is small no matter how
-	// hard it folds), and pinch intensity modulates within it (a barely-
-	// grazing fold of the big band still starts as beads). Intensity
-	// keeps the now/past composition so the release tail deflates at
-	// its earned size.
+	g = max(gNow, gPast * 0.9);
+	// Size = folder amplitude ratio (ceiling) x pinch intensity.
 	float loopAmp = wsum > 0.0001 ? wAmp / wsum : 0.0;
 	float ampK = clamp(loopAmp / uDomAmp, 0.3, 1.0);
 	float iNow = clamp((0.1 - Na.y) / 0.55, 0.0, 1.0);
 	float iPast = clamp((0.1 - Jp) / 0.55, 0.0, 1.0);
 	float intK = mix(0.4, 1.0, max(iNow, iPast * 0.9));
-	// Response curve favoring the medium-and-up range: never shrinks
-	// (baseline 1.0), boosts from ~0.15 up to +50%, capped so the
-	// biggest masses stay sane.
 	float sk = ampK * intK;
 	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
-	// GENERATION THRESHOLD: weak pinches get NO sprite at all — the
-	// combined factor must clear ~0.3 before anything shows, ramping in
-	// smoothly by 0.42 so arrivals still ease rather than pop.
 	float visible = smoothstep(0.1, 0.42, sk);
-	// DYNAMIC DENSITY: each point has a baked rank; the keep-fraction
-	// falls as sprite size rises, so small beads pack the full 0.25m
-	// lattice while big masses thin to ~55% of it (the old spacing).
 	float dens = mix(1.0, 0.55, smoothstep(0.15, 0.5, sk));
-	float keep = smoothstep(0.0, 0.1, dens - aRank);
-	// Smooth ease-in/out preserved; only the very smallest specks are
-	// CULLED (below the splash droplets' minimum clump, 0.07m) — they
-	// read as noise rather than foam.
-	r = r * min(sk, 1.2) * visible * keep;
+	float keep = smoothstep(0.0, 0.1, dens - rank);
+	float r = baseR * min(sk, 1.2) * visible * keep;
 	if (r < 0.07) r = 0.0;
-	vec3 surf = vec3(anchor.x + d.x, d.y, anchor.y + d.z);
+	surf = vec3(anchor.x + d.x, d.y, anchor.y + d.z);
+	return r;
+}`;
+
+	const underSpikeMaterial = new THREE.ShaderMaterial({
+		uniforms: {
+			uTime: waterUniforms.uTime,
+			uAmp: waterUniforms.uAmp,
+			uWaveA: waterUniforms.uWaveA,
+			uWaveB: waterUniforms.uWaveB,
+			uColor: { value: new THREE.Color('#eef6fc') },
+			uFogColor: waterUniforms.uFogColor,
+			uFogDensity: waterUniforms.uFogDensity,
+			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) },
+			uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) }
+		},
+		vertexShader: `
+uniform float uTime;
+uniform float uAmp;
+uniform float uPointPx;
+uniform float uDomAmp;
+${wavesGlsl()}
+${spriteFrameGlsl}
+attribute float aRank;
+varying float vViewZ;
+void main() {
+	vec3 surf; vec3 Nn; float g;
+	float r = spriteFrame(position.xz, position.y, aRank, surf, Nn, g);
 	vec3 world = surf - Nn * (r * 0.8 * g);
 	vec4 view = viewMatrix * vec4(world, 1.0);
 	vViewZ = -view.z;
@@ -1038,8 +1027,8 @@ void main() {
 	});
 	const underSpikeMesh = new THREE.Points(underSpikeGeometry, underSpikeMaterial);
 	underSpikeMesh.frustumCulled = false;
-	// TEMP: hidden to inspect the loop stretching in isolation.
-	underSpikeMesh.visible = true;
+
+
 
 
 
@@ -1048,6 +1037,10 @@ void main() {
 	// heights, sampling the dye field in world space — the mist drapes
 	// over the swells and swirls with real fluid motion.
 	const mistField = new MistField();
+	// Mist FLUID (mistfield.ts): Dobryakov-style velocity+dye solver,
+	// rendered as a translucent plane that rides the wave (and ripple)
+	// surface, sampling the dye in world space — the mist drapes over
+	// the swells and swirls with real fluid motion.
 	const mistGeometry = new THREE.PlaneGeometry(MIST_EXTENT, MIST_EXTENT, 96, 96);
 	mistGeometry.rotateX(-Math.PI / 2);
 	const mistMaterial = new THREE.ShaderMaterial({
@@ -1081,9 +1074,8 @@ void main() {
 	vec2 rest = position.xz;
 	vec3 d = waveDisplacement(rest, uTime, uAmp);
 	vec3 world = vec3(rest.x + d.x, d.y, rest.y + d.z);
-	// Ride the RIPPLED surface: the water adds ripple displacement, and
-	// buoy ripple crests were poking through a waves-only mist plane —
-	// raised rings depth-tested in FRONT of the haze behind them.
+	// Ride the RIPPLED surface: buoy ripple crests poked through a
+	// waves-only mist plane.
 	applyRipples(world, world.xz);
 	// Hover just above the surface so the haze reads as ON the water.
 	world.y += 0.3;
@@ -1103,14 +1095,15 @@ void main() {
 	vec2 uv = vWorldXZ / ${MIST_EXTENT.toFixed(1)} + 0.5;
 	float m = texture2D(uMistTex, uv).r;
 	// Soft saturation: dense cores go toward solid haze, tails feather.
-	// Steep enough that real mist OCCLUDES the surface detail beneath it
-	// (buoy ripple rings were punching through the translucency).
-	float a = 1.0 - exp(-m * 1.9);
+	// Steep enough that real mist OCCLUDES the surface detail beneath it.
+	float a = 1.0 - exp(-m * 3.2);
+	// Dense cores read BRIGHTER, not just more opaque.
+	vec3 mistCol = mix(uColor, vec3(1.0), smoothstep(0.35, 1.1, m));
 	// Fade at the field's border so the domain edge never shows.
 	vec2 e = min(uv, 1.0 - uv);
 	a *= smoothstep(0.0, 0.04, min(e.x, e.y));
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
-	gl_FragColor = vec4(mix(uColor, uFogColor, fog), a * 0.88);
+	gl_FragColor = vec4(mix(mistCol, uFogColor, fog * 0.75), a * 0.88);
 }`
 	});
 	const mistMesh = new THREE.Mesh(mistGeometry, mistMaterial);
