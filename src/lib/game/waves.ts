@@ -59,6 +59,16 @@ export type WaveFieldConfig = {
   /** Radians; the heading waves travel toward. Weather will own this later. */
   windAngle: number
   /**
+   * Surface-current heading, radians, in the same frame as windAngle.
+   * An opposing current shortens and steepens the waves it meets
+   * (wave-current interaction compresses the train against the flow),
+   * which is why the storm runs its current back into the wind while
+   * the calmer seas run with it.
+   */
+  surfaceCurrentHeading?: number
+  /** Surface-current speed, m/s. Defaults to CURRENT.speed. */
+  surfaceCurrentSpeed?: number
+  /**
    * Meters per second, used for spray advection and gusts (not wave energy,
    * yet; the JONSWAP pass will tie band energies to it). Default 5.
    */
@@ -159,6 +169,8 @@ export const SEA_PRESETS = {
     seed: 1897,
     windAngle: 0.42,
     windSpeed: 9,
+    // With the wind (0.42): nothing opposing the swell.
+    surfaceCurrentHeading: 0.42,
     chop: 2.25,
     // Rings still readable, with some froth on energetic disturbances.
     ripples: {
@@ -227,6 +239,8 @@ export const SEA_PRESETS = {
     seed: 1897,
     windAngle: 0.42,
     windSpeed: 2,
+    // With the wind.
+    surfaceCurrentHeading: 0.42,
     chop: 0.55,
     timeScale: 1,
     // Clean water: smooth rings, no froth. These are the signed-off
@@ -290,6 +304,10 @@ export const SEA_PRESETS = {
     seed: 4242,
     windAngle: 0.32,
     windSpeed: 40,
+    // AGAINST the wind (0.32 + PI): an opposing current is what makes a
+    // storm sea stand up short and steep instead of running long.
+    surfaceCurrentHeading: 3.46,
+    surfaceCurrentSpeed: 0.55,
     chop: 5,
     // Slower than real: a storm sea that heaves and breaks at this rate
     // reads as BIGGER (ocean period grows with wavelength), and it

@@ -27,6 +27,7 @@
 
 import * as THREE from 'three'
 import { FOAM } from './tuning'
+import { currentVector } from './current'
 import { waves, wavesGlsl } from './waves'
 
 export const FOAM_RESOLUTION = 512
@@ -415,10 +416,14 @@ export class FoamField {
     u.uDiffusion.value = mix
     u.uDiffTexel.value = Math.sqrt(targetMix / mix) / FOAM_RESOLUTION
     u.uDtScale.value = d * 60
+    // Foam drifts on BOTH: a fraction of the wind (it is blown across
+    // the surface) plus the surface current in full (it floats in the
+    // skin of the water, so it goes where the water goes).
+    const cur = currentVector(t)
     const shift = u.uShift.value as THREE.Vector2
     shift.set(
-      (windX * FOAM_DRIFT * d) / FOAM_EXTENT,
-      (windZ * FOAM_DRIFT * d) / FOAM_EXTENT,
+      ((windX * FOAM_DRIFT + cur.x * FOAM.currentCarry) * d) / FOAM_EXTENT,
+      ((windZ * FOAM_DRIFT + cur.z * FOAM.currentCarry) * d) / FOAM_EXTENT,
     )
 
     const inject = this.material.uniforms.uInject.value as THREE.Vector4[]

@@ -275,6 +275,28 @@ export const WIND = {
 } as const
 
 /**
+ * SURFACE CURRENT — the slow bulk drift of the water itself, distinct
+ * from wind. Wind pushes what sits ON the surface; the current moves the
+ * surface. For now only foam rides it, but it is the natural anchor for
+ * anything that should drift with the water (flotsam, a drifting boat,
+ * a cast line) rather than with the air.
+ */
+export const CURRENT = {
+  /**
+   * Default speed, m/s (real coastal surface currents run 0.1-0.5).
+   * DIRECTION is per-preset: each sea sets `surfaceCurrentHeading` in
+   * waves.ts (the same frame as windAngle), because an opposing current
+   * is what stands a storm sea up short and steep. A preset may also
+   * override the speed with `surfaceCurrentSpeed`.
+   */
+  speed: 0.25,
+  /** Slow meander of the set, radians, over minutes. */
+  meander: 0.35,
+  /** Fractional breathing of the drift rate. */
+  breath: 0.25,
+} as const
+
+/**
  * SPLASH DROPLETS — the ballistic clumps thrown from inside a loop.
  * Physics: pinned horizontally to the loop's advancing frame, gravity
  * owns the vertical (spray.ts).
@@ -341,8 +363,12 @@ export const FOAM = {
   diffusion: 0.88,
   /** Flat evaporation per step, x(1 + 5*turb). */
   evaporation: 0.0002,
-  /** Drift as a fraction of wind speed. */
+  /** Drift as a fraction of WIND speed (foam is blown as well as
+   * carried; the surface current below moves it bodily). */
   drift: 0.05,
+  /** How much of the SURFACE CURRENT foam inherits. Foam floats in the
+   * skin of the water, so this is essentially 1. */
+  currentCarry: 1.0,
   /** Soft capacity: above `overloadStart` mass, thin foam's decay
    * accelerates toward `decayOld`, saturating at `overloadFull`. */
   decayOld: 3,

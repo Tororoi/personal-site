@@ -20,6 +20,7 @@
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
 	import { DROPLET, ENABLE, f, LOOP, MIST, PLUME, SPRITE } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
+	import { advanceCurrent } from './current';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -1399,6 +1400,7 @@ void main() {
 				setRippleClock(waveTime);
 				updateWhitecaps(STEP, waveTime);
 				updateSpray(STEP, waveTime);
+				advanceCurrent(STEP, waveTime);
 				contactFoamClock += STEP;
 				if (contactFoamClock >= CONTACT_FOAM_INTERVAL) {
 					contactFoamClock = 0;
