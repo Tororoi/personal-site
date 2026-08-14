@@ -18,6 +18,7 @@
 	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
+	import { f, LOOP, PLUME, SPRITE } from './tuning';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -637,10 +638,10 @@ void main() {
 		// and down into the wave body. The raw normal swings wildly
 		// between adjacent vertices at a fold — pulling along it painted
 		// a squiggly sheet, worst on crests diagonal to the mesh grid.
-		float spriteR = 1.08 * min(sk, 1.2);
+		float spriteR = ${f(LOOP.stretchSpriteR)} * min(sk, ${f(SPRITE.sizeCap)});
 		vec2 hd = wsum > 0.0001 ? normalize(vec2(hwx, hwz)) : vec2(1.0, 0.0);
-		vec3 pullDir = normalize(vec3(-hd.x * 0.8, -0.65, -hd.y * 0.8));
-		p += pullDir * (spriteR * 0.8 * stretchGate);
+		vec3 pullDir = normalize(vec3(-hd.x * ${f(LOOP.stretchBack)}, -${f(LOOP.stretchDown)}, -hd.y * ${f(LOOP.stretchBack)}));
+		p += pullDir * (spriteR * ${f(LOOP.stretchDepth)} * stretchGate);
 	}
 	// The stretched region must BE white (it exists to cover the wedge);
 	// the whole mask is gated by the shared criterion. Fragment twin
@@ -1034,9 +1035,7 @@ void main() {
 	// bubble region is discarded here (the opaque pass already drew it),
 	// and this pass is transparent with no depth write, so plumes layer
 	// over each other without sorting artefacts.
-	// Slightly tighter than the first pass: bursts mean fewer plumes are
-	// live at once, and the quad's area is the fill cost.
-	const PLUME_K = 2.8;
+
 	const crestSprayMaterial = new THREE.ShaderMaterial({
 		uniforms: {
 			uTime: waterUniforms.uTime,
@@ -1104,9 +1103,9 @@ void main() {
 	// The throw is the PEAK and the FALL: nothing before the crest tops
 	// out, full strength through the descent while the water is still
 	// high, tapering as the surface drops away. Rising water is silent.
-	float high = smoothstep(-0.1, 0.55, hn);
-	float falling = smoothstep(0.0, -0.35, vY / max(aSum, 0.0001) * 3.0);
-	vBurst = high * mix(0.15, 1.0, falling);
+	float high = smoothstep(${f(PLUME.burstHeightStart)}, ${f(PLUME.burstHeightFull)}, hn);
+	float falling = smoothstep(0.0, -0.35, vY / max(aSum, 0.0001) * ${f(PLUME.fallRamp)});
+	vBurst = high * mix(${f(PLUME.risingStrength)}, 1.0, falling);
 	if (r <= 0.0 || g <= 0.001 || vBurst <= 0.01) {
 		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 		gl_PointSize = 0.0;
@@ -1116,7 +1115,7 @@ void main() {
 	vec4 view = viewMatrix * vec4(world, 1.0);
 	vViewZ = -view.z;
 	float bubblePx = r * 2.0 * uPointPx * g;
-	float quadPx = bubblePx * ${PLUME_K.toFixed(1)};
+	float quadPx = bubblePx * ${f(PLUME.quadScale)};
 	// Bubble sits at the BOTTOM of the enlarged quad; shift the centre
 	// up by the extra half-height so the bubble stays put on screen.
 	vec4 clip = projectionMatrix * view;
@@ -1166,9 +1165,9 @@ void main() {
 	// Plume widens with height, wanders on a slow per-sprite phase, and
 	// SHEARS downwind: the top is blown sideways in proportion to how
 	// high it has risen, so plumes rake over rather than standing up.
-	float sway = sin(uTime * 1.7 + vSeed * 20.0 + h * 2.6) * 0.09 * h;
-	float lean = vShear * h * h * 1.0;
-	float halfW = rr * (0.75 + 1.5 * h);
+	float sway = sin(uTime * ${f(PLUME.swayRate)} + vSeed * 20.0 + h * ${f(PLUME.swayHeightPhase)}) * ${f(PLUME.swayAmp)} * h;
+	float lean = vShear * h * h * ${f(PLUME.leanStrength)};
+	float halfW = rr * (${f(PLUME.widthBase)} + ${f(PLUME.widthGrowth)} * h);
 	float x = (pc.x - 0.5 - sway - lean) / halfW;
 	float body = 1.0 - clamp(abs(x), 0.0, 1.0);
 	if (body <= 0.0) discard;
@@ -1176,20 +1175,20 @@ void main() {
 	// Gale tatters the plume: the wisp threshold rises and the streaks
 	// scroll faster, so hard wind shreds spray into rags.
 	float n = hash(vec2(
-		floor(x * (3.0 + vGale * 0.3) + vSeed * 17.0),
-		floor(h * 7.0 + uTime * (2.3 + vGale * 0.4) + vSeed * 9.0)
+		floor(x * (${f(PLUME.wispFreq)} + vGale * ${f(PLUME.tatterFreq)}) + vSeed * 17.0),
+		floor(h * ${f(PLUME.wispRows)} + uTime * (${f(PLUME.wispScroll)} + vGale * ${f(PLUME.tatterScroll)}) + vSeed * 9.0)
 	));
-	float wisp = smoothstep(0.35 + min(vGale * 0.018, 0.05), 0.9, n * (1.0 - h * 0.55) + body * 0.5);
+	float wisp = smoothstep(${f(PLUME.wispCut)} + min(vGale * ${f(PLUME.tatterThresh)}, ${f(PLUME.tatterThreshCap)}), ${f(PLUME.wispCutEnd)}, n * (1.0 - h * 0.55) + body * 0.5);
 	// Fade out toward the top, and hold density at the base.
 	// The burst envelope drives BOTH density and reach: an early plume
 	// is a short faint puff, a peaking crest throws a full column.
 	// AMPLITUDE (reach and density) rises with the sprite's own SPEED:
 	// 0.25 for slow water, reaching 1.0 at 8 m/s of orbital motion —
 	// momentum throws the spray, so the fastest-moving foam sprays most.
-	float amp = 0.25 + 0.75 * min(vGale / 8.0, 1.0);
+	float amp = ${f(PLUME.ampIdle)} + ${f(PLUME.ampFull - PLUME.ampIdle)} * min(vGale / ${f(PLUME.speedFull)}, 1.0);
 	if (h > vBurst * amp) discard;
-	float a = wisp * body * (1.0 - h) * (1.0 - h) * 0.85 * vBurst * amp;
-	if (a < 0.02) discard;
+	float a = wisp * body * (1.0 - h) * (1.0 - h) * ${f(PLUME.alpha)} * vBurst * amp;
+	if (a < ${f(PLUME.alphaCull)}) discard;
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
 	gl_FragColor = vec4(mix(uColor, uFogColor, fog), a);
 }`
