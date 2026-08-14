@@ -105,13 +105,35 @@ export const SPRITE = {
  * water's own orbital velocity), not wind.
  */
 export const PLUME = {
-  /** Quad enlargement over the bubble: sets maximum reach. */
-  quadScale: 2.4,
+  /**
+   * The plume's reach above the bubble, in bubble RADII — its actual
+   * height, and the ONLY size knob. The sprite quad is derived from it
+   * where it is used (1 bubble + reach/2), since a quad taller than the
+   * reach is wasted fill and a shorter one cuts the plume off.
+   */
+  reachRadii: 2.8,
+  /**
+   * Where the plume's base sits on the bubble: 0 = the bubble's top,
+   * 1 = its centre. Rooting it partway down overlaps the foam mass so
+   * the spray grows OUT of it rather than balancing on its crown.
+   */
+  rootDepth: 0,
+  /**
+   * How much of the plume's shape is actually DRAWN, 0-1 of reach.
+   * Shape and visible height are different things: cutting a tall plume
+   * at 0.4 shows the broad, still-widening lower body (what the old
+   * quad-edge crop did), whereas shrinking reachRadii to the same
+   * height compresses the whole cone — taper and all — into it. Keep
+   * reachRadii for the SHAPE and use this for the CUT.
+   */
+  clipFrac: 0.9,
 
   /** Amplitude (reach x density) at rest, and at `speedFull`. */
   ampIdle: 0.5,
   ampFull: 1.25,
-  /** Orbital speed (m/s) at which amplitude saturates. */
+  /** Orbital speed (m/s) at which amplitude saturates. Scales with the
+   * preset's timeScale: slowing the sea lowers every orbital speed, so
+   * this must come down with it or plumes shrink. */
   speedFull: 8.0,
 
   /** Burst envelope: height window over which spray is allowed. */
@@ -133,19 +155,61 @@ export const PLUME = {
   widthBase: 0.75,
   widthGrowth: 4.5,
 
-  /** Wispy breakup: streak frequency/scroll per m/s of orbital speed. */
-  tatterFreq: 0.9,
-  tatterScroll: 0.4,
-  /** Visibility threshold climb per m/s, and its cap. */
-  tatterThresh: 0.018,
-  tatterThreshCap: 0.05,
-  /** Base streak density (frequency and scroll at zero speed). */
-  wispFreq: 0.03,
-  wispScroll: 0.3,
+  /**
+   * RISE SPEED — how fast the spray appears to travel UP the plume.
+   * This is the streak pattern scrolling along the plume's height, and
+   * it is the dominant cue for "how fast is this spraying". Rows per
+   * second at rest, plus rows per second per m/s of orbital speed (the
+   * speed term dominates: 8 m/s water multiplies it by 8).
+   */
+  riseBase: 4.0,
+  /** Kept at 0: momentum drives HEIGHT and PULL, not animation speed. */
+  risePerSpeed: 1.0,
+  /** Streak structure: rows up the plume, columns across it. */
   wispRows: 5.0,
+  wispFreq: 4.0,
+  /**
+   * MOMENTUM COUPLINGS on the streak texture, both zero by default.
+   * They were the hidden reason momentum still "sped things up": more
+   * columns and a higher flicker threshold make the same rise rate read
+   * as busier, faster churn. Raise them only if you want fast water to
+   * look visibly grainier.
+   */
+  tatterFreq: 0.0,
+  tatterThresh: 0.0,
+  tatterThreshCap: 0.05,
   /** Threshold window for a streak to appear. */
-  wispCut: 0.05,
-  wispCutEnd: 0.9,
+  /**
+   * Threshold window for a streak to appear. NARROW = coarse spray:
+   * cells flip on and off crisply, reading as flecks of water. WIDE
+   * (e.g. 0.05-0.9) fades every cell in gradually, which is what made
+   * the plumes look smooth and airbrushed.
+   */
+  wispCut: 0.4,
+  wispCutEnd: 0.68,
+  /**
+   * How much the plume's solid body pushes cells over the threshold.
+   * High values fill the core in solid; low values let the speckle
+   * reach all the way through the middle.
+   */
+  bodyBias: 0.5,
+
+  /**
+   * COHERENCE (0-1): how much the streak pattern is anchored in WORLD
+   * space rather than randomised per sprite. At 0 (the current choice)
+   * every plume has its own phase and reads as an individual throw; at
+   * 1 neighbours share the pattern and merge into one sheet.
+   */
+  coherence: 0.0,
+  /** World-space frequency of the shared pattern, cells per metre. */
+  coherenceScale: 1.4,
+
+  /** Soft fade at the top of the throw instead of a hard clip. */
+  tipFade: 0.25,
+  /** Dissolve width at the sprite quad's edge (0-0.5 in quad units).
+   * Needs to be generous: the plume's own width plus its lean often
+   * exceeds the quad, and a narrow fade only softens the cut. */
+  edgeFade: 0.3,
 
   /** Overall opacity multiplier. */
   alpha: 0.85,

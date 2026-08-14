@@ -291,6 +291,10 @@ export const SEA_PRESETS = {
     windAngle: 0.32,
     windSpeed: 40,
     chop: 5,
+    // Slower than real: a storm sea that heaves and breaks at this rate
+    // reads as BIGGER (ocean period grows with wavelength), and it
+    // brings the loops' travel speed down so the crest spray is
+    // legible instead of whipping past.
     timeScale: 0.7,
     // Choppy water tears rings apart: disturbances render mostly as
     // seething froth (crest-churn style), and ring energy dies fast.

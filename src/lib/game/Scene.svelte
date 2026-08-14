@@ -19,6 +19,7 @@
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
 	import { DROPLET, ENABLE, f, LOOP, MIST, PLUME, SPRITE } from './tuning';
+	import { plumeFragmentGlsl } from './plume';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
 
@@ -1048,6 +1049,13 @@ void main() {
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
 			uViewH: { value: 900 },
+			// Driver cap on gl_PointSize (often 255 or 1024). The quad must
+			// be clamped to it IN THE SHADER: the GPU clamps the rendered
+			// size anyway, and if the centre offset is computed from the
+			// unclamped size the sprite lands in the wrong place — and
+			// jumps as sprites cross the cap.
+			uMaxPoint: { value: 1024 },
+			uRise: { value: new THREE.Vector2(PLUME.riseBase, PLUME.risePerSpeed) },
 			// Wind in SCREEN space (NDC per metre of drift) plus its
 			// speed, so plumes shear downwind and tatter in a gale.
 			uWindScreen: { value: new THREE.Vector2(0, 0) },
@@ -1061,6 +1069,7 @@ uniform float uAmp;
 uniform float uPointPx;
 uniform float uDomAmp;
 uniform float uViewH;
+uniform float uMaxPoint;
 uniform vec2 uWindScreen;
 uniform float uWindSpeed;
 ${wavesGlsl()}
@@ -1069,10 +1078,10 @@ attribute float aRank;
 varying float vViewZ;
 varying float vFrac;
 varying float vSeed;
-varying float vSize;
 varying float vBurst;
 varying float vShear;
 varying float vGale;
+varying vec2 vAnchor;
 void main() {
 	vec3 surf; vec3 Nn; float g;
 	float r = spriteFrame(position.xz, position.y, aRank, surf, Nn, g);
@@ -1115,7 +1124,9 @@ void main() {
 	vec4 view = viewMatrix * vec4(world, 1.0);
 	vViewZ = -view.z;
 	float bubblePx = r * 2.0 * uPointPx * g;
-	float quadPx = bubblePx * ${f(PLUME.quadScale)};
+	// Quad = the canvas the reach needs: one bubble plus half the reach
+	// above it. Clamped to the driver's point-size ceiling (see uMaxPoint).
+	float quadPx = min(bubblePx * ${f(1 + PLUME.reachRadii / 2)}, uMaxPoint);
 	// Bubble sits at the BOTTOM of the enlarged quad; shift the centre
 	// up by the extra half-height so the bubble stays put on screen.
 	vec4 clip = projectionMatrix * view;
@@ -1124,7 +1135,7 @@ void main() {
 	gl_PointSize = quadPx;
 	vFrac = bubblePx / quadPx;
 	vSeed = fract(sin(position.x * 12.9898 + position.z * 78.233) * 43758.5453);
-	vSize = r;
+	vAnchor = position.xz;
 	// MOMENTUM, not wind: the plume trails OPPOSITE the sprite's own
 	// motion, like spray thrown off a moving mass. Project the sprite's
 	// world velocity to screen, negate it, and express the sideways part
@@ -1132,67 +1143,20 @@ void main() {
 	vec4 c0 = projectionMatrix * view;
 	vec4 c1 = projectionMatrix * viewMatrix * vec4(world + vel, 1.0);
 	vec2 velScreen = c1.xy / c1.w - c0.xy / c0.w;
-	vShear = -velScreen.x / max(quadPx * (2.0 / uViewH), 0.0001);
+	// Normalised by the BUBBLE, not the quad: lean should scale with the
+	// foam mass, not with how much spare canvas its sprite has.
+	vShear = -velScreen.x / max(bubblePx * (2.0 / uViewH), 0.0001);
 	// Speed drives amplitude and tattering (fast water throws more).
 	vGale = length(vel);
 }`,
-		fragmentShader: `
-uniform vec3 uColor;
-uniform vec3 uFogColor;
-uniform float uFogDensity;
-uniform float uTime;
-varying float vViewZ;
-varying float vFrac;
-varying float vSeed;
-varying float vSize;
-varying float vBurst;
-varying float vShear;
-varying float vGale;
-
-float hash(vec2 p) {
-	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-
-void main() {
-	// Point coords: y runs DOWN, so the plume occupies small y.
-	vec2 pc = gl_PointCoord;
-	float rr = vFrac * 0.5;
-	vec2 bc = vec2(0.5, 1.0 - rr);
-	// Height above the bubble's top, 0..1 over the plume's reach.
-	float top = bc.y - rr;
-	float h = (top - pc.y) / max(top, 0.0001);
-	if (h <= 0.0) discard;
-	// Plume widens with height, wanders on a slow per-sprite phase, and
-	// SHEARS downwind: the top is blown sideways in proportion to how
-	// high it has risen, so plumes rake over rather than standing up.
-	float sway = sin(uTime * ${f(PLUME.swayRate)} + vSeed * 20.0 + h * ${f(PLUME.swayHeightPhase)}) * ${f(PLUME.swayAmp)} * h;
-	float lean = vShear * h * h * ${f(PLUME.leanStrength)};
-	float halfW = rr * (${f(PLUME.widthBase)} + ${f(PLUME.widthGrowth)} * h);
-	float x = (pc.x - 0.5 - sway - lean) / halfW;
-	float body = 1.0 - clamp(abs(x), 0.0, 1.0);
-	if (body <= 0.0) discard;
-	// Wispy structure: streaks along the plume, breaking up with height.
-	// Gale tatters the plume: the wisp threshold rises and the streaks
-	// scroll faster, so hard wind shreds spray into rags.
-	float n = hash(vec2(
-		floor(x * (${f(PLUME.wispFreq)} + vGale * ${f(PLUME.tatterFreq)}) + vSeed * 17.0),
-		floor(h * ${f(PLUME.wispRows)} + uTime * (${f(PLUME.wispScroll)} + vGale * ${f(PLUME.tatterScroll)}) + vSeed * 9.0)
-	));
-	float wisp = smoothstep(${f(PLUME.wispCut)} + min(vGale * ${f(PLUME.tatterThresh)}, ${f(PLUME.tatterThreshCap)}), ${f(PLUME.wispCutEnd)}, n * (1.0 - h * 0.55) + body * 0.5);
-	// Fade out toward the top, and hold density at the base.
-	// The burst envelope drives BOTH density and reach: an early plume
-	// is a short faint puff, a peaking crest throws a full column.
-	// AMPLITUDE (reach and density) rises with the sprite's own SPEED:
-	// 0.25 for slow water, reaching 1.0 at 8 m/s of orbital motion —
-	// momentum throws the spray, so the fastest-moving foam sprays most.
-	float amp = ${f(PLUME.ampIdle)} + ${f(PLUME.ampFull - PLUME.ampIdle)} * min(vGale / ${f(PLUME.speedFull)}, 1.0);
-	if (h > vBurst * amp) discard;
-	float a = wisp * body * (1.0 - h) * (1.0 - h) * ${f(PLUME.alpha)} * vBurst * amp;
-	if (a < ${f(PLUME.alphaCull)}) discard;
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
-	gl_FragColor = vec4(mix(uColor, uFogColor, fog), a);
-}`
+		fragmentShader: plumeFragmentGlsl()
 	});
+	// Query the driver's point-size ceiling once.
+	const maxPointSize = (() => {
+		const gl = renderer.getContext();
+		const range = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE) as Float32Array;
+		return range && range[1] ? range[1] : 255;
+	})();
 	const sprayWindA = new THREE.Vector3();
 	const sprayWindB = new THREE.Vector3();
 	const crestSprayMesh = new THREE.Points(underSpikeGeometry, crestSprayMaterial);
@@ -1409,13 +1373,22 @@ void main() {
 	const STEP = 1 / 60;
 	let accumulator = 0;
 	let waveTime = 0;
+	// Debug: ?freeze halts the WAVE clock while leaving render running,
+	// so anything still moving is intrinsic to a shader (plume sway,
+	// rise) rather than wave-driven. ?freeze=N starts at time N.
+	const freezeParam =
+		typeof window === 'undefined'
+			? null
+			: new URLSearchParams(window.location.search).get('freeze');
+	const frozen = freezeParam !== null;
+	if (frozen) waveTime = Number(freezeParam) || 12;
 
 	const task = useTask(
 		(delta) => {
 			accumulator = Math.min(accumulator + delta, 0.25);
 			while (accumulator >= STEP) {
 				accumulator -= STEP;
-				waveTime += STEP;
+				if (!frozen) waveTime += STEP;
 				game.time = (game.time + STEP) % DAY_SECONDS;
 				// Whitecap events and ballistic spray advance on the fixed
 				// step too (spray after whitecaps: it reads the freshly
@@ -1434,6 +1407,7 @@ void main() {
 
 			crestSprayMaterial.uniforms.uViewH.value =
 				renderer.domElement.height || window.innerHeight;
+			crestSprayMaterial.uniforms.uMaxPoint.value = maxPointSize;
 			waterUniforms.uTime.value = waveTime;
 
 			const wind = windVector(waveTime);
