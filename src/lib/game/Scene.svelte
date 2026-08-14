@@ -1170,10 +1170,11 @@ void main() {
 	// Fade out toward the top, and hold density at the base.
 	// The burst envelope drives BOTH density and reach: an early plume
 	// is a short faint puff, a peaking crest throws a full column.
-	// AMPLITUDE (reach and density) is the still-air baseline for now —
-	// half the previous height — with wind scaling to be layered on top
-	// once this baseline reads right.
-	float amp = 0.25;
+	// AMPLITUDE (reach and density) rises with WIND: 0.25 in still air —
+	// a subtle fringe lifting off the foam — climbing linearly to 1.0 at
+	// 40 m/s, where spray is thrown a full sprite-quad high. Beyond that
+	// it keeps growing, gently, so a freak gale still escalates.
+	float amp = 0.25 + 0.75 * min(vGale / 40.0, 1.0) + max(vGale - 40.0, 0.0) * 0.006;
 	if (h > vBurst * amp) discard;
 	float a = wisp * body * (1.0 - h) * (1.0 - h) * 0.85 * vBurst * amp;
 	if (a < 0.02) discard;
