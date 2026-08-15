@@ -408,9 +408,29 @@ export const CONTACT = {
    * leaving an object goes the way all the other foam goes instead of
    * ringing it evenly. 0.6 = half again as wide directly downstream.
    */
-  driftStretch: 0.6,
+  driftStretch: 0.5,
+  /**
+   * TAIL LENGTH, as a multiple of the object's cross-stream radius at
+   * full carry. 1.4 = a wake not quite half again the object's width,
+   * tapering to a point. Proportional rather than absolute so the same
+   * value suits the sphere and the buoys.
+   *
+   * This is what makes the shape a teardrop. Displacing the collar's
+   * centre downstream — the previous attempt — only slides the ring off
+   * the object, so it grows in every direction about the new centre and
+   * the object ends up in the corner of a blob. A tail has to taper, and
+   * only its own primitive can do that.
+   */
+  tailRatio: 1.8,
+  /**
+   * Thickness at the TIP of the tail, against 1 at the object. The tail
+   * feeds this falling thickness into the same web the rest of the foam
+   * uses, so the wake tears open into lace as it goes instead of running
+   * out as a solid tongue. Low: by the tip there should be little left.
+   */
+  tailEnd: 0.05,
   /** Carry speed, m/s, at which the stretch is fully applied. */
-  driftFull: 1.2,
+  driftFull: 0.9,
   /** Width wobble, as a fraction, so the collar is not a clean ring. */
   wobble: 0.3,
   /** Wobble wavelength, metres — the size of one bulge in the edge.
@@ -827,7 +847,18 @@ export const FOAM = {
   evaporation: 0.0002,
   /** Drift as a fraction of WIND speed (foam is blown as well as
    * carried; the surface current below moves it bodily). */
-  drift: 0.05,
+  /**
+   * Fraction of the WIND speed that foam rides, on top of the current.
+   *
+   * Kept small deliberately. Foam floats in the skin of the water, so
+   * the water's own motion should dominate and the breeze should only
+   * lean it. At 0.05 the storm's 40 m/s wind contributed 2.0 m/s against
+   * a 1.95 m/s current — and the storm runs its current INTO the wind,
+   * so the two cancelled almost exactly and the field barely moved. Any
+   * effect keyed to carry SPEED (the contact collar's wake) then scaled
+   * to nothing, whatever its own knobs said.
+   */
+  drift: 0.012,
   /** How much of the SURFACE CURRENT foam inherits. Foam floats in the
    * skin of the water, so this is essentially 1. */
   currentCarry: 1.0,

@@ -307,7 +307,7 @@ export const SEA_PRESETS = {
     // AGAINST the wind (0.32 + PI): an opposing current is what makes a
     // storm sea stand up short and steep instead of running long.
     surfaceCurrentHeading: 3.46,
-    surfaceCurrentSpeed: 0.55,
+    surfaceCurrentSpeed: 1.55,
     chop: 5,
     // Slower than real: a storm sea that heaves and breaks at this rate
     // reads as BIGGER (ocean period grows with wavelength), and it

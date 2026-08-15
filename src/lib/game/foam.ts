@@ -89,6 +89,9 @@ const DECAY_TAU_OLD = FOAM.decayOld
 const OVERLOAD_START = FOAM.overloadStart
 const OVERLOAD_FULL = FOAM.overloadFull
 let massEst = 0
+/** Accumulated wind+current carry in metres, so the web pattern can be
+ *  advected to match the thickness field. Read by the water shader. */
+export const foamFlow = { x: 0, z: 0 }
 /** Downwind drift as a fraction of wind speed. */
 const FOAM_DRIFT = FOAM.drift
 
@@ -241,6 +244,10 @@ uniform float uAmp;
 uniform vec4 uInject[${MAX_INJECT}]; // x, z, sigma, amp
 uniform float uDomAmp;
 uniform sampler2D uWebTex;
+/** Same accumulated carry the water fragment uses, so the cell a parcel
+ *  of foam is standing in travels WITH it. Without this the stubborn
+ *  cells are fixed places in the sea and the foam drifts through them. */
+uniform vec2 uFlow;
 varying vec2 vUv;
 
 ${wavesGlsl()}
@@ -363,9 +370,10 @@ void main() {
 	// stubborn cell outlives its neighbours by about one time constant
 	// and no more. Varying the decay itself lets one cell still be
 	// holding foam after the ones around it have gone to zero.
-	vec2 wq = world + vec2(
-		sin(world.y * 2.1 + world.x * 0.7),
-		sin(world.x * 1.8 - world.y * 0.8)
+	vec2 wf = world - uFlow;
+	vec2 wq = wf + vec2(
+		sin(wf.y * 2.1 + wf.x * 0.7),
+		sin(wf.x * 1.8 - wf.y * 0.8)
 	) * 0.13;
 	float cellRand = texture2D(uWebTex, wq / ${(FOAM.cellFine * WEB_TILE_CELLS).toFixed(2)}).g;
 	float spreadK = mix(1.0, ${(1 - FOAM.varySpread).toFixed(3)}, pocket)
@@ -516,6 +524,7 @@ export class FoamField {
         uDecayTurb: { value: Math.exp(-1 / (60 * DECAY_TAU_TURB)) },
         uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) },
         uWebTex: { value: null as THREE.Texture | null },
+        uFlow: { value: new THREE.Vector2() },
         uDecayOld: { value: Math.exp(-1 / (60 * DECAY_TAU_OLD)) },
         uOverload: { value: 0 },
         uDiffusion: { value: DIFFUSION },
@@ -629,6 +638,12 @@ export class FoamField {
     // the surface) plus the surface current in full (it floats in the
     // skin of the water, so it goes where the water goes).
     const cur = currentVector(t)
+    // The same carry that advects the field, accumulated. Built here
+    // from the field's own drift terms so the pattern and the thickness
+    // can never disagree about how far the water has gone.
+    foamFlow.x += (windX * FOAM_DRIFT + cur.x * FOAM.currentCarry) * d
+    foamFlow.z += (windZ * FOAM_DRIFT + cur.z * FOAM.currentCarry) * d
+    ;(u.uFlow.value as THREE.Vector2).set(foamFlow.x, foamFlow.z)
     const shift = u.uShift.value as THREE.Vector2
     shift.set(
       ((windX * FOAM_DRIFT + cur.x * FOAM.currentCarry) * d) / FOAM_EXTENT,
@@ -686,6 +701,13 @@ uniform sampler2D uFoamTex;
 uniform vec2 uFoamCenter;
 uniform float uFoamExtent;
 uniform sampler2D uFoamWebTex;
+/** Accumulated wind+current carry, metres. The thickness field is
+ *  advected inside the sim, but the web SKELETON is generated per pixel
+ *  from a world-anchored lookup — so without this the foam's thickness
+ *  flows downstream through a lace pattern that stands still, and only
+ *  the envelope appears to move. Offsetting the domain by the same
+ *  travel carries the pattern with the water. */
+uniform vec2 uFoamFlow;
 ${foamNoiseGlsl}
 
 float foamThicknessAt(vec2 rest) {
@@ -717,9 +739,12 @@ float foamWeb(vec2 worldXZ, float thickness, float jac) {
 	// ~1m period the merged coarse cells (2.2m) crossed several warp
 	// waves per strand and came out squiggly. One gentle bend per
 	// strand, slightly deeper to stay organic.
-	vec2 q = worldXZ + vec2(
-		sin(worldXZ.y * 2.1 + worldXZ.x * 0.7),
-		sin(worldXZ.x * 1.8 - worldXZ.y * 0.8)
+	// Ride the flow: the pattern belongs to the foam, not to the patch of
+	// sea it happens to be over.
+	vec2 flowed = worldXZ - uFoamFlow;
+	vec2 q = flowed + vec2(
+		sin(flowed.y * 2.1 + flowed.x * 0.7),
+		sin(flowed.x * 1.8 - flowed.y * 0.8)
 	) * 0.13;
 	// The skeleton distance field is BAKED into a tiling texture (see
 	// webBakeFragment): two bilinear fetches replace two live Voronoi
