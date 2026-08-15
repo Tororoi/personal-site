@@ -25,8 +25,8 @@ export const ENABLE = {
   loopWhite: true,
   /** Pull of the pinch zone toward the sprite plane. */
   loopStretch: true,
-  /** Foam masses surfacing from under the fold. */
-  foamSprites: true,
+  /** Froth masses surfacing from under the fold. */
+  froth: true,
   /** Vertical spray thrown off each foam mass. */
   crestPlumes: false,
   /** Ballistic droplets launched from inside the loops. */
@@ -45,12 +45,14 @@ export const ENABLE = {
 } as const
 
 /**
- * FOAM SPRITES — the white masses that surface as a crest overturns.
+ * FROTH — the white masses that surface as a crest overturns.
  * They live on a rest-space lattice under the water and are revealed by
  * the fold; size and visibility are driven by which wave is folding
- * (amplitude ratio) and how hard (pinch intensity).
+ * (amplitude ratio) and how hard (pinch intensity). Named froth rather
+ * than "sprites" (several systems are sprites now) and rather than
+ * "bubbles" (saved for a future underwater effect).
  */
-export const SPRITE = {
+export const FROTH = {
   /** Anchor lattice spacing, metres. Denser = more masses. */
   lattice: 0.33,
   /** Baked radius before scaling: base + jitter, metres. */
@@ -80,11 +82,11 @@ export const SPRITE = {
   /** Hard ceiling on the combined size factor. */
   sizeCap: 1.2,
 
-  /** Generation threshold on the combined factor (no sprite below). */
+  /** Generation threshold on the combined factor (nothing below). */
   visStart: 0.1,
   visFull: 0.42,
 
-  /** Dynamic density: keep-fraction falls as sprite size rises. */
+  /** Dynamic density: keep-fraction falls as froth size rises. */
   densMax: 1.0,
   densMin: 0.55,
   densStart: 0.15,
@@ -92,16 +94,16 @@ export const SPRITE = {
   /** Softness of the density cut, in rank units. */
   densSoft: 0.1,
 
-  /** Sprites smaller than this (metres) are culled as noise. */
+  /** Masses smaller than this (metres) are culled as noise. */
   cullRadius: 0.07,
-  /** How deep the sprite centre sits under the surface, x radius. */
+  /** How deep a mass's centre sits under the surface, x radius. */
   submersion: 0.8,
   /**
-   * How much of the WATER's normal a sprite's lighting takes, 0-1.
-   * 0 = every sprite faces straight up and they all share one shade;
+   * How much of the WATER's normal a froth mass's lighting takes,
+   * 0-1. 0 = all face straight up and share one shade;
    * 1 = the raw surface normal, which at a fold points sideways or
    * down and drops them into the dark half of the ambient. The tilt
-   * is the only reason sprites differ in brightness from each other.
+   * is the only reason froth masses differ in brightness.
    */
   normalTilt: 0,
 } as const
@@ -244,8 +246,8 @@ export const LOOP = {
   stretchJRamp: 0.3,
   /** Pull depth as a fraction of the local sprite radius. */
   stretchDepth: 0.8,
-  /** Mean baked sprite radius used to size the pull, metres. */
-  stretchSpriteR: 1.08,
+  /** Mean baked froth radius used to size the pull, metres. */
+  stretchFrothR: 1.08,
   /** Pull direction: horizontal weight against the heading, and down. */
   stretchBack: 0.8,
   stretchDown: 0.65,
@@ -305,7 +307,10 @@ export const CURRENT = {
 } as const
 
 /**
- * SPLASH DROPLETS — the ballistic clumps thrown from inside a loop.
+ * SPLASH DROPLETS — the ballistic parcels of water thrown from inside a
+ * loop. Each one stands for a fist-to-head-sized gout, not a literal
+ * droplet: at 26 px/m a real droplet is a fraction of a pixel. The code
+ * says DROPLET throughout; "clump" is gone.
  * Physics: pinned horizontally to the loop's advancing frame, gravity
  * owns the vertical (spray.ts).
  */
@@ -320,7 +325,7 @@ export const DROPLET = {
   drag: 1.4,
   /** Hard lifetime cap, s (landing is the real death). */
   lifeMax: 3,
-  /** Art-scaled clump radii, m. */
+  /** Art-scaled droplet radii, m — a visible parcel, not a raindrop. */
   sizeMin: 0.07,
   sizeMax: 0.24,
 
@@ -338,6 +343,14 @@ export const DROPLET = {
   hopUpVar: 0.3,
   hopFwdMin: 1.0,
   hopFwdVar: 1.0,
+  /**
+   * The forward hop SCALES with the loop's size (the same froth factor
+   * that gates emission, normalised by FROTH.sizeCap): a big plunging
+   * loop throws its water well ahead, a small one barely clears its own
+   * crest. hopFwdMin/Var are therefore the LARGE-loop values, and this
+   * is the floor small loops fall to.
+   */
+  hopFwdSizeFloor: 0.3,
 
   /** Birth stagger (s): de-synchronises the 0.1s scan volleys. */
   birthStagger: 0.1,
@@ -350,9 +363,23 @@ export const DROPLET = {
   /** Submersion test grace for young loop droplets (s): the surface is
    * multi-sheeted at a fold and insta-culled healthy spray. */
   submergeGrace: 0.25,
-  /** Foam deposit radius: floor + per unit clump size. */
+  /** Foam deposit radius: floor + per unit droplet size. */
   depositBase: 0.13,
   depositPerSize: 0.5,
+  /**
+   * How much foam a single landing lays down, 0-1. Now that deposits
+   * survive their first seconds (FOAM.growStart holds them dormant
+   * instead of diffusing them away) each one counts for far more, and
+   * the old implicit 0.9 banked the whole sea white. This is the knob
+   * for overall foam quantity: raise for a frothier sea, lower for a
+   * cleaner one.
+   */
+  depositAmount: 0.9,
+  /** Buoy spray leaves less behind than a breaking crest does. */
+  depositAmountBuoy: 0.6,
+  /** Buoy deposit radius: floor + per unit droplet size. */
+  depositBaseBuoy: 0.13,
+  depositPerSizeBuoy: 0.3,
 } as const
 
 /**
@@ -369,6 +396,27 @@ export const FOAM = {
   turbJFull: -0.15,
   /** Spread rate: AREA growth, not decay, is the main thinning force. */
   diffusion: 0.88,
+  /**
+   * DORMANCY, currently OFF: the window is closed (0..0.01), so every
+   * deposit is immediately treated as grown and spreads and decays from
+   * the moment it lands — the behaviour from before this existed.
+   *
+   * Open it (e.g. 0.18..0.45) and a deposit below `growStart` neither
+   * spreads nor decays, just accumulating until others join it, which
+   * keeps single landings visible. Each deposit then counts for far
+   * more, so DROPLET.depositAmount must come down to match (~0.3).
+   *
+   * Without this, diffusion began the instant a droplet landed, so a
+   * single deposit thinned below the render floor before it could ever
+   * be seen: droplets visibly hit the water and left nothing. Now a
+   * lone landing holds its shape until a few more join it, and only
+   * then does the patch begin to spread and die.
+   */
+  growStart: 0,
+  growFull: 0.01,
+  /** Residual decay below `growStart`, as a fraction of the normal
+   * rate. Not zero, or stray specks would live forever. */
+  dormantDecay: 0.15,
   /** Flat evaporation per step, x(1 + 5*turb). */
   evaporation: 0.0002,
   /** Drift as a fraction of WIND speed (foam is blown as well as
@@ -408,7 +456,7 @@ export const FOAM = {
   diffuseBase: 0.2,
   /** Directional shading floor: how much shape shows. 1 = flat, 0 =
    * full terminator. Foam self-shadows softly, so this stays high. */
-  shapeFloor: 0.6,
+  shapeFloor: 0.7,
 
   /** Web render: density remap window and cell sizes (m). */
   densStart: 0.04,

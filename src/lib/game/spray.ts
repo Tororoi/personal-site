@@ -24,13 +24,13 @@
  *    cones via emitImpactSpray (called from the Scene's buoy physics).
  *
  * Fixed-step CPU sim, rendered as one InstancedMesh by the Scene. All
- * quantities are honest meters and m/s; sizes are art-scaled CLUMPS of
+ * quantities are honest meters and m/s; sizes are art-scaled PARCELS of
  * droplets (a real droplet is invisible at 26 px/m).
  */
 
 import { addFoam } from './foam'
 import { queueMistSplat } from './mistfield'
-import { DROPLET, ENABLE, MIST } from './tuning'
+import { DROPLET, ENABLE, FROTH, MIST } from './tuning'
 import { injectRipple } from './ripples'
 import { waves } from './waves'
 import { events, MAX_EVENTS, sampleOcean, windVector } from './whitecaps'
@@ -39,7 +39,7 @@ export const MAX_SPRAY = DROPLET.maxCount
 
 const GRAVITY = DROPLET.gravity
 /**
- * Fraction of the wind a flying clump feels. TEMP: zero — wind is OFF
+ * Fraction of the wind a flying droplet feels. TEMP: zero — wind is OFF
  * for the loop-splash study; flights are pure gravity arcs. (The tuned
  * value before the study was 0.08.)
  */
@@ -48,7 +48,7 @@ const WIND_CARRY = DROPLET.windCarry
 const DRAG = DROPLET.drag
 /** Hard lifetime cap, seconds (safety net; landing is the real death). */
 const LIFE_MAX = DROPLET.lifeMax
-/** Art-scaled clump radii, meters. */
+/** Art-scaled droplet radii, meters. */
 const SIZE_MIN = DROPLET.sizeMin
 const SIZE_MAX = DROPLET.sizeMax
 /** Burst size when a crest first lets go, scaled by windFactor. */
@@ -61,7 +61,7 @@ const LAUNCH_UP_MIN = 1.8
 const LAUNCH_UP_VAR = 2.4
 /**
  * The LOW twin's upward throw: every crest emission also launches a
- * skimming clump that barely clears the surface — most spray torn off a
+ * skimming droplet that barely clears the surface — most spray torn off a
  * crest hugs it instead of arcing high. This is what doubled density
  * without filling the sky.
  */
@@ -70,7 +70,7 @@ const LOW_UP_VAR = 0.9
 /**
  * Forward leap off a breaking crest, m/s: base + per m/s of wind. The
  * spill travels WITH the wave (waves ride the wind heading), which is
- * what visually ties a clump to the crest that threw it.
+ * what visually ties a droplet to the crest that threw it.
  */
 const CREST_FORWARD_BASE = 1.4
 const CREST_FORWARD = 0.06
@@ -111,7 +111,7 @@ const LOOP_UP_VAR = DROPLET.hopUpVar
 const LOOP_FORWARD_MIN = DROPLET.hopFwdMin
 const LOOP_FORWARD_VAR = DROPLET.hopFwdVar
 /**
- * Cover clumps SURF: the fold pattern travels at the phase velocity of
+ * Cover droplets SURF: the fold pattern travels at the phase velocity of
  * the dominant wave, so the boil advects at exactly that velocity to
  * stay seated in the culled gap. (The first version damped to a stop
  * and kept its birth height — the crest moved on and left frozen white
@@ -215,13 +215,13 @@ export type SprayParticle = {
   vy: number
   vz: number
   birth: number
-  /** Clump radius, meters. 0 = slot free. */
+  /** Droplet radius, meters. 0 = slot free. */
   size: number
   /** True for impact (buoy) spray, which may deposit foam on landing. */
   impact: boolean
   /** True for loop droplets: flight is PINNED to the loop's frame. */
   loop: boolean
-  /** Time the landing was detected; -1 airborne. The clump shrinks out
+  /** Time the landing was detected; -1 airborne. The droplet shrinks out
    * over a beat instead of blinking off the frame it touches water. */
   dying: number
   /** Rest-space anchor riding the loop (advected at loopFrame velocity). */
@@ -347,7 +347,7 @@ function launchLoop(
  * accepts spray coming off water it can SEE breaking — so rejection-
  * sample the patch and launch only from points whose instantaneous
  * Jacobian is collapsed (the exact criterion the churn renders white).
- * The clump leaps forward along the wave's travel, not in a random
+ * The droplet leaps forward along the wave's travel, not in a random
  * direction: a spilling crest throws its water ahead of itself.
  */
 function emitCrest(t: number, ex: number, ez: number, sigma: number) {
@@ -395,7 +395,7 @@ function emitCrest(t: number, ex: number, ez: number, sigma: number) {
 }
 
 /**
- * Impact emission (O'Brien & Hodgins): a cone of clumps thrown from a
+ * Impact emission (O'Brien & Hodgins): a cone of droplets thrown from a
  * strike at (x, z). dir biases the cone (a rim digging in throws to one
  * side; pass 0,0 for a symmetric splashdown crown); energy 0..1 scales
  * count and speed.
@@ -447,8 +447,13 @@ export type LoopHeading = {
   count: number
   /** 0..1 inversion depth (drives oval target size). */
   depth: number
+  /** Raw Jacobian at the sample, for the froth criterion. */
+  jacobian: number
 }
 export const loopHeadings: LoopHeading[] = []
+
+/** Dominant band amplitude — the froth criterion's normaliser. */
+const domAmp = waves.reduce((a, w) => Math.max(a, w.amp), 0)
 
 let coverScanClock = 0
 
@@ -503,6 +508,7 @@ function scanLoopSplash(t: number) {
           az: z - s.swayZ,
           count,
           depth,
+          jacobian: s1.jacobian,
         })
       }
     }
@@ -545,8 +551,19 @@ function scanLoopSplash(t: number) {
     const rise = Math.max(surfaceRise(a.ax, a.az, t), 0)
 
     if (!ENABLE.splashDroplets) continue
+    // Gate on the FROTH criterion: droplets are torn off froth masses,
+    // so a break that grows no froth should throw no droplets either.
+    const sk = frothFactor(a.ax, a.az, t, a.jacobian)
+    if (sk < FROTH.visStart) continue
+    // ...and the same factor sets how far ahead the water is thrown: a
+    // big plunging loop hurls it forward, a small one barely clears its
+    // own crest.
+    const sizeK =
+      DROPLET.hopFwdSizeFloor +
+      (1 - DROPLET.hopFwdSizeFloor) * Math.min(sk / FROTH.sizeCap, 1)
     for (let k = 0; k < a.count; k++) {
-      const forward = LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR
+      const forward =
+        (LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR) * sizeK
       launchLoop(
         t,
         a.ax,
@@ -560,6 +577,55 @@ function scanLoopSplash(t: number) {
       )
     }
   }
+}
+
+/**
+ * The FROTH criterion, on the CPU. This is a twin of frothFrame() in
+ * Scene.svelte: the same pinch-weighted amplitude vote, the same
+ * intensity window with its lagged release tail, the same response
+ * curve. It answers "would a froth mass exist here?" so droplet
+ * emission can be gated on it — droplets are torn from the froth, so
+ * they should not appear where there is no froth to tear.
+ *
+ * Returns the combined size factor `sk`; compare against FROTH.visStart.
+ */
+function frothFactor(u: number, v: number, t: number, jNow: number) {
+  let wAmp = 0
+  let wsum = 0
+  for (const w of waves) {
+    const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
+    const pw = Math.max(w.q * w.amp * w.k * Math.sin(theta), 0)
+    const sq = pw * pw
+    wAmp += w.amp * sq
+    wsum += sq
+  }
+  const loopAmp = wsum > 0.0001 ? wAmp / wsum : 0
+  const ampK = Math.min(Math.max(loopAmp / domAmp, FROTH.ampRatioFloor), 1)
+  // Jacobian a beat in the past, for the same release tail the shader has.
+  let jxx = 1
+  let jzz = 1
+  let jxz = 0
+  for (const w of waves) {
+    const theta =
+      (u * w.dirX + v * w.dirZ) * w.k - w.omega * (t - FROTH.gateLag) + w.phase
+    const qak = w.q * w.amp * w.k * Math.sin(theta)
+    jxx -= qak * w.dirX * w.dirX
+    jzz -= qak * w.dirZ * w.dirZ
+    jxz -= qak * w.dirX * w.dirZ
+  }
+  const jPast = jxx * jzz - jxz * jxz
+  const iNow = Math.min(Math.max((FROTH.intJStart - jNow) / FROTH.intJSpan, 0), 1)
+  const iPast = Math.min(Math.max((FROTH.intJStart - jPast) / FROTH.intJSpan, 0), 1)
+  const intK =
+    FROTH.intFloor +
+    (1 - FROTH.intFloor) * Math.max(iNow, iPast * FROTH.gateLagWeight)
+  let sk = ampK * intK
+  const cs = Math.min(
+    Math.max((sk - FROTH.curveStart) / (FROTH.curveEnd - FROTH.curveStart), 0),
+    1,
+  )
+  sk *= 1 + FROTH.curveBoost * (cs * cs * (3 - 2 * cs))
+  return sk
 }
 
 /**
@@ -724,7 +790,7 @@ function emitSpume(dt: number) {
 
 // Landing checks alternate between particle halves each step (the
 // sampleOcean per particle is the module's dominant CPU cost, and a
-// clump moves ~5cm between checks — the extra latency is invisible).
+// droplet moves ~5cm between checks — the extra latency is invisible).
 let checkParity = 0
 
 // One entry per event slot: which birth we've already burst for.
@@ -820,9 +886,9 @@ export function updateSpray(dt: number, t: number) {
       p.y += p.vy * dt
       p.z += p.vz * dt
     }
-    // A submerged clump is dead REGARDLESS of rise or fall: a trough
+    // A submerged droplet is dead REGARDLESS of rise or fall: a trough
     // emission can sit below the NEIGHBORING wave face for its entire
-    // arc, invisible behind the opaque water. Only clumps that had a
+    // arc, invisible behind the opaque water. Only droplets that had a
     // real airborne life hand anything back — foam appearing where no
     // droplet was ever visible reads as haunted.
     if ((i & 1) !== checkParity) continue
@@ -834,7 +900,12 @@ export function updateSpray(dt: number, t: number) {
     // water meanwhile; the test resumes once the flight matures.
     if (p.loop && t - p.birth < DROPLET.submergeGrace) continue
     const s = sampleOcean(p.x, p.z, t, 1, 1)
-    if (p.y < s.height - 0.02) {
+    // CONTACT, not submersion: the droplet's underside reaching the water
+    // is the moment of impact — that is when it breaks up, rings the
+    // surface and leaves foam. Waiting for the centre to pass fully
+    // under delayed every splash by the time it took to sink its own
+    // radius, which at these sizes is a visible beat.
+    if (p.y - p.size < s.height) {
       if (t - p.birth < 0.1) culledYoung++
       // Gate sized so trough-buried ghosts (dead in < 0.05s) still hand
       // nothing back, while the low skimmers' short real flights do.
@@ -843,7 +914,7 @@ export function updateSpray(dt: number, t: number) {
       // shorter than the gate — it was silently eating exactly the
       // crash-front deposits (droplet visibly hits, no foam appears).
       if (p.loop || t - p.birth > 0.12) {
-        // Landing: hand the water back (O'Brien & Hodgins). The clump
+        // Landing: hand the water back (O'Brien & Hodgins). The droplet
         // rings the surface and leaves a slow-dying dot of foam residue,
         // anchored in REST coordinates — the material water point under
         // the landing — so it rides the Gerstner sway with the surface.
@@ -865,17 +936,23 @@ export function updateSpray(dt: number, t: number) {
           // (0.2 base read as too much total foam; ~1 texel is the sweet
           // spot between resolvable and restrained.)
           addFoam(
-          p.x - r.swayX,
-          p.z - r.swayZ,
-          DROPLET.depositBase + p.size * DROPLET.depositPerSize,
-        )
+            p.x - r.swayX,
+            p.z - r.swayZ,
+            DROPLET.depositBase + p.size * DROPLET.depositPerSize,
+            DROPLET.depositAmount,
+          )
         } else {
-          // Buoy (impact) spray: EVERY clump deposits, but at low amp so
+          // Buoy (impact) spray: EVERY droplet deposits, but at low amp so
           // the float doesn't paint a solid disc around itself. Sigma
           // floor matters here too: the old 0.04-0.11m deposits were
           // sub-texel and died to one diffusion pass — buoy spray never
           // visibly foamed at all.
-          addFoam(p.x - r.swayX, p.z - r.swayZ, 0.13 + p.size * 0.3, 0.35)
+          addFoam(
+            p.x - r.swayX,
+            p.z - r.swayZ,
+            DROPLET.depositBaseBuoy + p.size * DROPLET.depositPerSizeBuoy,
+            DROPLET.depositAmountBuoy,
+          )
         }
       }
       p.dying = t

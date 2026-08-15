@@ -18,7 +18,7 @@
 	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
-	import { DROPLET, ENABLE, f, FOAM, LOOP, MIST, PLUME, SPRITE } from './tuning';
+	import { DROPLET, ENABLE, f, FOAM, FROTH, LOOP, MIST, PLUME } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
@@ -87,9 +87,9 @@
 		resizeTimer = window.setTimeout(() => {
 			waterGeometry.dispose();
 			waterGeometry = buildWaterGeometry();
-			underSpikeGeometry.dispose();
-			underSpikeGeometry = buildSpikeGeometry();
-			underSpikeMesh.geometry = underSpikeGeometry;
+			frothGeometry.dispose();
+			frothGeometry = buildFrothGeometry();
+			frothMesh.geometry = frothGeometry;
 		}, 200);
 	}
 	window.addEventListener('resize', onWindowResize);
@@ -642,7 +642,7 @@ void main() {
 	// -normal, and the sheet in front of that plane showed as a dark
 	// line slicing them. Pulling the pinch-zone surface along -normal
 	// fills the wedge between fold and sprite plane with WHITE water.
-	// SHARED SPRITE CRITERION: the same smoothstep(0.1, 0.42) gate the
+	// SHARED FROTH CRITERION: the same smoothstep(0.1, 0.42) gate the
 	// sprites use — a loop that generates no sprites neither whitens
 	// nor stretches, so all three systems agree on which pinches count.
 	float ampK = clamp((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.3, 1.0);
@@ -661,10 +661,10 @@ void main() {
 		// and down into the wave body. The raw normal swings wildly
 		// between adjacent vertices at a fold — pulling along it painted
 		// a squiggly sheet, worst on crests diagonal to the mesh grid.
-		float spriteR = ${f(LOOP.stretchSpriteR)} * min(sk, ${f(SPRITE.sizeCap)});
+		float frothR = ${f(LOOP.stretchFrothR)} * min(sk, ${f(FROTH.sizeCap)});
 		vec2 hd = wsum > 0.0001 ? normalize(vec2(hwx, hwz)) : vec2(1.0, 0.0);
 		vec3 pullDir = normalize(vec3(-hd.x * ${f(LOOP.stretchBack)}, -${f(LOOP.stretchDown)}, -hd.y * ${f(LOOP.stretchBack)}));
-		p += pullDir * (spriteR * ${f(LOOP.stretchDepth)} * stretchGate);
+		p += pullDir * (frothR * ${f(LOOP.stretchDepth)} * stretchGate);
 	}
 	// The stretched region must BE white (it exists to cover the wedge);
 	// the whole mask is gated by the shared criterion. Fragment twin
@@ -881,7 +881,7 @@ void main() {
 		gradientMap: toonGradient
 	});
 
-	// Ballistic spray clumps (spray.ts) as POINT SPRITES — one vertex
+	// Ballistic spray droplets (spray.ts) as POINT SPRITES — one vertex
 	// each instead of an instanced octahedron, matching how the foam
 	// masses are drawn. Cheaper (no per-droplet matrix, ~1/20th the
 	// vertices) and consistent: droplets ARE foam in flight, so they
@@ -966,13 +966,13 @@ void main() {
 	const sprayMesh = new THREE.Points(sprayGeometry, sprayMaterial);
 	sprayMesh.frustumCulled = false;
 
-	// UNDERSIDE FOAM POINTS: one scaled-up POINT SPRITE per grid
+	// FROTH: one scaled-up point sprite per grid
 	// intersection instead of sphere meshes — a single vertex each, so
 	// the field is ~20x lighter than the octa version. The sprite's
 	// center rides under the surface (hidden by depth) and pops out when
 	// the sheet overturns; the steepness gate scales both the offset and
 	// the pixel size. position = (anchorX, radius, anchorZ).
-	function buildSpikeGeometry() {
+	function buildFrothGeometry() {
 		// Dense base lattice; the shader thins it dynamically by sprite
 		// size (small beads pack tight, big masses stay sparse).
 		const S = 0.25;
@@ -995,11 +995,11 @@ void main() {
 		g.setAttribute('aRank', new THREE.Float32BufferAttribute(rank, 1));
 		return g;
 	}
-	let underSpikeGeometry = buildSpikeGeometry();
+	let frothGeometry = buildFrothGeometry();
 	// Shared sprite frame/sizing GLSL — the mist EMITTER runs the exact
 	// same function, so every plume is born at a real sprite's centre.
-	const spriteFrameGlsl = `
-float spriteFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 Nn, out float g) {
+	const frothFrameGlsl = `
+float frothFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 Nn, out float g) {
 	vec3 d = waveDisplacement(anchor, uTime, uAmp);
 	float txx = 0.0; float txy = 0.0; float txz = 0.0; float tzy = 0.0; float tzz = 0.0;
 	float wAmp = 0.0; float wsum = 0.0;
@@ -1061,7 +1061,7 @@ float spriteFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 
 	return r;
 }`;
 
-	const underSpikeMaterial = new THREE.ShaderMaterial({
+	const frothMaterial = new THREE.ShaderMaterial({
 		uniforms: {
 			uTime: waterUniforms.uTime,
 			uAmp: waterUniforms.uAmp,
@@ -1087,13 +1087,13 @@ uniform float uAmp;
 uniform float uPointPx;
 uniform float uDomAmp;
 ${wavesGlsl()}
-${spriteFrameGlsl}
+${frothFrameGlsl}
 attribute float aRank;
 varying float vViewZ;
 varying vec3 vNrm;
 void main() {
 	vec3 surf; vec3 Nn; float g;
-	float r = spriteFrame(position.xz, position.y, aRank, surf, Nn, g);
+	float r = frothFrame(position.xz, position.y, aRank, surf, Nn, g);
 	vec3 world = surf - Nn * (r * 0.8 * g);
 	// The foam mass rides the water: light it by the surface normal.
 	vNrm = Nn;
@@ -1128,14 +1128,14 @@ void main() {
 	//     near-vertical sheet. A little tilt survives, which is what
 	//     keeps sprites from looking uniformly stamped.
 	vec3 sn = vNrm.y < 0.0 ? -vNrm : vNrm;
-	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(SPRITE.normalTilt)}));
+	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
 	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
 	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
 }`
 	});
-	const underSpikeMesh = new THREE.Points(underSpikeGeometry, underSpikeMaterial);
-	underSpikeMesh.frustumCulled = false;
+	const frothMesh = new THREE.Points(frothGeometry, frothMaterial);
+	frothMesh.frustumCulled = false;
 
 	// CREST SPRAY: a second pass over the SAME points. Each sprite's
 	// quad is enlarged upward and the fragment paints a vertical plume
@@ -1150,8 +1150,8 @@ void main() {
 			uAmp: waterUniforms.uAmp,
 			uWaveA: waterUniforms.uWaveA,
 			uWaveB: waterUniforms.uWaveB,
-			uDomAmp: underSpikeMaterial.uniforms.uDomAmp,
-			uPointPx: underSpikeMaterial.uniforms.uPointPx,
+			uDomAmp: frothMaterial.uniforms.uDomAmp,
+			uPointPx: frothMaterial.uniforms.uPointPx,
 			uColor: { value: new THREE.Color('#f2f8ff') },
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
@@ -1186,7 +1186,7 @@ uniform float uMaxPoint;
 uniform vec2 uWindScreen;
 uniform float uWindSpeed;
 ${wavesGlsl()}
-${spriteFrameGlsl}
+${frothFrameGlsl}
 attribute float aRank;
 varying float vViewZ;
 varying float vFrac;
@@ -1197,7 +1197,7 @@ varying float vGale;
 varying vec2 vAnchor;
 void main() {
 	vec3 surf; vec3 Nn; float g;
-	float r = spriteFrame(position.xz, position.y, aRank, surf, Nn, g);
+	float r = frothFrame(position.xz, position.y, aRank, surf, Nn, g);
 	// BURST at the wave's peak: analytic surface height (normalised by
 	// the total amplitude) and its time derivative. Spray fires as the
 	// crest tops out and trails off on the way down — a throw, not a
@@ -1275,11 +1275,11 @@ void main() {
 	})();
 	const sprayWindA = new THREE.Vector3();
 	const sprayWindB = new THREE.Vector3();
-	const crestSprayMesh = new THREE.Points(underSpikeGeometry, crestSprayMaterial);
+	const crestSprayMesh = new THREE.Points(frothGeometry, crestSprayMaterial);
 	crestSprayMesh.frustumCulled = false;
 	crestSprayMesh.renderOrder = 6;
 	crestSprayMesh.visible = ENABLE.crestPlumes;
-	underSpikeMesh.visible = ENABLE.foamSprites;
+	frothMesh.visible = ENABLE.froth;
 
 
 
@@ -1845,8 +1845,8 @@ void main() {
 		buoyMaterial.dispose();
 		sprayGeometry.dispose();
 		sprayMaterial.dispose();
-		underSpikeGeometry.dispose();
-		underSpikeMaterial.dispose();
+		frothGeometry.dispose();
+		frothMaterial.dispose();
 		crestSprayMaterial.dispose();
 		mistGeometry.dispose();
 		mistMaterial.dispose();
@@ -1878,7 +1878,7 @@ void main() {
 
 <T is={sprayMesh} />
 
-<T is={underSpikeMesh} />
+<T is={frothMesh} />
 
 <T is={crestSprayMesh} />
 

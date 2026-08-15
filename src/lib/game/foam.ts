@@ -227,7 +227,15 @@ void main() {
 	float J = 1.0;
 	if (dot(world, world) < 1764.0) J = waveJacobian(world, uTime, uAmp);
 	float turb = 1.0 - smoothstep(${TURB_J_FULL.toFixed(2)}, ${TURB_J_START.toFixed(2)}, J);
-	float spreadH = mix(c, avg, uDiffusion);
+	// DORMANT until it has some body: a deposit only starts spreading
+	// (and dying) once it clears growStart. A single droplet's dot would
+	// otherwise diffuse below the render floor before anyone saw it.
+	float grown = smoothstep(
+		${FOAM.growStart.toFixed(3)},
+		${FOAM.growFull.toFixed(3)},
+		c
+	);
+	float spreadH = mix(c, avg, uDiffusion * grown);
 	// Thickness-biased decay (see DECAY_TAU_THIN/THICK): peaks erode
 	// faster than skirts, so mounds flatten into spreading plateaus that
 	// die everywhere at once — expansion is continuous until the fade.
@@ -252,14 +260,22 @@ void main() {
 	// stack once pushed pocket lifetimes toward a minute — the storm
 	// saturated solid white. Max retention here is ~11s-equivalent.
 	retain = min(retain + conv * 0.0012 + pocket * 0.0005, 0.9985);
+	// Dormant foam barely decays either — it is waiting to be joined,
+	// not dying. A small residual keeps stray specks from living forever.
+	float dormantRetain = pow(retain, ${FOAM.dormantDecay.toFixed(3)});
+	retain = mix(dormantRetain, retain, grown);
 	// Evaporation is small: with doubled diffusion, AREA GROWTH is the
 	// main thinning force (double the radius = a quarter the thickness),
 	// and heavy evaporation was cutting the long thin phase short.
 	// uDtScale makes rates WALL-CLOCK true at any framerate.
-	float h = max(spreadH * retain - ${FOAM.evaporation.toFixed(5)} * uDtScale * (1.0 + 5.0 * turb), 0.0);
+	float h = max(
+		spreadH * retain
+			- ${FOAM.evaporation.toFixed(5)} * uDtScale * (1.0 + 5.0 * turb) * grown,
+		0.0
+	);
 
 	// NO in-field crest generation: foam is EMERGENT from spray alone.
-	// Every deposit below entered through a landing clump; crests read as
+	// Every deposit below entered through a landing droplet; crests read as
 	// breaking because they erupt spray (and their folded polys cull),
 	// and the foam field is simply where that water came back down.
 
