@@ -123,6 +123,248 @@ export function setViewQuad(corners: number[] | null) {
 }
 
 
+/**
+ * PERSISTENT LOOP TRACKS.
+ *
+ * The scan finds pinch points, but each cycle is anonymous: the grid is
+ * re-jittered, points are unordered, and nothing connects one cycle to
+ * the next. Tracks add the missing identity.
+ *
+ * Two steps. First CONNECTIVITY: union-find over the scan points groups
+ * them into whole loops (a loop is a connected run of pinch points, so
+ * its extent, length and mean motion are properties of the group, not
+ * of any one sample). Then MATCHING: each group is paired with a track
+ * from the previous cycle by rest-space proximity, so a loop keeps its
+ * identity, accumulates age, and carries smoothed heading and speed
+ * instead of the per-sample values that jitter with the grid.
+ *
+ * (Tracking the mesh's own triangles would give identity for free —
+ * a tri IS a fixed parcel of water — but the water mesh runs to ~520k
+ * triangles, far beyond a per-frame CPU pass, and a tri is only inside
+ * a loop for a moment anyway: the loop travels through the mesh, so
+ * membership churns and the loop still needs matching to persist.)
+ */
+export type LoopTrack = {
+  id: number
+  /** Rest-space centroid, advected by the loop frame between scans. */
+  ax: number
+  az: number
+  /** World-space centroid — where the loop actually is, used for
+   * grouping and for matching to the next cycle. */
+  wx: number
+  wz: number
+  /** Smoothed heading and advance speed. */
+  hx: number
+  hz: number
+  speed: number
+  /** Member count and its span in metres along the crest. */
+  points: number
+  length: number
+  /** Strongest froth factor anywhere on the loop. */
+  peak: number
+  /** Seconds since first seen, and when it was last matched. */
+  age: number
+  lastSeen: number
+}
+
+export const loopTracks: LoopTrack[] = []
+let nextTrackId = 1
+
+/** How far apart two scan points can be and still be the same loop. */
+const LINK_DIST = 2.6
+/** How far a track's centroid may move between cycles and still match. */
+const TRACK_MATCH = 6
+
+function buildLoopTracks(t: number) {
+  const n = loopHeadings.length
+  if (n === 0) return
+  // --- connectivity: union-find over neighbouring scan points ---
+  const parent = new Int32Array(n)
+  for (let i = 0; i < n; i++) parent[i] = i
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]]
+      i = parent[i]
+    }
+    return i
+  }
+  const union = (a: number, b: number) => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent[rb] = ra
+  }
+  // Link in WORLD space, not rest: a loop is contiguous where you can
+  // see it. In rest space the Gerstner sway pulls neighbouring samples
+  // metres apart precisely at a pinch (that displacement IS the pinch),
+  // so rest-space linking left almost every loop as isolated points.
+  const CELL = LINK_DIST
+  const cells = new Map<number, number[]>()
+  const key = (x: number, z: number) =>
+    (Math.floor(x / CELL) + 4096) * 8192 + (Math.floor(z / CELL) + 4096)
+  for (let i = 0; i < n; i++) {
+    const k = key(loopHeadings[i].x, loopHeadings[i].z)
+    const list = cells.get(k)
+    if (list) list.push(i)
+    else cells.set(k, [i])
+  }
+  const linkSq = LINK_DIST * LINK_DIST
+  for (let i = 0; i < n; i++) {
+    const a = loopHeadings[i]
+    const cx = Math.floor(a.x / CELL)
+    const cz = Math.floor(a.z / CELL)
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oz = -1; oz <= 1; oz++) {
+        const list = cells.get((cx + ox + 4096) * 8192 + (cz + oz + 4096))
+        if (!list) continue
+        for (const j of list) {
+          if (j <= i) continue
+          const b = loopHeadings[j]
+          const dx = b.x - a.x
+          const dz = b.z - a.z
+          if (dx * dx + dz * dz <= linkSq) union(i, j)
+        }
+      }
+    }
+  }
+  // --- group summaries ---
+  type Group = {
+    ax: number
+    az: number
+    wx: number
+    wz: number
+    hx: number
+    hz: number
+    speed: number
+    points: number
+    peak: number
+    minU: number
+    maxU: number
+  }
+  const groups = new Map<number, Group>()
+  for (let i = 0; i < n; i++) {
+    const a = loopHeadings[i]
+    const r = find(i)
+    let g = groups.get(r)
+    if (!g) {
+      g = {
+        ax: 0,
+        az: 0,
+        wx: 0,
+        wz: 0,
+        hx: 0,
+        hz: 0,
+        speed: 0,
+        points: 0,
+        peak: 0,
+        minU: Infinity,
+        maxU: -Infinity,
+      }
+      groups.set(r, g)
+    }
+    g.ax += a.ax
+    g.az += a.az
+    g.wx += a.x
+    g.wz += a.z
+    g.hx += a.hx
+    g.hz += a.hz
+    g.speed += a.speed
+    g.points++
+    g.peak = Math.max(g.peak, a.depth)
+    // Extent ALONG the crest line (perpendicular to the heading).
+    const u = a.x * -a.hz + a.z * a.hx
+    if (u < g.minU) g.minU = u
+    if (u > g.maxU) g.maxU = u
+    a.track = r
+  }
+  // --- match to existing tracks, or spawn ---
+  const matched = new Set<LoopTrack>()
+  const idOf = new Map<number, number>()
+  for (const [root, g] of groups) {
+    const cx = g.ax / g.points
+    const cz = g.az / g.points
+    const wx = g.wx / g.points
+    const wz = g.wz / g.points
+    const hLen = Math.hypot(g.hx, g.hz) || 1
+    const hx = g.hx / hLen
+    const hz = g.hz / hLen
+    const speed = g.speed / g.points
+    const length = g.maxU - g.minU
+    let best: LoopTrack | null = null
+    let bestD = TRACK_MATCH * TRACK_MATCH
+    for (const tr of loopTracks) {
+      if (matched.has(tr)) continue
+      const dx = tr.wx - wx
+      const dz = tr.wz - wz
+      const d2 = dx * dx + dz * dz
+      if (d2 < bestD) {
+        bestD = d2
+        best = tr
+      }
+    }
+    if (best) {
+      matched.add(best)
+      // Smooth: the grid jitters, the loop does not.
+      best.ax += (cx - best.ax) * 0.5
+      best.az += (cz - best.az) * 0.5
+      best.wx += (wx - best.wx) * 0.5
+      best.wz += (wz - best.wz) * 0.5
+      best.hx += (hx - best.hx) * 0.35
+      best.hz += (hz - best.hz) * 0.35
+      best.speed += (speed - best.speed) * 0.35
+      best.points = g.points
+      best.length = length
+      best.peak = g.peak
+      best.lastSeen = t
+      idOf.set(root, best.id)
+    } else {
+      const tr: LoopTrack = {
+        id: nextTrackId++,
+        ax: cx,
+        az: cz,
+        wx,
+        wz,
+        hx,
+        hz,
+        speed,
+        points: g.points,
+        length,
+        peak: g.peak,
+        age: 0,
+        lastSeen: t,
+      }
+      loopTracks.push(tr)
+      matched.add(tr)
+      idOf.set(root, tr.id)
+    }
+  }
+  // Publish stable ids onto the points, and retire stale tracks.
+  for (const a of loopHeadings) {
+    const id = idOf.get(a.track)
+    a.track = id === undefined ? -1 : id
+  }
+  for (let i = loopTracks.length - 1; i >= 0; i--) {
+    if (t - loopTracks[i].lastSeen > 0.4) loopTracks.splice(i, 1)
+  }
+}
+
+/** Per-frame: tracks ride their loop between scans and accumulate age. */
+function updateLoopTracks(dt: number, t: number) {
+  for (const tr of loopTracks) {
+    tr.age += dt
+    const fr = loopFrame(tr.ax, tr.az, t)
+    tr.ax += fr.vx * dt
+    tr.az += fr.vz * dt
+    tr.wx = tr.ax + fr.swayX
+    tr.wz = tr.az + fr.swayZ
+  }
+}
+
+/** Look-up by id, for emission. */
+function trackById(id: number): LoopTrack | null {
+  for (const tr of loopTracks) if (tr.id === id) return tr
+  return null
+}
+
 /** Per-scan census, so it is possible to tell WHY froth is not
  * throwing: how many grid points were sampled, how many were steep
  * enough to record, and how many actually cleared every emission gate. */
@@ -362,7 +604,17 @@ if (typeof window !== 'undefined') {
     allocFails,
     culledYoung,
     ...scanCensus,
+    tracks: loopTracks.length,
   })
+  // Debug: the live loop tracks — id, age, length, speed.
+  ;(window as unknown as Record<string, unknown>).loopTracks = () =>
+    loopTracks.map((tr) => ({
+      id: tr.id,
+      age: +tr.age.toFixed(2),
+      points: tr.points,
+      length: +tr.length.toFixed(1),
+      speed: +tr.speed.toFixed(2),
+    }))
   // Debug: the exact quad the scan is culled to, in world XZ.
   ;(window as unknown as Record<string, unknown>).scanQuad = () => ({
     quad: viewQuad ? [...viewQuad] : null,
@@ -547,6 +799,8 @@ export type LoopHeading = {
   depth: number
   /** Raw Jacobian at the sample, for the froth criterion. */
   jacobian: number
+  /** Id of the persistent loop this point belongs to (-1 = none). */
+  track: number
 }
 export const loopHeadings: LoopHeading[] = []
 
@@ -560,6 +814,10 @@ function smooth01(x: number, e0: number, e1: number) {
   const u = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1)
   return u * u * (3 - 2 * u)
 }
+
+/** Phase speed of the dominant band — the reference a loop's own speed
+ * is measured against. */
+const DOM_PHASE_SPEED = domWave.omega / domWave.k
 
 /** Mean baked froth radius (FROTH.radiusBase + half the jitter): the
  * lattice's per-point hash is a GPU detail, so emission uses the mean. */
@@ -655,6 +913,7 @@ function scanLoopSplash(t: number) {
           count,
           depth,
           jacobian: s1.jacobian,
+          track: -1,
         })
       }
     }
@@ -711,6 +970,7 @@ function scanLoopSplash(t: number) {
     // go green — a lone grid hit is noise, not a crest line.
     a.chain = (along >= 2 && along > beside) || along + beside === 0
   }
+  buildLoopTracks(t)
   // Emission — from PINK points only. These are the primary crashing
   // particles: pinned to the loop's frame, thrown slightly ahead of it.
   for (const a of loopHeadings) {
@@ -736,6 +996,17 @@ function scanLoopSplash(t: number) {
     const sizeK =
       DROPLET.hopFwdSizeFloor +
       (1 - DROPLET.hopFwdSizeFloor) * Math.min(sk / FROTH.sizeCap, 1)
+    // ...and with the loop's OWN SPEED. Droplets fly pinned to the
+    // loop's frame, so the hop is motion RELATIVE to the crest: at a
+    // fixed 1-2 m/s it read fine on a fast plunger but looked like the
+    // water was being flung off a nearly stationary slow crest.
+    // Smoothed from the loop TRACK where one exists: per-sample heading
+    // and speed jitter with the scan grid, the loop itself does not.
+    const tr = a.track >= 0 ? trackById(a.track) : null
+    const trackSpeed = tr ? tr.speed : a.speed
+    const speedK =
+      DROPLET.hopFwdSpeedFloor +
+      (1 - DROPLET.hopFwdSpeedFloor) * Math.min(trackSpeed / DOM_PHASE_SPEED, 1)
     // How many froth masses this scan cell stands for: the cell's area
     // over the froth lattice's, thinned by the same density and
     // visibility ramps the shader applies. Each throws `perFroth`.
@@ -777,13 +1048,15 @@ function scanLoopSplash(t: number) {
     // orbital velocity, which on an overturning face runs forward and
     // over. Normalised — the hop constants set the speed.
     const orb = orbital(a.ax, a.az, t)
+    const thx = tr ? tr.hx : a.hx
+    const thz = tr ? tr.hz : a.hz
     const orbLen = Math.hypot(orb.x, orb.y, orb.z)
-    const ox0 = orbLen > 0.01 ? orb.x / orbLen : a.hx
+    const ox0 = orbLen > 0.01 ? orb.x / orbLen : thx
     const oy0 = orbLen > 0.01 ? orb.y / orbLen : 1
-    const oz0 = orbLen > 0.01 ? orb.z / orbLen : a.hz
+    const oz0 = orbLen > 0.01 ? orb.z / orbLen : thz
     for (let k = 0; k < count; k++) {
       const forward =
-        (LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR) * sizeK
+        (LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR) * sizeK * speedK
       // A droplet can never be larger than a fraction of the mass that
       // threw it — tiny froth was shedding droplets bigger than itself.
       const sizeCap = Math.max(frothR * DROPLET.sizeVsFroth, SIZE_MIN)
@@ -1086,6 +1359,7 @@ export function updateSpray(dt: number, t: number) {
     scanLoopSplash(t)
     if (scanSlice === 0) refreshInjectors(t)
   }
+  updateLoopTracks(dt, t)
   updateInjectors(dt, t)
   emitSpume(dt)
 

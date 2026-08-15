@@ -369,6 +369,15 @@ export const DROPLET = {
    * is the floor small loops fall to.
    */
   hopFwdSizeFloor: 1.0,
+  /**
+   * The throw also scales with the LOOP'S OWN SPEED, as a fraction of
+   * the dominant band's phase speed; this is the floor slow loops fall
+   * to. Droplets fly PINNED to the loop's frame, so the hop is motion
+   * relative to the crest — a fixed 1-2 m/s reads fine on a fast
+   * plunger but looks like water being flung off a nearly stationary
+   * slow crest.
+   */
+  hopFwdSpeedFloor: 0.25,
 
   /** Birth stagger (s): de-synchronises the 0.1s scan volleys. While
    * staggered a droplet RIDES its froth mass (it has not been thrown
