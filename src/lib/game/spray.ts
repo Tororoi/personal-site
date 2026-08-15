@@ -345,6 +345,8 @@ function buildLoopTracks(t: number) {
   for (let i = loopTracks.length - 1; i >= 0; i--) {
     if (t - loopTracks[i].lastSeen > 0.4) loopTracks.splice(i, 1)
   }
+  trackIndex.clear()
+  for (const tr of loopTracks) trackIndex.set(tr.id, tr)
 }
 
 /** Per-frame: tracks ride their loop between scans and accumulate age. */
@@ -359,11 +361,9 @@ function updateLoopTracks(dt: number, t: number) {
   }
 }
 
-/** Look-up by id, for emission. */
-function trackById(id: number): LoopTrack | null {
-  for (const tr of loopTracks) if (tr.id === id) return tr
-  return null
-}
+/** Id -> track, rebuilt each cycle: emission looks one up per point,
+ * and a linear search over a few hundred tracks is needless work. */
+const trackIndex = new Map<number, LoopTrack>()
 
 /** Per-scan census, so it is possible to tell WHY froth is not
  * throwing: how many grid points were sampled, how many were steep
@@ -788,8 +788,6 @@ export type LoopHeading = {
   hx: number
   hz: number
   speed: number
-  /** true = neighbors line up ALONG the heading (chain) — bad spray site */
-  chain: boolean
   /** Rest anchor + droplet count, carried so emission can run AFTER
    * classification (only pink points splash). */
   ax: number
@@ -907,7 +905,6 @@ function scanLoopSplash(t: number) {
           hx,
           hz,
           speed: lvLen,
-          chain: false,
           ax: x - s.swayX,
           az: z - s.swayZ,
           count,
@@ -921,60 +918,15 @@ function scanLoopSplash(t: number) {
   // Only the final slice has the whole picture: classify and emit.
   scanSlice = (scanSlice + 1) % SCAN_SLICES
   if (scanSlice !== 0) return
-  // Classify each point by how its NEIGHBORS sit relative to its own
-  // heading. A real crest line reads as points BESIDE each other
-  // (offset perpendicular to heading) — good spray. A ribbon running
-  // ALONG its own travel direction reads as points ahead/behind each
-  // other. Majority vote inside a 4 m disc; the deadband keeps
-  // diagonals from voting both ways.
-  //
-  // Bucketed into a 4 m hash grid rather than compared all-to-all: the
-  // scan now covers the whole window, and at a few hundred points the
-  // O(n^2) version cost ~9fps on its own.
-  const CELL = 4
-  const buckets = new Map<number, number[]>()
-  const keyOf = (x: number, z: number) =>
-    (Math.floor(x / CELL) + 4096) * 8192 + (Math.floor(z / CELL) + 4096)
-  for (let i = 0; i < loopHeadings.length; i++) {
-    const k = keyOf(loopHeadings[i].x, loopHeadings[i].z)
-    const list = buckets.get(k)
-    if (list) list.push(i)
-    else buckets.set(k, [i])
-  }
-  for (let i = 0; i < loopHeadings.length; i++) {
-    const a = loopHeadings[i]
-    let along = 0
-    let beside = 0
-    const cx = Math.floor(a.x / CELL)
-    const cz = Math.floor(a.z / CELL)
-    for (let ox = -1; ox <= 1; ox++) {
-      for (let oz = -1; oz <= 1; oz++) {
-        const list = buckets.get((cx + ox + 4096) * 8192 + (cz + oz + 4096))
-        if (!list) continue
-        for (const j of list) {
-          if (j === i) continue
-          const b = loopHeadings[j]
-          const dx = b.x - a.x
-          const dz = b.z - a.z
-          const d2 = dx * dx + dz * dz
-          if (d2 > 16 || d2 < 0.01) continue
-          const cosT = Math.abs((dx * a.hx + dz * a.hz) / Math.sqrt(d2))
-          if (cosT > 0.8) along++
-          else if (cosT < 0.6) beside++
-        }
-      }
-    }
-    // Lean pink for real lines: only a clear fore/aft pattern (2+
-    // votes, outnumbering the beside votes) condemns a group point as
-    // a chain. ISOLATED points (no neighbors in the disc at all) also
-    // go green — a lone grid hit is noise, not a crest line.
-    a.chain = (along >= 2 && along > beside) || along + beside === 0
-  }
+  // (The neighbour-vote chain classification lived here. Tracks make it
+  // redundant: a real crest line is a connected run with genuine extent
+  // ALONG the crest, which buildLoopTracks already measures as
+  // `length` — so the vote, its bucket grid and its per-point pass are
+  // gone, replaced by one comparison at emission.)
   buildLoopTracks(t)
   // Emission — from PINK points only. These are the primary crashing
   // particles: pinned to the loop's frame, thrown slightly ahead of it.
   for (const a of loopHeadings) {
-    if (a.chain) continue
     // The hop is RELATIVE to the rising crest, like the horizontal is
     // relative to the advancing loop: droplets inherit the surface's
     // upward velocity so the wave can't climb over its own spray.
@@ -1000,10 +952,14 @@ function scanLoopSplash(t: number) {
     // loop's frame, so the hop is motion RELATIVE to the crest: at a
     // fixed 1-2 m/s it read fine on a fast plunger but looked like the
     // water was being flung off a nearly stationary slow crest.
-    // Smoothed from the loop TRACK where one exists: per-sample heading
-    // and speed jitter with the scan grid, the loop itself does not.
-    const tr = a.track >= 0 ? trackById(a.track) : null
-    const trackSpeed = tr ? tr.speed : a.speed
+    // The TRACK decides two things: whether this is a crest line at all
+    // (a real one is a connected run with extent along the crest; noise
+    // is a lone point or a short smear), and the smoothed heading and
+    // speed — per-sample values jitter with the scan grid, the loop
+    // itself does not.
+    const tr = a.track >= 0 ? trackIndex.get(a.track) : undefined
+    if (!tr || tr.length < DROPLET.minLoopLength) continue
+    const trackSpeed = tr.speed
     const speedK =
       DROPLET.hopFwdSpeedFloor +
       (1 - DROPLET.hopFwdSpeedFloor) * Math.min(trackSpeed / DOM_PHASE_SPEED, 1)
@@ -1048,8 +1004,8 @@ function scanLoopSplash(t: number) {
     // orbital velocity, which on an overturning face runs forward and
     // over. Normalised — the hop constants set the speed.
     const orb = orbital(a.ax, a.az, t)
-    const thx = tr ? tr.hx : a.hx
-    const thz = tr ? tr.hz : a.hz
+    const thx = tr.hx
+    const thz = tr.hz
     const orbLen = Math.hypot(orb.x, orb.y, orb.z)
     const ox0 = orbLen > 0.01 ? orb.x / orbLen : thx
     const oy0 = orbLen > 0.01 ? orb.y / orbLen : 1
@@ -1209,7 +1165,6 @@ let spumeCursor = 0
 
 function refreshInjectors(t: number) {
   for (const a of loopHeadings) {
-    if (a.chain) continue
     const ease = Math.min(Math.max((a.depth - 0.1) / 0.25, 0), 1)
     if (ease <= 0) continue
     let best: SpumeInjector | null = null

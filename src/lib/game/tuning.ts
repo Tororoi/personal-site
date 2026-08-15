@@ -392,6 +392,13 @@ export const DROPLET = {
    */
   minFroth: 0.2,
   /**
+   * Minimum extent ALONG the crest, metres, for a loop to throw. This
+   * replaces the old neighbour-vote "chain" classification: a genuine
+   * crest line is a connected run with real width, while noise is a
+   * lone sample or a short smear pointing along its own travel.
+   */
+  minLoopLength: 2.5,
+  /**
    * Ceiling on a droplet's radius as a fraction of the froth mass that
    * threw it. Without it the tiniest masses were throwing droplets
    * bigger than themselves.
