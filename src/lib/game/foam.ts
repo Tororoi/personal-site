@@ -26,7 +26,7 @@
  */
 
 import * as THREE from 'three'
-import { FOAM } from './tuning'
+import { ENABLE, FOAM, FROTH } from './tuning'
 import { currentVector } from './current'
 import { waves, wavesGlsl } from './waves'
 
@@ -83,9 +83,9 @@ const DIFFUSION = FOAM.diffusion
  * tails gracefully while new deposits always land at full strength.
  */
 const DECAY_TAU_OLD = FOAM.decayOld
-// Calibrated against a measured storm steady state of ~150 mass units
-// (window.foamMass()): pressure begins above normal-storm load and only
-// saturates at ~2.7x it.
+// Calibrated against measured storm steady state (window.foamMass()):
+// pressure must begin ABOVE normal load, or it just cancels out any new
+// foam source. See the note on FOAM.overloadStart.
 const OVERLOAD_START = FOAM.overloadStart
 const OVERLOAD_FULL = FOAM.overloadFull
 let massEst = 0
@@ -115,6 +115,10 @@ if (typeof window !== 'undefined') {
   ;(window as unknown as Record<string, unknown>).addFoam = addFoam
   // foamMass() reads the capacity estimate — for calibrating OVERLOAD_*.
   ;(window as unknown as Record<string, unknown>).foamMass = () => massEst
+  // Deposits waiting to be injected. The field drains MAX_INJECT per
+  // step, so a number that sits high means deposits are being queued
+  // faster than they can land — and the queue drops its OLDEST first.
+  ;(window as unknown as Record<string, unknown>).foamPending = () => pending.length
 }
 
 const simVertex = `
@@ -141,6 +145,18 @@ vec2 webHash2(vec2 p) {
 	// Periodic in the tile so the texture repeats seamlessly.
 	p = mod(p, ${WEB_TILE_CELLS}.0);
 	return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
+}
+
+/**
+ * One random per CELL, periodic in the tile so it stays seamless. This
+ * is what lets neighbouring cells behave differently: the sim's pocket
+ * noise varies over metres, so every cell inside one pocket shares its
+ * multiplier and they all open and die together — which reads as the
+ * whole area holding on until the last cell has expanded.
+ */
+float webCellRand(vec2 p) {
+	p = mod(p, ${WEB_TILE_CELLS}.0);
+	return fract(sin(dot(p, vec2(45.31, 91.77))) * 24634.6345);
 }
 
 float webSmin(float a, float b, float k) {
@@ -180,7 +196,30 @@ void main() {
 			}
 		}
 	}
-	gl_FragColor = vec4(md, 0.0, 0.0, 1.0);
+	gl_FragColor = vec4(md, webCellRand(n + mg), 0.0, 1.0);
+}`
+
+/**
+ * Smooth value noise, 0-1. Shared by the sim (patchiness) and the water
+ * fragment (the contact collar's edge), because both had reached for a
+ * product of two sines first and both looked wrong the same way: sines
+ * are strictly periodic, so they read as a uniform repeating ripple
+ * rather than as irregularity.
+ */
+export const foamNoiseGlsl = `
+float foamHash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+
+float foamNoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 f = p - i;
+	f = f * f * (3.0 - 2.0 * f);
+	float a = foamHash(i);
+	float b = foamHash(i + vec2(1.0, 0.0));
+	float c = foamHash(i + vec2(0.0, 1.0));
+	float d = foamHash(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }`
 
 const simFragment = `
@@ -200,9 +239,60 @@ uniform float uExtent;
 uniform float uTime;
 uniform float uAmp;
 uniform vec4 uInject[${MAX_INJECT}]; // x, z, sigma, amp
+uniform float uDomAmp;
+uniform sampler2D uWebTex;
 varying vec2 vUv;
 
 ${wavesGlsl()}
+${foamNoiseGlsl}
+
+/**
+ * The Jacobian AND the froth factor from ONE wave sum.
+ *
+ * The froth criterion is the same one the froth masses and the droplet
+ * scan use, so foam laid from it appears exactly where froth appears.
+ * It rides the Jacobian probe the sim already pays for — the pinch
+ * weights reuse the sine that J needs — so the whole froth field costs a
+ * handful of extra accumulators rather than a second wave pass.
+ */
+void frothProbe(vec2 p, float t, float ampScale, out float J, out float sk) {
+	float jxx = 1.0;
+	float jzz = 1.0;
+	float jxz = 0.0;
+	float wAmp = 0.0;
+	float wsum = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 a = uWaveA[i];
+		vec3 b = uWaveB[i];
+		float theta = (p.x * a.x + p.y * a.y) * a.z - a.w * t + b.z;
+		float s = sin(theta);
+		float qak = b.y * b.x * ampScale * a.z;
+		jxx -= qak * a.x * a.x * s;
+		jzz -= qak * a.y * a.y * s;
+		jxz -= qak * a.x * a.y * s;
+		float pw = max(qak * s, 0.0);
+		pw *= pw;
+		wAmp += b.x * pw;
+		wsum += pw;
+	}
+	J = jxx * jzz - jxz * jxz;
+	float ampK = clamp(
+		(wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp,
+		${FROTH.ampRatioFloor.toFixed(3)},
+		1.0
+	);
+	float intK = mix(
+		${FROTH.intFloor.toFixed(3)},
+		1.0,
+		clamp((${FROTH.intJStart.toFixed(3)} - J) / ${FROTH.intJSpan.toFixed(3)}, 0.0, 1.0)
+	);
+	sk = ampK * intK;
+	sk *= 1.0 + ${FROTH.curveBoost.toFixed(3)} * smoothstep(
+		${FROTH.curveStart.toFixed(3)},
+		${FROTH.curveEnd.toFixed(3)},
+		sk
+	);
+}
 
 void main() {
 	vec2 uv = vUv - uShift;
@@ -225,8 +315,13 @@ void main() {
 	// visible radius the probe is skipped and the water treated as calm —
 	// invisible foam out there just decays quietly.
 	float J = 1.0;
-	if (dot(world, world) < 1764.0) J = waveJacobian(world, uTime, uAmp);
-	float turb = 1.0 - smoothstep(${TURB_J_FULL.toFixed(2)}, ${TURB_J_START.toFixed(2)}, J);
+	float frothSk = 0.0;
+	if (dot(world, world) < 1764.0) frothProbe(world, uTime, uAmp, J, frothSk);
+	${
+		ENABLE.turbDissipation
+			? `float turb = 1.0 - smoothstep(${TURB_J_FULL.toFixed(2)}, ${TURB_J_START.toFixed(2)}, J);`
+			: ''
+	}
 	// DORMANT until it has some body: a deposit only starts spreading
 	// (and dying) once it clears growStart. A single droplet's dot would
 	// otherwise diffuse below the render floor before anyone saw it.
@@ -235,7 +330,47 @@ void main() {
 		${FOAM.growFull.toFixed(3)},
 		c
 	);
-	float spreadH = mix(c, avg, uDiffusion * grown);
+	// PATCH CHARACTER. One number per stretch of water, driving both how
+	// fast foam there spreads and how long it lives. Without it every
+	// patch runs the same clock: they all thin at the same rate, so they
+	// all open into web at the same moment and the sea reads as one
+	// uniform lace. Varying the spread means some patches are still solid
+	// while their neighbours have already torn open.
+	//
+	// Anchored in the field's own coordinates rather than carried per
+	// deposit, so a patch drifts slowly through it — the water it sits on
+	// changes character, which is also how the real thing behaves.
+	// NOT named patch: that is a RESERVED WORD in GLSL ES (tessellation
+	// shaders claim it), and using it fails compilation with a bare
+	// "illegal use of reserved word" — which takes the whole foam sim
+	// down, so the field renders nothing at all rather than misbehaving.
+	float pocket = foamNoise(world * ${(1 / FOAM.varyScale).toFixed(4)}) * 0.65
+		+ foamNoise(world * ${(2.3 / FOAM.varyScale).toFixed(4)} + 11.0) * 0.35;
+	// Varies DOWNWARD only. Diffusion is already pinned at its saturation
+	// ceiling (see uDiffusion in step: mixing saturates at ~1 per step),
+	// so there is no "faster" left to ask for — and a mix factor of 1.0
+	// is not fast spreading, it is replacing the texel outright with its
+	// neighbour average, which erases foam within a second. Slow patches
+	// hold together; the rest run at the nominal rate.
+	// PER-CELL stubbornness, read from the SAME random the web render
+	// uses, at the same cell scale and through the same domain warp — so
+	// the cell that holds its thickness here is the cell that draws solid
+	// there. (The warp must match or the two disagree about where one
+	// cell ends, and the effect smears across boundaries.)
+	//
+	// This has to happen in the SIM, not just the render. A render-side
+	// threshold can only reinterpret a shared thickness field, so a
+	// stubborn cell outlives its neighbours by about one time constant
+	// and no more. Varying the decay itself lets one cell still be
+	// holding foam after the ones around it have gone to zero.
+	vec2 wq = world + vec2(
+		sin(world.y * 2.1 + world.x * 0.7),
+		sin(world.x * 1.8 - world.y * 0.8)
+	) * 0.13;
+	float cellRand = texture2D(uWebTex, wq / ${(FOAM.cellFine * WEB_TILE_CELLS).toFixed(2)}).g;
+	float spreadK = mix(1.0, ${(1 - FOAM.varySpread).toFixed(3)}, pocket)
+		* mix(1.0, ${(1 - FOAM.cellSpreadVary).toFixed(3)}, cellRand);
+	float spreadH = mix(c, avg, clamp(uDiffusion * spreadK, 0.0, 1.0) * grown);
 	// Thickness-biased decay (see DECAY_TAU_THIN/THICK): peaks erode
 	// faster than skirts, so mounds flatten into spreading plateaus that
 	// die everywhere at once — expansion is continuous until the fade.
@@ -249,17 +384,30 @@ void main() {
 	// so approaching the budget fades the oldest tails instead of
 	// popping anything or blocking new deposits.
 	retain = mix(retain, min(retain, uDecayOld), uOverload * (1.0 - thickBias));
-	// The sea's own randomness: where the surface is horizontally
-	// COMPRESSED (J < 1) floating foam is squeezed together and persists;
-	// where it is stretched it disperses. Plus slow blobby pockets of
-	// extra persistence, so a few patches expand far past typical and
-	// survive as thick streaks instead of everything fading uniformly.
+	// Where the surface is horizontally COMPRESSED (J < 1) floating foam
+	// is squeezed together and persists; where it is stretched it
+	// disperses.
 	float conv = clamp(1.0 - J, -1.2, 1.2);
-	float pocket = sin(world.x * 0.53 + world.y * 0.31) * sin(world.x * 0.17 - world.y * 0.47 + 2.0);
-	// Biases are small and the cap tight: these stack, and an uncapped
-	// stack once pushed pocket lifetimes toward a minute — the storm
-	// saturated solid white. Max retention here is ~11s-equivalent.
-	retain = min(retain + conv * 0.0012 + pocket * 0.0005, 0.9985);
+	// The cap is tight because these stack, and an uncapped stack once
+	// pushed lifetimes toward a minute — the storm saturated solid white.
+	retain = min(retain + conv * 0.0012, 0.9985);
+	// Lifetime takes the same patch character as the spread. Retention is
+	// per-frame, so an exponent scales the time constant directly:
+	// retain^k is a life of tau/k. Below 1 the patch outlives its
+	// neighbours and stays a thick streak; above 1 it fades early.
+	// Same direction: solid patches outlive the rest, none die early.
+	// Both scales compound: the pocket sets the region's character, the
+	// cell decides which cells within it are the holdouts. The 0.9985 cap
+	// is what stops a stubborn cell living forever — at 30 steps/s it
+	// works out at roughly 20s, against 4-12s for ordinary foam.
+	retain = min(
+		pow(
+			retain,
+			mix(1.0, ${(1 - FOAM.varyLife).toFixed(3)}, pocket)
+				* mix(1.0, ${(1 - FOAM.cellLifeVary).toFixed(3)}, cellRand)
+		),
+		0.9985
+	);
 	// Dormant foam barely decays either — it is waiting to be joined,
 	// not dying. A small residual keeps stray specks from living forever.
 	float dormantRetain = pow(retain, ${FOAM.dormantDecay.toFixed(3)});
@@ -270,14 +418,53 @@ void main() {
 	// uDtScale makes rates WALL-CLOCK true at any framerate.
 	float h = max(
 		spreadH * retain
-			- ${FOAM.evaporation.toFixed(5)} * uDtScale * (1.0 + 5.0 * turb) * grown,
+			- ${FOAM.evaporation.toFixed(5)} * uDtScale * ${
+				ENABLE.turbDissipation ? '(1.0 + 5.0 * turb)' : '1.0'
+			} * grown,
 		0.0
 	);
 
 	// NO in-field crest generation: foam is EMERGENT from spray alone.
-	// Every deposit below entered through a landing droplet; crests read as
-	// breaking because they erupt spray (and their folded polys cull),
-	// and the foam field is simply where that water came back down.
+	// FOAM FROM THE FROTH, laid continuously.
+	//
+	// Breaking water makes foam the whole time it is breaking, so this is
+	// a RATE, not a stamp: every step adds a little wherever the froth
+	// criterion fires. Doing it from the CPU instead meant a batch of
+	// discrete gaussians queued once per scan cycle, and those read
+	// exactly as what they were — patches appearing whole, six frames
+	// apart. Here there is no queue, no per-deposit budget and no burst;
+	// the crest simply paints as it travels, and because it travels, what
+	// it leaves behind is a trail.
+	//
+	// Foam laid under the break is also being evaporated at 6x by the
+	// turb term above, so what survives is the part the crest has already
+	// moved off — which is the wake, and the right answer anyway.
+	// Gate on the froth mass's RADIUS, not on the raw froth factor. The
+	// two are far apart at the low end: a mass's radius is its base size
+	// times the factor times the visibility ramp, so all three collapse
+	// together and the radius falls away much faster than the factor
+	// does. A factor of 0.18 works out at about 0.03m of froth — under
+	// FROTH.cullRadius, i.e. froth that is culled and never drawn. Gating
+	// on the factor was laying foam from breaks that are not on screen.
+	float frothR = ${(FROTH.radiusBase + FROTH.radiusVar * 0.5).toFixed(3)}
+		* min(frothSk, ${FROTH.sizeCap.toFixed(3)})
+		* smoothstep(${FROTH.visStart.toFixed(3)}, ${FROTH.visFull.toFixed(3)}, frothSk);
+	// The response RAMPS UP with size and then, optionally, comes back
+	// down: a plain smoothstep is monotonic, so every knob on it moves
+	// small and large froth together. The rolloff is the only way to take
+	// foam off the biggest breaks while leaving the small ones alone.
+	h += smoothstep(
+		${FOAM.layMinRadius.toFixed(3)},
+		${FOAM.layFullRadius.toFixed(3)},
+		frothR
+	) * (1.0 - ${FOAM.layBigRolloff.toFixed(3)} * smoothstep(
+		${FOAM.layBigStart.toFixed(3)},
+		${FOAM.layBigFull.toFixed(3)},
+		frothR
+	)) * ${FOAM.layRate.toFixed(5)} * uDtScale;
+
+	// Deposits below come from landing droplets: discrete splashes, which
+	// genuinely are point events, unlike the break itself.
 
 	for (int i = 0; i < ${MAX_INJECT}; i++) {
 		vec4 inj = uInject[i];
@@ -327,6 +514,8 @@ export class FoamField {
         uDecay: { value: Math.exp(-1 / (60 * DECAY_TAU_THIN)) },
         uDecayThick: { value: Math.exp(-1 / (60 * DECAY_TAU_THICK)) },
         uDecayTurb: { value: Math.exp(-1 / (60 * DECAY_TAU_TURB)) },
+        uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) },
+        uWebTex: { value: null as THREE.Texture | null },
         uDecayOld: { value: Math.exp(-1 / (60 * DECAY_TAU_OLD)) },
         uOverload: { value: 0 },
         uDiffusion: { value: DIFFUSION },
@@ -375,7 +564,8 @@ export class FoamField {
   private bakeWeb(renderer: THREE.WebGLRenderer) {
     this.webTarget = new THREE.WebGLRenderTarget(WEB_TILE_RES, WEB_TILE_RES, {
       type: THREE.HalfFloatType,
-      format: THREE.RedFormat,
+      // RG, not R: .r is the edge distance, .g the per-cell random.
+      format: THREE.RGFormat,
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       wrapS: THREE.RepeatWrapping,
@@ -408,6 +598,9 @@ export class FoamField {
   ) {
     if (!this.webTarget) this.bakeWeb(renderer)
     const u = this.material.uniforms
+    // The sim reads the web tile for its per-cell random, so it can only
+    // be wired once the bake above has run.
+    if (!u.uWebTex.value && this.webTarget) u.uWebTex.value = this.webTarget.texture
     u.uTime.value = t
     const d = Math.min(Math.max(dt, 0.001), 0.1)
     u.uDecay.value = Math.exp(-d / DECAY_TAU_THIN)
@@ -493,6 +686,7 @@ uniform sampler2D uFoamTex;
 uniform vec2 uFoamCenter;
 uniform float uFoamExtent;
 uniform sampler2D uFoamWebTex;
+${foamNoiseGlsl}
 
 float foamThicknessAt(vec2 rest) {
 	vec2 uv = (rest - uFoamCenter) / uFoamExtent + 0.5;
@@ -501,7 +695,9 @@ float foamThicknessAt(vec2 rest) {
 }
 
 float foamWeb(vec2 worldXZ, float thickness, float jac) {
-	if (thickness < 0.05) return 0.0;
+	// Below any per-cell fade threshold (see fadeK), so the global cut
+	// never pre-empts a stubborn cell's own decision to hold on.
+	if (thickness < 0.02) return 0.0;
 	// Perceived DENSITY is a remap of thickness: near-solid through the
 	// whole top half of the range — fresh foam has NO holes, and a
 	// spreading patch stays dense for most of its growth — then dropping
@@ -530,11 +726,35 @@ float foamWeb(vec2 worldXZ, float thickness, float jac) {
 	// evaluations, which at storm foam coverage was the difference
 	// between 19 and ~50 fps. Two rungs, fine and coarse — the cells
 	// merge and GROW as the foam thins.
-	float dFine = texture2D(uFoamWebTex, q / ${(CELL_FINE * WEB_TILE_CELLS).toFixed(2)}).r;
-	float dCoarse = texture2D(uFoamWebTex, q / ${(CELL_COARSE * WEB_TILE_CELLS).toFixed(2)}).r;
-	float dEdge = mix(dCoarse, dFine, smoothstep(0.1, 0.8 - merge, dens));
-	float halfWidth = dens * ${SOLID_WIDTH.toFixed(2)};
-	// Fade the last hairlines out instead of cutting: the render floor.
-	return smoothstep(halfWidth, halfWidth - 0.09, dEdge) * smoothstep(0.04, 0.09, thickness);
+	vec2 wFine = texture2D(uFoamWebTex, q / ${(CELL_FINE * WEB_TILE_CELLS).toFixed(2)}).rg;
+	vec2 wCoarse = texture2D(uFoamWebTex, q / ${(CELL_COARSE * WEB_TILE_CELLS).toFixed(2)}).rg;
+	// MAXIMUM CELL SIZE, per cell. Cells grow by merging down the ladder
+	// from fine to coarse as the foam thins, so a ceiling on how far a
+	// cell may merge IS a ceiling on how big it gets. A cell held near
+	// the fine rung never becomes a big open cell: its strands just thin
+	// out and it dies at small size.
+	//
+	// Keyed to the COARSE random, because the coarse cell is the merged
+	// cell whose size is being capped. Keying it to the fine random would
+	// vary the ceiling WITHIN one merged cell, so different parts of the
+	// same cell would read from different rungs and its edge network
+	// would come apart.
+	float sizeCeil = mix(${(1 - FOAM.cellMaxSizeVary).toFixed(3)}, 1.0, wCoarse.y);
+	float blend = 1.0 - (1.0 - smoothstep(0.1, 0.8 - merge, dens)) * sizeCeil;
+	float dEdge = mix(wCoarse.x, wFine.x, blend);
+	// PER-CELL character, from the random baked into the tile alongside
+	// the distance field. Each cell decides for itself how solid it stays
+	// and how thin it can get before it goes — so a patch tears open
+	// unevenly and empties cell by cell, instead of every cell in the
+	// area reaching the same stage at the same moment.
+	float cell = mix(wCoarse.y, wFine.y, blend);
+	float halfWidth = dens * ${SOLID_WIDTH.toFixed(2)}
+		* mix(${(1 - FOAM.cellSolidVary).toFixed(3)}, ${(1 + FOAM.cellSolidVary).toFixed(3)}, cell);
+	// The last hairlines fade rather than cut, and the threshold they
+	// fade against is per-cell too: stubborn cells outlast their
+	// neighbours by holding on to thinner foam.
+	float fadeK = mix(${(1 + FOAM.cellFadeVary).toFixed(3)}, ${(1 - FOAM.cellFadeVary).toFixed(3)}, cell);
+	return smoothstep(halfWidth, halfWidth - 0.09, dEdge)
+		* smoothstep(0.04 * fadeK, 0.09 * fadeK, thickness);
 }`
 }

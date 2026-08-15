@@ -361,6 +361,7 @@ function updateLoopTracks(dt: number, t: number) {
   }
 }
 
+
 /** Id -> track, rebuilt each cycle: emission looks one up per point,
  * and a linear search over a few hundred tracks is needless work. */
 const trackIndex = new Map<number, LoopTrack>()
@@ -370,6 +371,7 @@ const trackIndex = new Map<number, LoopTrack>()
  * enough to record, and how many actually cleared every emission gate. */
 export const scanCensus = {
   sampled: 0,
+  skipped: 0,
   recorded: 0,
   emitted: 0,
   blockedFroth: 0,
@@ -834,14 +836,47 @@ let coverScanClock = 0
  * the x range; the last slice classifies and emits.
  */
 const SCAN_SLICES = 6
+const SCAN_COARSE = Math.max(1, Math.round(DROPLET.scanCoarse))
 let scanSlice = 0
 let scanJx = 0
 let scanJz = 0
+
+/**
+ * Cells (in scan-grid coordinates) close enough to a known loop to be
+ * worth sampling at full resolution. Rebuilt once per cycle by
+ * rasterising each track's crest band — a few thousand integer inserts,
+ * against the ocean samples they save.
+ */
+const hotCells = new Set<number>()
+
+function cellKey(ix: number, iz: number) {
+  return (ix + 8192) * 32768 + (iz + 8192)
+}
+
+function markHotCells() {
+  hotCells.clear()
+  const step = LOOP_SCAN_STEP
+  const band = DROPLET.scanBand
+  for (const tr of loopTracks) {
+    // Walk the crest line the track spans, and sweep across it.
+    const ux = -tr.hz
+    const uz = tr.hx
+    const halfLen = Math.max(tr.length, step) * 0.5 + band
+    for (let u = -halfLen; u <= halfLen; u += step) {
+      for (let v = -band; v <= band; v += step) {
+        const x = tr.wx + ux * u + tr.hx * v
+        const z = tr.wz + uz * u + tr.hz * v
+        hotCells.add(cellKey(Math.floor(x / step), Math.floor(z / step)))
+      }
+    }
+  }
+}
 
 function scanLoopSplash(t: number) {
   if (scanSlice === 0) {
     loopHeadings.length = 0
     censusLive.sampled = 0
+    censusLive.skipped = 0
     censusLive.recorded = 0
     censusLive.emitted = 0
     censusLive.blockedFroth = 0
@@ -849,6 +884,7 @@ function scanLoopSplash(t: number) {
     censusLive.blockedPeak = 0
     scanJx = Math.random() * LOOP_SCAN_STEP
     scanJz = Math.random() * LOOP_SCAN_STEP
+    markHotCells()
   }
   const jx = scanJx
   const jz = scanJz
@@ -866,6 +902,17 @@ function scanLoopSplash(t: number) {
       z += LOOP_SCAN_STEP
     ) {
       if (!inView(x, z)) continue
+      // ADAPTIVE: full resolution only near a known loop; elsewhere
+      // every Nth cell, which is enough to catch a new one forming.
+      const ix = Math.floor(x / LOOP_SCAN_STEP)
+      const iz = Math.floor(z / LOOP_SCAN_STEP)
+      const coarse =
+        ((ix % SCAN_COARSE) + SCAN_COARSE) % SCAN_COARSE === 0 &&
+        ((iz % SCAN_COARSE) + SCAN_COARSE) % SCAN_COARSE === 0
+      if (!coarse && !hotCells.has(cellKey(ix, iz))) {
+        censusLive.skipped++
+        continue
+      }
       censusLive.sampled++
       const s1 = sampleOcean(x, z, t, 1, 1)
       if (s1.jacobian > LOOP_J) continue
@@ -924,6 +971,9 @@ function scanLoopSplash(t: number) {
   // `length` — so the vote, its bucket grid and its per-point pass are
   // gone, replaced by one comparison at emission.)
   buildLoopTracks(t)
+  // Aim the trail at its per-cycle budget using LAST cycle's qualifying
+  // count — the current one is not known until the loop below has run,
+  // and the count changes slowly compared to a 0.1s cycle.
   // Emission — from PINK points only. These are the primary crashing
   // particles: pinned to the loop's frame, thrown slightly ahead of it.
   for (const a of loopHeadings) {
@@ -931,11 +981,17 @@ function scanLoopSplash(t: number) {
     // relative to the advancing loop: droplets inherit the surface's
     // upward velocity so the wave can't climb over its own spray.
     const rise = surfaceRise(a.ax, a.az, t)
-
-    if (!ENABLE.splashDroplets) continue
-    // Gate on the FROTH criterion: droplets are torn off froth masses,
-    // so a break that grows no froth should throw no droplets either.
+    // Shared by the foam trail and the droplets: how much froth this
+    // point grows, and which persistent loop it belongs to.
     const sk = frothFactor(a.ax, a.az, t, a.jacobian)
+    const tr = a.track >= 0 ? trackIndex.get(a.track) : undefined
+
+    // FOAM TRAIL. The break lays foam itself, rather than waiting for a
+    // droplet to land and leave a dot. Anchored in REST coordinates like
+    // every other deposit — ax/az already ARE the rest anchor, so unlike
+    // a landing this needs no inversion — and set down slightly behind
+    // the crest, which then advances away and leaves it as a wake.
+    if (!ENABLE.splashDroplets) continue
     // Stricter than the froth's own visibility threshold: a faint smear
     // of froth is fine to look at but has nothing to throw.
     if (sk < DROPLET.minFroth) {
@@ -957,7 +1013,6 @@ function scanLoopSplash(t: number) {
     // is a lone point or a short smear), and the smoothed heading and
     // speed — per-sample values jitter with the scan grid, the loop
     // itself does not.
-    const tr = a.track >= 0 ? trackIndex.get(a.track) : undefined
     if (!tr || tr.length < DROPLET.minLoopLength) continue
     const trackSpeed = tr.speed
     const speedK =
@@ -1429,7 +1484,10 @@ export function updateSpray(dt: number, t: number) {
         if (p.loop && Math.random() < 0.5) {
           queueMistSplat(p.x, p.z, 0.05, 0, 0, 0.6)
         }
-        if (!p.impact) {
+        if (!ENABLE.dropletFoam) {
+          // Attribution switch only — the ripple and mist above still
+          // happen, so landings look the same minus their foam.
+        } else if (!p.impact) {
           // Foam's ONLY source now — the field is emergent from landings.
           // Sigma floor: the field's texel is ~0.2m, and a sub-texel dot
           // dies to one diffusion pass no matter how slow the clocks are.

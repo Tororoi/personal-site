@@ -23,9 +23,10 @@
 		sprayParticles,
 		updateSpray
 	} from './spray';
+	import { currentVector } from './current';
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
-	import { DROPLET, ENABLE, f, FOAM, FROTH, LOOP, MIST, PLUME } from './tuning';
+	import { CONTACT, DROPLET, ENABLE, f, FOAM, FROTH, LOOP, MIST, PLUME } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
@@ -64,6 +65,20 @@
 	// elevation — the old flat 4m margin let storm seas reveal unrendered
 	// corners.
 	const SWAY_BOUND = waves.reduce((sum, w) => sum + w.q * w.amp, 0);
+	/**
+	 * How foamy this sea is, 0-1, from the preset's CHOP. Chop is what
+	 * drives crests into breaking, and breaking is what makes foam, so it
+	 * separates a big smooth swell from a genuinely frothy sea the way
+	 * wave height cannot. Sets the contact collar's width.
+	 */
+	const CONTACT_FOAMINESS = Math.min(
+		Math.max(
+			(activeField.chop - CONTACT.chopStart) / (CONTACT.chopFull - CONTACT.chopStart),
+			0
+		),
+		1
+	);
+
 	const EDGE_MARGIN = 2 + SWAY_BOUND + 3.2 * significantAmplitude;
 	function buildWaterGeometry() {
 		const size =
@@ -233,6 +248,9 @@
 		// Persistent foam field (foam.ts): the thickness texture, sampled
 		// at REST coordinates; re-pointed each frame after the sim step.
 		uFoamTex: { value: null as THREE.Texture | null },
+		/** Wind+current carry, m/s, the SAME combination the foam field is
+		 * advected by — so the collar leans the way drifting foam goes. */
+		uContactDrift: { value: new THREE.Vector2() },
 		uFoamCenter: { value: new THREE.Vector2(0, 0) },
 		uFoamExtent: { value: FOAM_EXTENT },
 		// Baked tiling web-skeleton distance field (set after first bake).
@@ -244,6 +262,20 @@
 	// The visible ocean "floor" depth; also the miss plane of the water's
 	// underwater raytrace.
 	const BACKDROP_DEPTH = 10;
+
+	// The reconstructed fold ramps: a max() over whichever of the three
+	// claims are switched on, emitted as source so a disabled term costs
+	// nothing. Shared by the vertex estimate and the fragment refinement
+	// so the two can never disagree about which terms are in play.
+	const rampWhiteGlsl = (jac: string, tilt: string, stretch: string | null) => {
+		const terms: string[] = [];
+		if (LOOP.whiteFromJ) terms.push(`1.0 - smoothstep(0.0, ${f(LOOP.whiteJRamp)}, ${jac})`);
+		if (LOOP.whiteFromTilt)
+			terms.push(`1.0 - smoothstep(${f(LOOP.whiteTiltStart)}, ${f(LOOP.whiteTiltFull)}, ${tilt})`);
+		if (stretch !== null && LOOP.whiteFromStretch) terms.push(stretch);
+		if (terms.length === 0) return '0.0';
+		return terms.reduce((a, b) => `max(${a}, ${b})`);
+	};
 
 	// Wet-side receiver shading, shared VERBATIM by the water's raytraced
 	// underwater view and the sphere mesh's submerged branch: one tuning
@@ -357,6 +389,8 @@ varying vec2 vRest;
 varying vec2 vSlope;
 varying float vOverhang;
 uniform float uDomAmp;
+uniform vec2 uContactDrift;
+varying float vLoopSk;
 varying float vPinchWhite;
 varying float vViewZ;
 varying float vJacobian;
@@ -376,7 +410,7 @@ ${foamGlsl()}
 ${ripplesGlsl()}
 ${wavesGlsl()}
 
-// Exact loop mask at FRAGMENT resolution (see the gate in main): one
+// The fold ramps at FRAGMENT resolution (see the gate in main): one
 // tangent loop yields both tests — the unnormalized Na.y IS the
 // horizontal Jacobian determinant, and Na.y/|Na| is the tilt.
 float pinchMask(vec2 restXZ) {
@@ -415,10 +449,127 @@ float pinchMask(vec2 restXZ) {
 	float sk = ampK * intK;
 	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
 	float vis = smoothstep(0.1, 0.16, sk);
-	return max(
-		max(1.0 - smoothstep(0.0, 0.04, Na.y), 1.0 - smoothstep(0.02, 0.12, ny)),
-		1.0 - smoothstep(0.0, 0.3, Na.y)
-	) * vis;
+	return ${rampWhiteGlsl(
+		'Na.y',
+		'ny',
+		`1.0 - smoothstep(0.0, ${f(LOOP.stretchJRamp)}, Na.y)`
+	)} * vis;
+}
+
+/**
+ * CONTACT FOAM: the collar where the surface meets a solid.
+ *
+ * Measured per pixel against each object's SILHOUETTE AT THIS FRAGMENT'S
+ * OWN HEIGHT, which is what makes it track the waterline for free. There
+ * is no waterline to find and nothing to update as the waves pass: the
+ * fragment is already on the surface, so asking "how far am I from the
+ * object, at my height" answers it directly, and the collar climbs and
+ * falls with the swell.
+ *
+ * Wholly analytic, so it cannot drift, diffuse or decay the way the foam
+ * FIELD does — it simply exists wherever an object is at the surface.
+ */
+float contactFoam(vec3 P) {
+	// Carry direction and strength, normalised against the speed at which
+	// the lean is considered full.
+	float driftSpd = length(uContactDrift);
+	vec2 driftDir = driftSpd > 0.001 ? uContactDrift / driftSpd : vec2(0.0);
+	float driftK = min(driftSpd / ${f(CONTACT.driftFull)}, 1.0);
+	// Width wobbles so the collar is not a clean geometric ring. Two
+	// octaves of value noise, NOT a product of sines: sines are strictly
+	// periodic, so the edge came out with one wavelength and one
+	// amplitude everywhere — uniformly wavy, which reads as a machined
+	// edge rather than a ragged one.
+	float wob = foamNoise(P.xz * ${f(1 / CONTACT.wobbleScale)}) * 0.6
+		+ foamNoise(P.xz * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
+	float w = ${f(CONTACT.width * CONTACT_FOAMINESS)}
+		* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
+	float m = 0.0;
+	// TWO ways water touches a solid, and the collar needs both. Asking
+	// only whether the surface sits between the object's top and bottom
+	// fails the moment a wave washes over the crown: the test goes to
+	// zero and plain water draws straight across where the foam was,
+	// which is what reads as the surface overlapping the foam.
+	//
+	//  BESIDE — water alongside the object, out to w past the
+	//    silhouette AT THIS FRAGMENT'S HEIGHT. This is the waterline
+	//    collar, and it tracks up and down the object for free.
+	//  OVER — water covering the object, faded by how DEEP it is over
+	//    the object's surface at this exact spot. Depth to the surface
+	//    below, not height above the crown: the crown is one point, and
+	//    measuring from it says nothing about the water a few metres out.
+	//
+	// Widening the silhouette to the whole footprint when submerged (the
+	// previous attempt) is only defensible for something buoy-sized. On
+	// the 5m sphere it painted a 10m disc of foam.
+	float rXZ = length(P.xz - SPHERE_C.xz);
+	if (rXZ < SPHERE_R + w) {
+		float dy = P.y - SPHERE_C.y;
+		// Beside: the circle the surface actually cuts at this height.
+		float ring = sqrt(max(SPHERE_R * SPHERE_R - dy * dy, 0.0));
+		// Wider downstream: the collar is carried off the object the same
+		// way the field's foam is, so it trails rather than ringing evenly.
+		float lee = max(dot(normalize(P.xz - SPHERE_C.xz + vec2(1e-5)), driftDir), 0.0);
+		float ws = w * (1.0 + ${f(CONTACT.driftStretch)} * driftK * lee);
+		float beside = 1.0 - smoothstep(ws * ${f(1 - CONTACT.soft)}, ws, max(rXZ - ring, 0.0));
+		// Over: the sphere's upper surface directly beneath this point.
+		float rc = min(rXZ, SPHERE_R);
+		float topY = SPHERE_C.y + sqrt(max(SPHERE_R * SPHERE_R - rc * rc, 0.0));
+		float over = pow(
+			1.0 - smoothstep(0.0, ${f(CONTACT.overwash)}, max(P.y - topY, 0.0)),
+			${f(CONTACT.submergeBias)}
+		) * step(rXZ, SPHERE_R);
+		m = max(m, max(beside, over));
+	}
+	// BUOYS: 2D signed distance to the box footprint in the box's own
+	// frame. The transform is rigid, so local distance is world metres.
+	// A box has constant cross-section, so "over" is just the depth past
+	// its top face, and "beside" its constant footprint.
+	for (int i = 0; i < 3; i++) {
+		vec3 lp = (uBuoyInv[i] * vec4(P, 1.0)).xyz;
+		// HORIZONTAL FIRST. A box has a height-independent footprint, so
+		// this 2D signed distance is the whole question of whether the
+		// water is against the buoy — the same shape of test the foam
+		// FIELD uses, which is why the field never tears around ripples.
+		vec2 q = abs(lp.xz) - BUOY_HALF.xz;
+		float d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+		if (d > w) continue;
+		// VERTICAL SECOND, and only to set how far the foam SPREADS.
+		//
+		// Every previous version used height as a gate — deck face, side
+		// face, over/beside — and each one left a band where a fragment
+		// was plainly against the buoy yet satisfied no case, so it
+		// painted nothing and drew plain water over the collar behind it.
+		// The buoys ring themselves with ripples, so there is always such
+		// a fragment somewhere on the rim, which is why this shows on
+		// them and not on the static sphere.
+		//
+		// So the height no longer decides IF, only HOW WIDE. It is read
+		// coarsely: a broad falloff above the deck as the buoy goes
+		// under, a fast one below the keel where a lifted hull genuinely
+		// is not touching the water. The spread narrows toward
+		// spreadFloor rather than to nothing, so the collar thins to a
+		// line at the hull instead of tearing a hole in itself.
+		// The exponent is the SUBMERGE RESPONSE and overwash is the
+		// REACH. They have to stay separate: the reach must stay generous
+		// or fragments near the hull fall outside it entirely and tear a
+		// hole in the collar again, but the response can drop off as fast
+		// as wanted inside that reach.
+		float vk = pow(
+			1.0 - smoothstep(0.0, ${f(CONTACT.overwash)}, max(lp.y - BUOY_HALF.y, 0.0)),
+			${f(CONTACT.submergeBias)}
+		) * (1.0 - smoothstep(0.0, ${f(CONTACT.liftFade)}, max(-BUOY_HALF.y - lp.y, 0.0)));
+		// Same downstream stretch as the sphere. The box is rotated, so
+		// carry the DRIFT into its frame rather than trying to recover the
+		// buoy's world centre: the transform is rigid, so rotating the
+		// direction by it (w = 0, no translation) is exact.
+		vec2 driftLocal = (uBuoyInv[i] * vec4(driftDir.x, 0.0, driftDir.y, 0.0)).xz;
+		float lee = max(dot(normalize(lp.xz + vec2(1e-5)), driftLocal), 0.0);
+		float wEff = w * mix(${f(CONTACT.spreadFloor)}, 1.0, vk)
+			* (1.0 + ${f(CONTACT.driftStretch)} * driftK * lee);
+		m = max(m, (1.0 - smoothstep(wEff * ${f(1 - CONTACT.soft)}, wEff, max(d, 0.0))) * vk);
+	}
+	return m;
 }
 
 // Ray vs a buoy's oriented box: slab test in the box's local frame.
@@ -530,14 +681,58 @@ void main() {
 	//    sky-facing colour and matches them exactly.
 	//  - the persistent foam FIELD lies on the water, so it keeps the
 	//    per-pixel wave normal and the relief that comes with it.
-	float loopWhite = ${ENABLE.loopWhite ? 'vPinchWhite' : '0.0'};
-	if (loopWhite > 0.01 && loopWhite < 0.99) loopWhite = pinchMask(vRest);
-	float fieldFoam = ${ENABLE.foamField ? 'foamWeb(vRest, foamThicknessAt(vRest), vJacobian)' : '0.0'};
+	// THE LOOP IS THE BACKFACE. Where a Gerstner crest overturns, the
+	// rest -> world map inverts and the mesh's winding flips with it, so
+	// the water you can see inside a breaking loop is literally the
+	// underside of the sheet. The rasteriser already knows this per
+	// pixel and for free.
+	//
+	// Everything before this asked the wave field to describe that
+	// region second-hand — Jacobian ramps, froth factors, distance
+	// fields, tracked loops — and every one of them was either too
+	// narrow, too eager on unbroken swell, or (once loop tracking got
+	// involved) flickery, because the answer was being reconstructed
+	// frame by frame from a re-jittering scan. gl_FrontFacing is the
+	// same fact, exact, stable and with no state at all behind it.
+	// EXACT: the inverted sheet itself, straight off the rasteriser.
+	float backface = ${ENABLE.loopWhite ? `(gl_FrontFacing ? 0.0 : 1.0) * ${f(LOOP.backfaceWhite)}` : '0.0'};
+	// RECONSTRUCTED: the Jacobian and overhang ramps. Refined per pixel
+	// only where the vertex estimate lands mid-ramp — a whole extra wave
+	// pass is not worth paying on water that is plainly one or the other.
+	float ramps = ${ENABLE.loopWhite ? 'vPinchWhite' : '0.0'};
+	if (ramps > 0.01 && ramps < 0.99) ramps = pinchMask(vRest);
+	// The thin gate applies to the RAMPS only. The backface is not an
+	// estimate that can be wrong about a hairline — it is the sheet.
+	float thin = ${
+		LOOP.thinSk > 0
+			? `1.0 - smoothstep(${f(LOOP.thinSk * 0.75)}, ${f(LOOP.thinSk)}, vLoopSk)`
+			: '0.0'
+	};
+	ramps *= (1.0 - thin) * ${f(LOOP.rampWhite)};
+	float loopWhite = max(backface, ramps);
+	// The two foams stay separate SUBSTANCES — the collar never enters
+	// the field, so it cannot drift, diffuse, decay or be governed by the
+	// field's mass budget — but they share one SKELETON. Feeding the
+	// collar's strength in as a thickness means a collar thinning out
+	// (object going under, footprint shrinking) tears into the same lace
+	// the field does, opening cell by cell with the same per-cell
+	// character, instead of simply dimming. Taking the max rather than
+	// summing also means one web where they overlap, not two drawn over
+	// each other.
+	float fieldT = ${ENABLE.foamField ? 'foamThicknessAt(vRest)' : '0.0'};
+	float contactT = ${
+		ENABLE.contactFoam ? `contactFoam(vWorld) * ${f(CONTACT.alpha)}` : '0.0'
+	};
+	float foamAmt = foamWeb(vRest, max(fieldT, contactT), vJacobian);
 	vec3 foamN = normalize(vec3(-slope.x, 1.0, -slope.y));
 	vec3 foamLit = whitewaterLight(uFoamColor, foamN, ${f(1 - FOAM.shapeFloor)});
 	vec3 flatLit = whitewaterLight(uFoamColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
-	col = mix(col, foamLit, fieldFoam);
-	col = mix(col, flatLit, loopWhite);
+	col = mix(col, foamLit, foamAmt);
+	${
+		LOOP.debugThin
+			? 'col = mix(col, mix(flatLit, vec3(0.95, 0.15, 0.1), thin), max(backface, vPinchWhite));'
+			: 'col = mix(col, flatLit, loopWhite);'
+	}
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
 	col = mix(col, uFogColor, fog);
@@ -567,6 +762,7 @@ varying vec3 vWorld;
 varying vec2 vRest;
 varying vec2 vSlope;
 varying float vOverhang;
+varying float vLoopSk;
 varying float vPinchWhite;
 
 ${wavesGlsl()}
@@ -636,14 +832,6 @@ void main() {
 	// Raw Na.y would be wrong here: unnormalized, it IS approximately
 	// the Jacobian determinant again.
 	vOverhang = Na.y / max(length(Na), 0.0001);
-	// Wider J ramp: whiteness now BLEEDS onto the compressed crest tops
-	// just below a loop (J approaching collapse), fading in from 0.2 so
-	// the froth cap grows out of the wave instead of appearing only at
-	// the exact fold.
-	vPinchWhite = max(
-		1.0 - smoothstep(0.0, 0.04, vJacobian),
-		1.0 - smoothstep(0.02, 0.12, vOverhang)
-	);
 	// STRETCH the pinched loop toward the foam sprite centers: the flat
 	// discs depth-test at their centers ~0.8r behind the surface along
 	// -normal, and the sheet in front of that plane showed as a dark
@@ -661,6 +849,11 @@ void main() {
 	// narrow 0.1-0.16 ramp only smooths the on/off boundary; the
 	// sprites keep their own wider size-ease ramp).
 	float vis = smoothstep(0.1, 0.16, sk);
+	vLoopSk = sk;
+	// The fold's own ramps: sharp, and saturated at a real fold. A
+	// coarse per-vertex estimate — the fragment refines it through
+	// pinchMask wherever it lands mid-ramp.
+	vPinchWhite = ${rampWhiteGlsl('vJacobian', 'vOverhang', null)};
 	float stretchGate = ${ENABLE.loopStretch ? `(1.0 - smoothstep(0.0, ${f(LOOP.stretchJRamp)}, vJacobian)) * vis` : '0.0'};
 	if (stretchGate > 0.001) {
 		// Pull by 0.8 x the reconstructed local sprite radius, along a
@@ -673,10 +866,24 @@ void main() {
 		vec3 pullDir = normalize(vec3(-hd.x * ${f(LOOP.stretchBack)}, -${f(LOOP.stretchDown)}, -hd.y * ${f(LOOP.stretchBack)}));
 		p += pullDir * (frothR * ${f(LOOP.stretchDepth)} * stretchGate);
 	}
-	// The stretched region must BE white (it exists to cover the wedge);
-	// the whole mask is gated by the shared criterion. Fragment twin
-	// carries the same terms.
-	vPinchWhite = max(vPinchWhite, stretchGate) * vis;
+	vPinchWhite = ${LOOP.whiteFromStretch ? 'max(vPinchWhite, stretchGate)' : 'vPinchWhite'} * vis;
+	// SPREAD: extend the white outward from thick loops.
+	//
+	// Widening the J threshold cannot do this, which is why the earlier
+	// attempt saturated and then started painting flat water. The white
+	// was foldTest * vis, and vis gates on the LOCAL froth factor -- so
+	// no matter how wide the J window opened, the paint stopped dead at
+	// the sk = 0.1 contour, and inside that contour it eventually filled
+	// everything, peak or not. Worse, the widening keyed off the same
+	// vertex's sk, and the vertices we want to newly whiten are exactly
+	// the ones whose sk is low. It could never reach past itself.
+	//
+	// So measure distance instead. J is smooth and crosses zero AT the
+	// fold, so to first order the distance from here to the nearest fold
+	// line is J / |grad J| — in metres, from the gradient accumulated
+	// above. Points far from any fold are excluded by construction,
+	// which is what keeps flat water dark.
+
 	// Sample ripples at the DISPLACED position: Gerstner slides vertices
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
@@ -1644,6 +1851,15 @@ void main() {
 			updateViewQuad();
 			const wind = windVector(waveTime);
 			waterUniforms.uWind.value.set(wind.x, wind.z);
+			// The collar leans downstream on the same carry the foam field
+			// drifts on, so the two agree about which way the water goes.
+			{
+				const cur = currentVector(waveTime);
+				waterUniforms.uContactDrift.value.set(
+					wind.x * FOAM.drift + cur.x * FOAM.currentCarry,
+					wind.z * FOAM.drift + cur.z * FOAM.currentCarry
+				);
+			}
 			waterUniforms.uWindTravel.value.set(windTravel.x, windTravel.z);
 
 			// Mirror the event array into the shader uniforms.

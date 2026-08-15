@@ -35,6 +35,24 @@ export const ENABLE = {
   buoySpray: true,
   /** Persistent foam residue field (deposits from landings). */
   foamField: true,
+  /** Continuous foam laid by the sim wherever froth appears. */
+  foamTrail: true,
+  /** Static foam collar where the surface meets a solid. */
+  contactFoam: true,
+  /**
+   * Turbulence-scaled EVAPORATION: breaking water thinning the foam
+   * floating on it, at up to 6x the calm rate. Switch off to see foam
+   * survive the break that made it.
+   *
+   * Note this is dissipation, not spreading — how fast a patch grows
+   * outward is FOAM.diffusion, and its lifetime is decayThin/decayThick.
+   * (The turbulence DECAY channel is already gone: it used to shred
+   * every droplet deposit in its own landing zone.)
+   */
+  turbDissipation: true,
+  /** Foam left by landing droplets. Switch OFF to see the crest trail
+   * on its own — the two sources are otherwise hard to tell apart. */
+  dropletFoam: true,
   /** 2D fluid mist field and its overlay. */
   mist: false,
   /** Downslope gusts shaping the mist. */
@@ -236,11 +254,66 @@ export const PLUME = {
  * hides the fold's leading sliver.
  */
 export const LOOP = {
+  /**
+   * WHITENESS comes from two independent claims, combined with max().
+   * Both are live; weight them to taste.
+   *
+   *  - BACKFACE. The loop IS the mesh's backface: where a crest
+   *    overturns, the rest -> world map inverts and the winding flips
+   *    with it, so gl_FrontFacing reports the inverted sheet per pixel,
+   *    exactly and with no state to flicker. Its limit is that it only
+   *    covers what the camera can actually see of that sheet, which
+   *    from this angle is a sliver along each crest — most of it hides
+   *    behind the lip overhanging it.
+   *
+   *  - FOLD RAMPS. The Jacobian and overhang reconstruction: an
+   *    estimate rather than the thing itself, but it reaches out from
+   *    the seam into the compressed water around it, so it is what
+   *    widens the read past the sliver.
+   */
+  /** Weight of the exact backface term, 0-1. */
+  backfaceWhite: 1.0,
+  /** Weight of the reconstructed fold-ramp term, 0-1. */
+  rampWhite: 1.0,
+
+  /**
+   * The ramp term is a max() of three separate claims. Switch any of
+   * them out to see what it was contributing — the term is dropped from
+   * the shader source rather than scaled to zero.
+   *
+   * Do NOT try to disable one by zeroing its ramp instead. smoothstep
+   * is undefined when its edges are equal (it divides by their
+   * difference), so a zeroed ramp does not switch its term off — it
+   * makes it unpredictable, and in practice it returns 1.0 everywhere,
+   * which paints MORE white rather than none.
+   */
+  whiteFromJ: false,
+  whiteFromTilt: true,
+  whiteFromStretch: true,
+  // Measured, storm preset, one frozen frame, against backface-only:
+  // the J ramp alone adds 7.5% more white, but adds NOTHING on top of
+  // the stretch term — at 0.04 against the stretch's 0.3 it is
+  // subsumed, since 1-smoothstep(0, 0.3, J) is the larger of the two
+  // everywhere and the max() never picks it. Widen whiteJRamp past
+  // stretchJRamp before expecting it to show.
+
   /** Jacobian ramp for whiteness (0 = fully white at collapse). */
   whiteJRamp: 0.04,
   /** Overhang (normalised normal y) ramp for the rolling tongue. */
   whiteTiltStart: 0.02,
   whiteTiltFull: 0.12,
+
+  /**
+   * THIN LOOPS. A loop formed by a small wave is a hairline: it whitens
+   * a sliver of surface and reads as a scratch rather than a break.
+   * Loops whose froth factor falls below this are held back — from the
+   * RAMP term only; the backface term is exact and is never gated.
+   * While `debugThin` is on they render RED instead of being dropped.
+   * Set to 0 to disable the gate entirely — that one IS handled as a
+   * special case rather than as a degenerate smoothstep.
+   */
+  thinSk: 0.21,
+  debugThin: false,
 
   /** Stretch gate: how far ahead of collapse the pull begins. */
   stretchJRamp: 0.3,
@@ -255,6 +328,102 @@ export const LOOP = {
   /** Near-binary gate: pinches below the sprite criterion stay dark. */
   gateStart: 0.1,
   gateFull: 0.16,
+} as const
+
+/**
+ * CONTACT FOAM — the collar of foam where the water surface meets a
+ * solid: the buoys and the sphere.
+ *
+ * A separate substance from the foam FIELD, and deliberately so. The
+ * field is a simulation — it drifts, diffuses, decays and is governed by
+ * a mass budget — and none of that is right here. This foam is pinned to
+ * the object, does not spread, and does not fade while the object is at
+ * the surface, because it is not stored anywhere: it is evaluated
+ * analytically from the object's position every frame. The two never
+ * mix, since this one has no state to mix with.
+ *
+ * The collar is found per pixel rather than as a ring at a fixed
+ * waterline, so it tracks the surface up and down the object as the
+ * waves pass, with no waterline to compute.
+ */
+export const CONTACT = {
+  /** Collar width in metres at full foaminess. */
+  width: 0.55,
+  /**
+   * Foaminess comes from the preset's CHOP, not its wave height. Chop is
+   * what makes crests break, and breaking is what makes foam — a big
+   * smooth swell is tall without being foamy, so amplitude would have
+   * given largeSwell a thick collar for the wrong reason.
+   *
+   * Against the presets: calm 0.55 -> nothing, largeSwell 2.25 -> about
+   * a third width, storm 5 -> full.
+   */
+  chopStart: 1,
+  chopFull: 5,
+  /** Opacity of the collar at its base. */
+  alpha: 0.95,
+  /**
+   * How DEEP water can lie over an object and still foam, metres,
+   * measured to the object's surface directly below each point — not to
+   * its highest point. That distinction matters on anything large: the
+   * crown is a single point, and its height says nothing about the water
+   * a few metres out along the flank.
+   *
+   * Without this the collar exists only while the surface is between the
+   * object's top and bottom, so a wave washing over it erases the foam
+   * and the surface appears to overlap it.
+   */
+  overwash: 0.9,
+  /**
+   * SUBMERGE RESPONSE: how readily white still shows once an object is
+   * under. An exponent on the overwash falloff, so it shapes the curve
+   * without shortening its reach.
+   *
+   *   1   = the plain falloff, white lingers well down
+   *   2   = gone about twice as fast for the same depth
+   *   3-4 = only the shallowest cover still foams
+   *
+   * Deliberately separate from `overwash`. That sets the REACH, and the
+   * reach has to stay generous — shortening it puts fragments near the
+   * hull outside every case, and they paint nothing and tear a hole in
+   * the collar, which was the original bug. Shape the response here and
+   * leave the reach alone.
+   */
+  submergeBias: 2,
+  /**
+   * Narrowest the collar gets, as a fraction of `width`, when an object
+   * is at the limit of overwash. Not 0: the vertical reading is coarse
+   * on purpose, and a spread that collapses to nothing would put the
+   * gate back in through the side door — the collar has to thin to a
+   * line at the hull rather than tear a hole in itself.
+   */
+  spreadFloor: 0.25,
+  /** How quickly the collar drops away below an object lifted clear of
+   * the water, metres. Short: a hull out of the water is not touching
+   * it, and unlike overwash there is nothing there to keep foaming. */
+  liftFade: 0.08,
+  /**
+   * DOWNSTREAM STRETCH. The collar widens on the lee side, along the
+   * same wind-plus-current carry the foam FIELD is advected by, so foam
+   * leaving an object goes the way all the other foam goes instead of
+   * ringing it evenly. 0.6 = half again as wide directly downstream.
+   */
+  driftStretch: 0.6,
+  /** Carry speed, m/s, at which the stretch is fully applied. */
+  driftFull: 1.2,
+  /** Width wobble, as a fraction, so the collar is not a clean ring. */
+  wobble: 0.3,
+  /** Wobble wavelength, metres — the size of one bulge in the edge.
+   * A second octave at ~1/2.7 of it breaks up the larger one. */
+  wobbleScale: 2.5,
+  /**
+   * Softness of the outer edge, as a fraction of the width. The fade
+   * runs from `width * (1 - soft)` out to `width`, so 0.55 spent over
+   * half the collar fading and left it looking like a glow; low values
+   * keep the collar solid to a crisp rim. Not 0 — that aliases badly
+   * against a curved silhouette.
+   */
+  soft: 0.35,
 } as const
 
 /**
@@ -346,6 +515,16 @@ export const DROPLET = {
    * small and mid-sized froth mass was silently unable to throw.
    */
   scanJ: 0.45,
+  /**
+   * ADAPTIVE SCANNING. Flat water is sampled at scanStep x this factor
+   * — enough to notice a new loop forming — while the neighbourhood of
+   * every known track is sampled at the full step. Most of a scan's
+   * samples land on water that cannot pinch; tracks say where the
+   * pinches are, so the fine grid can follow them.
+   */
+  scanCoarse: 3,
+  /** Half-width of the fine band around a track, metres. */
+  scanBand: 4,
   /**
    * How far the froth's emergence gate must be open before a mass
    * throws (0 = the instant it appears, 1 = fully overturned). The old
@@ -477,15 +656,152 @@ export const DROPLET = {
  * Decay clocks are exponential time constants in seconds.
  */
 export const FOAM = {
+  /**
+   * FOAM FROM THE FROTH — laid continuously by the sim, not stamped.
+   *
+   * Breaking water makes foam for as long as it is breaking, so this is
+   * a rate rather than a set of deposits. The sim already evaluates the
+   * wave field per texel for its turbulence probe, so it evaluates the
+   * froth criterion in the same loop and adds foam wherever that fires.
+   *
+   * The CPU alternative — queueing gaussian deposits from the loop scan
+   * — was tried and removed. It could only fire once per scan cycle, so
+   * however the budget was spread it arrived as a batch of discrete
+   * blobs every six frames, which read as patches appearing whole. It
+   * was also capped by the field's 24-deposits-per-step drain, and by
+   * the mass governor below, which quietly cancelled it.
+   *
+   * Foam laid directly under a break is evaporated at 6x by `turb`, so
+   * what survives is what the crest has already moved off. That is the
+   * trail, and it needs no explicit offset behind the wave.
+   */
+  /**
+   * MINIMUM FROTH SIZE that lays foam, and the size at which laydown
+   * reaches full rate — both the froth mass's RADIUS in metres, not its
+   * size factor.
+   *
+   * Radius is the honest measure of "how big is this froth", because a
+   * mass's radius is its base size times the size factor times the
+   * visibility ramp: all three collapse together at the low end, so the
+   * radius falls away far faster than the factor. Some worked values,
+   * with the froth's mean 1.08m base:
+   *
+   *   factor 0.18 -> 0.03m   (below FROTH.cullRadius: never drawn)
+   *   factor 0.25 -> 0.12m
+   *   factor 0.30 -> 0.22m
+   *   factor 0.35 -> 0.33m   (about the largest the storm produces)
+   *
+   * So gating on the factor at 0.18, as this did first, was laying foam
+   * from froth too small to exist. Anything below FROTH.cullRadius is
+   * invisible froth by definition and should never lay anything.
+   */
+  /**
+   * BIG-FROTH ROLLOFF: how much laydown to take back off the LARGEST
+   * breaks, 0-1, without touching the small ones.
+   *
+   * The laydown ramp is monotonic in froth size, so on its own every
+   * knob on it moves small and large together — raising layMinRadius
+   * cuts the small end, raising layFullRadius drags the middle down with
+   * the top. This subtracts from the top end only: 0 leaves the response
+   * exactly as it was, 0.5 halves the rate on the biggest froth, 1 takes
+   * it to nothing while froth below `layBigStart` is untouched.
+   *
+   * Note this scales the rate PER TEXEL. A big break also covers more
+   * texels, so its total contribution still grows with size — to flatten
+   * total foam across sizes rather than just the rate, this has to go
+   * fairly high.
+   */
+  layBigRolloff: 0.1,
+  /** Froth radius where the rolloff begins and where it is fully
+   * applied. Keep `layBigStart` at or above `layFullRadius`, or the
+   * rolloff eats into the mid sizes it is meant to spare. */
+  layBigStart: 0.18,
+  layBigFull: 0.4,
+
+  layMinRadius: 0.03,
+  layFullRadius: 0.15,
+  /**
+   * Thickness added per 1/60s at full froth. The field saturates at 1.0
+   * and the sim steps every other frame, so the laydown at full rate is
+   * about 60x this per second: 0.012 fills a texel in roughly 1.4s of
+   * continuous froth cover, and a crest passes over in well under that.
+   */
+  layRate: 0.012,
+
   /** Thin foam's lifetime, s (the long linger). */
-  decayThin: 12,
+  decayThin: 8,
   /** Thick foam's, s: peaks erode faster so mounds flatten. */
-  decayThick: 4,
+  decayThick: 2,
   /** Turbulence window on the Jacobian probe. */
   turbJStart: 0.28,
   turbJFull: -0.15,
   /** Spread rate: AREA growth, not decay, is the main thinning force. */
   diffusion: 0.88,
+  /**
+   * PATCHINESS. One noise value per stretch of water sets both how fast
+   * foam there spreads and how long it lasts, so patches do not all run
+   * the same clock — some stay solid as thick streaks while neighbours
+   * have already torn open into web. Without it the whole sea reaches
+   * the lace stage together and reads as one uniform pattern.
+   */
+  /** Size of a patch, metres: roughly the width of one pocket. */
+  varyScale: 5,
+  /**
+   * PER-CELL variation, applied in the web render rather than the sim.
+   *
+   * The pocket noise above varies over metres, so every web cell inside
+   * one pocket shares its multiplier and they all expand and empty
+   * together — an area holds on until the last cell has opened. These
+   * two give each Voronoi cell its own character instead, from a random
+   * baked into the web tile beside its distance field, so a patch tears
+   * open unevenly and empties cell by cell.
+   */
+  /**
+   * The two SIM-side per-cell knobs. These are what produce a cell still
+   * sitting solid after the cells around it have gone entirely: they
+   * vary the decay and spread of the thickness field itself, keyed to
+   * the same per-cell random the render uses. The render-side pair below
+   * can only reinterpret a shared thickness, which is worth about one
+   * time constant and no more.
+   */
+  /** How much longer the stubbornest cells hold their foam. 0.8 gives
+   * them ~5x the life, capped near 20s by the sim's retention ceiling. */
+  cellLifeVary: 0.8,
+  /** How much slower they spread. Holding thickness and refusing to
+   * spread are the same behaviour, so this tracks cellLifeVary. */
+  cellSpreadVary: 0.7,
+
+  /**
+   * MAXIMUM SIZE variation, 0-1. Cells grow by merging from the fine
+   * rung toward the coarse one as foam thins, so this caps how far a
+   * given cell is allowed to merge — which is the same as capping how
+   * big it can get. 0 = every cell may merge fully, as before. 0.5 =
+   * the most restricted cells only make it halfway and dissipate while
+   * still small. 1 = they never merge at all and die at fine size.
+   */
+  cellMaxSizeVary: 0.5,
+  /** Swing in how solid a cell stays: 0.5 = 0.5x to 1.5x strand width. */
+  cellSolidVary: 0.5,
+  /** Swing in the thickness a cell survives down to. Inverted against
+   * the same random, so a cell that stays solid also lingers longest. */
+  cellFadeVary: 0.45,
+  /**
+   * How much SLOWER the most solid patches spread, as a fraction of
+   * `diffusion`. 0.55 = they spread at 0.45x while the rest run nominal.
+   *
+   * One-directional on purpose. Diffusion already sits at its saturation
+   * ceiling, so scaling it ABOVE nominal does not spread faster — at a
+   * mix factor of 1.0 each texel is replaced outright by its neighbour
+   * average, which wipes the field out in about a second.
+   */
+  varySpread: 0.7,
+  /**
+   * How much LONGER the most solid patches last, as a fraction of the
+   * decay clocks. Applied as an exponent on retention, so 0.35 gives
+   * them about 1.54x the nominal life. Also one-directional: nothing
+   * dies earlier than it did before.
+   */
+  varyLife: 0.5,
   /**
    * DORMANCY, currently OFF: the window is closed (0..0.01), so every
    * deposit is immediately treated as grown and spreads and decays from
@@ -515,8 +831,25 @@ export const FOAM = {
   /** How much of the SURFACE CURRENT foam inherits. Foam floats in the
    * skin of the water, so this is essentially 1. */
   currentCarry: 1.0,
-  /** Soft capacity: above `overloadStart` mass, thin foam's decay
-   * accelerates toward `decayOld`, saturating at `overloadFull`. */
+  /**
+   * Soft capacity: above `overloadStart` mass, thin foam's decay
+   * accelerates toward `decayOld`, saturating at `overloadFull`.
+   *
+   * This is a GOVERNOR, so it silently cancels any attempt to add more
+   * foam by adding more deposits. Mass accrues as amp x sigma^2 per
+   * deposit and decays with a 12s time constant, so the steady state is
+   * roughly (deposits/s x amp x sigma^2 x 12). Droplet landings alone
+   * sat near 150 — comfortably under the old 200 — but the crest trail
+   * adds ~400 deposits/s at amp 0.5 and sigma ~0.5, which is ~44 mass
+   * units/s, or a steady state near 500. That pinned overload at
+   * saturation and accelerated thin foam's decay to `decayOld` (3s),
+   * eating the trail as fast as it was laid: the field held its old
+   * total and the extra deposits bought nothing.
+   *
+   * Raised to fit the trail. If foam ever reads as too SPARSE after
+   * turning a new source on, check window.foamMass() against these
+   * before touching deposit rates or amounts.
+   */
   decayOld: 3,
   overloadStart: 200,
   overloadFull: 400,
