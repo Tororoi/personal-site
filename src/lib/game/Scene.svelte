@@ -18,8 +18,9 @@
 	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
-	import { DROPLET, ENABLE, f, LOOP, MIST, PLUME, SPRITE } from './tuning';
+	import { DROPLET, ENABLE, f, FOAM, LOOP, MIST, PLUME, SPRITE } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
+	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
 	import { computeEnv, DAY_SECONDS } from './env';
 	import { game } from './state.svelte';
@@ -251,16 +252,27 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	float depthLight = exp(-depth * 0.1);
 	vec2 beamXZ = P.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - P.y) / refrLight.y);
 	vec2 cuv = (beamXZ - uCausticCenter) / uCausticExtent + 0.5;
-	float light = 1.0;
-	if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0) {
-		light = texture2D(uCausticMap, cuv).r;
-	}
+	// FADE at the caustic map's border, never a hard in/out test. The
+	// beam-space lookup walks further from the receiver as the sun sinks
+	// (a low sun's refracted ray travels a long way horizontally to
+	// reach the caustic plane), so at low elevations parts of a receiver
+	// cross the map edge — with a binary test that showed as caustics
+	// snapping off one region at a time. Clamped sample + smooth fade to
+	// unlit keeps it continuous.
+	float caustic = texture2D(uCausticMap, clamp(cuv, 0.002, 0.998)).r;
+	vec2 cEdge = min(cuv, 1.0 - cuv);
+	float inMap = smoothstep(0.0, 0.08, min(cEdge.x, cEdge.y));
+	float light = mix(1.0, caustic, inMap);
 	// Heavy overcast: past the map blur's practical radius, the extended
 	// source washes the pattern (and its shadows) toward featureless light.
 	light = mix(light, 1.0, uCausticFlat);
 	// Direct light is shadow-modulated only (min with 1); fold brightness
 	// arrives as the additive term, cosine-weighted to true irradiance.
-	vec3 col = albedo * (0.45 + 0.5 * inc * depthLight * uLightI * min(light, 1.0));
+	// Ambient is SKY-tinted (the underwater half is lit by the whole
+	// dome refracting down), so dusk warms both sides of the waterline
+	// together instead of only the caustic-lit half.
+	vec3 amb = mix(uSkyHorizon, uSkyZenith, clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+	vec3 col = albedo * (amb * 0.45 + uLightColor * (0.5 * inc * depthLight * uLightI * min(light, 1.0)));
 	col += uLightColor * max(light - 1.0, 0.0) * uLightI * 0.8 * inc * depthLight;
 	return col;
 }`;
@@ -352,6 +364,7 @@ uniform vec3 uBuoyColor;
 const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
 
 ${underwaterShadeGlsl}
+${whitewaterLightGlsl()}
 ${foamGlsl()}
 ${ripplesGlsl()}
 ${wavesGlsl()}
@@ -504,12 +517,20 @@ void main() {
 	// sub-quad feature), so pixels in the TRANSITION band re-evaluate the
 	// exact mask at fragment resolution — a thin sliver of the screen
 	// pays the wave loop, and the ribbon edges come out curved.
-	float foam = ${ENABLE.loopWhite ? 'vPinchWhite' : '0.0'};
-	if (foam > 0.01 && foam < 0.99) foam = pinchMask(vRest);
-	// Persistent foam residue (foam.ts): deposits from droplet landings,
-	// dissipating on their own clock with the webbing tear-off.
-	${ENABLE.foamField ? 'foam = max(foam, foamWeb(vRest, foamThicknessAt(vRest), vJacobian));' : ''}
-	col = mix(col, uFoamColor, foam);
+	// Two DIFFERENT whites, deliberately shaded differently:
+	//  - the LOOP ribbon is the same substance as the foam sprites and
+	//    splash droplets that erupt from it, so it takes their flat,
+	//    sky-facing colour and matches them exactly.
+	//  - the persistent foam FIELD lies on the water, so it keeps the
+	//    per-pixel wave normal and the relief that comes with it.
+	float loopWhite = ${ENABLE.loopWhite ? 'vPinchWhite' : '0.0'};
+	if (loopWhite > 0.01 && loopWhite < 0.99) loopWhite = pinchMask(vRest);
+	float fieldFoam = ${ENABLE.foamField ? 'foamWeb(vRest, foamThicknessAt(vRest), vJacobian)' : '0.0'};
+	vec3 foamN = normalize(vec3(-slope.x, 1.0, -slope.y));
+	vec3 foamLit = whitewaterLight(uFoamColor, foamN, ${f(1 - FOAM.shapeFloor)});
+	vec3 flatLit = whitewaterLight(uFoamColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
+	col = mix(col, foamLit, fieldFoam);
+	col = mix(col, flatLit, loopWhite);
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
 	col = mix(col, uFogColor, fog);
@@ -755,7 +776,9 @@ void main() {
 		uCausticCenter: backdropUniforms.uCausticCenter,
 		uCausticExtent: backdropUniforms.uCausticExtent,
 		uSphereColor: waterUniforms.uSphereColor,
-		uCausticFlat: waterUniforms.uCausticFlat
+		uCausticFlat: waterUniforms.uCausticFlat,
+		uSkyZenith: waterUniforms.uSkyZenith,
+		uSkyHorizon: waterUniforms.uSkyHorizon
 	};
 	const sphereMaterial = new THREE.ShaderMaterial({
 		uniforms: sphereUniforms,
@@ -792,6 +815,8 @@ uniform float uFogDensity;
 uniform vec3 uLightColor;
 uniform float uLightI;
 uniform vec3 uSphereColor;
+uniform vec3 uSkyZenith;
+uniform vec3 uSkyHorizon;
 uniform sampler2D uCausticMap;
 uniform vec2 uCausticCenter;
 uniform float uCausticExtent;
@@ -814,9 +839,15 @@ void main() {
 	float submerged = clamp((waterY - vWorld.y) / 0.35 + 0.5, 0.0, 1.0);
 
 	// --- Dry branch: direct sun with soft wrap so the terminator doesn't
-	// slice a hard line across the crown.
+	// slice a hard line across the crown. The sun's COLOUR matters as
+	// much as its intensity — shading by uLightI alone left the dry
+	// crown grey at dusk while the submerged half glowed warm, because
+	// shadeUnderwater does multiply by uLightColor. Ambient comes from
+	// the SKY (zenith above, horizon toward the rim), so the unlit side
+	// picks up the same dusk tint the water reflects.
 	float wrap = clamp((dot(normal, sun) + 0.4) / 1.4, 0.0, 1.0);
-	vec3 dry = uSphereColor * (0.3 + 0.75 * wrap * uLightI);
+	vec3 skyAmb = mix(uSkyHorizon, uSkyZenith, clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
+	vec3 dry = uSphereColor * (skyAmb * 0.45 + uLightColor * (0.75 * wrap * uLightI));
 
 	// --- Wet branch: shadeUnderwater (shared with the water raytrace, see
 	// its definition for the lighting model). Only reached by fragments
@@ -850,44 +881,90 @@ void main() {
 		gradientMap: toonGradient
 	});
 
-	// Ballistic spray clumps (spray.ts): one instanced low-poly droplet
-	// mesh, matrices rewritten each frame from the particle pool. Dead
-	// slots collapse to scale 0.
-	// Detail 1: rounder clumps (the big cover boils read as boulders at
-	// detail 0) while staying low-poly.
-	const sprayGeometry = new THREE.OctahedronGeometry(1, 1);
-	// Plain solid clumps (mist is a separate system). Fog uniforms are
-	// SHARED with the water material (same objects) so preset changes
-	// propagate — unfogged particles read whiter than the foam below.
+	// Ballistic spray clumps (spray.ts) as POINT SPRITES — one vertex
+	// each instead of an instanced octahedron, matching how the foam
+	// masses are drawn. Cheaper (no per-droplet matrix, ~1/20th the
+	// vertices) and consistent: droplets ARE foam in flight, so they
+	// take the same flat, sky-facing shading and the same colour.
+	// Streaking survives as a screen-space ellipse carved in the
+	// fragment, since a point sprite is always a square.
+	const sprayPositions = new Float32Array(MAX_SPRAY * 3);
+	const spraySizes = new Float32Array(MAX_SPRAY);
+	const sprayVels = new Float32Array(MAX_SPRAY * 3);
+	const sprayGeometry = new THREE.BufferGeometry();
+	const sprayPosAttr = new THREE.BufferAttribute(sprayPositions, 3);
+	const spraySizeAttr = new THREE.BufferAttribute(spraySizes, 1);
+	const sprayVelAttr = new THREE.BufferAttribute(sprayVels, 3);
+	sprayPosAttr.setUsage(THREE.DynamicDrawUsage);
+	spraySizeAttr.setUsage(THREE.DynamicDrawUsage);
+	sprayVelAttr.setUsage(THREE.DynamicDrawUsage);
+	sprayGeometry.setAttribute('position', sprayPosAttr);
+	sprayGeometry.setAttribute('aSize', spraySizeAttr);
+	sprayGeometry.setAttribute('aVel', sprayVelAttr);
 	const sprayMaterial = new THREE.ShaderMaterial({
 		uniforms: {
-			uColor: { value: new THREE.Color('#eef6fc') },
+			// SHARED with the foam: a droplet is foam that is airborne.
+			uColor: waterUniforms.uFoamColor,
 			uFogColor: waterUniforms.uFogColor,
-			uFogDensity: waterUniforms.uFogDensity
+			uFogDensity: waterUniforms.uFogDensity,
+			uSkyZenith: waterUniforms.uSkyZenith,
+			uSkyHorizon: waterUniforms.uSkyHorizon,
+			uSunColor: waterUniforms.uSunColor,
+			uSunI: waterUniforms.uSunI,
+			uSunDir: waterUniforms.uSunDir,
+			uSunDiffusion: waterUniforms.uSunDiffusion,
+			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) }
 		},
 		vertexShader: `
+uniform float uPointPx;
+attribute float aSize;
+attribute vec3 aVel;
 varying float vViewZ;
+varying vec2 vDir;
+varying float vStretch;
 void main() {
-	vec4 view = viewMatrix * modelMatrix * instanceMatrix * vec4(position, 1.0);
+	vec4 view = modelViewMatrix * vec4(position, 1.0);
 	vViewZ = -view.z;
-	gl_Position = projectionMatrix * view;
+	// Motion streak, in screen space: project the droplet's velocity and
+	// grow the quad along it. Volume-preserving, so a streaking droplet
+	// thins as it lengthens.
+	vec4 c0 = projectionMatrix * view;
+	vec4 c1 = projectionMatrix * (view + vec4(aVel, 0.0));
+	vec2 d = c1.xy / max(c1.w, 0.0001) - c0.xy / max(c0.w, 0.0001);
+	float sp = length(aVel);
+	vStretch = min(1.0 + sp * ${f(DROPLET.streakPerSpeed)}, ${f(DROPLET.streakCap)});
+	vDir = length(d) > 0.00001 ? normalize(d) : vec2(1.0, 0.0);
+	gl_PointSize = aSize * 2.0 * uPointPx * vStretch;
+	gl_Position = c0;
 }`,
 		fragmentShader: `
 uniform vec3 uColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+${WHITEWATER_UNIFORM_DECLS}
 varying float vViewZ;
+varying vec2 vDir;
+varying float vStretch;
+${whitewaterLightGlsl()}
 void main() {
+	// Carve an ellipse out of the square: long along the motion, the
+	// original width across it.
+	vec2 pc = gl_PointCoord - 0.5;
+	pc.y = -pc.y;
+	float along = dot(pc, vDir);
+	float across = pc.x * vDir.y - pc.y * vDir.x;
+	if (length(vec2(along, across * vStretch)) * 2.0 > 1.0) discard;
+	// FLAT and sky-facing, exactly like the foam masses: a screen-facing
+	// disc has no honest normal to sculpt. Same shapeAmt as the sprites
+	// too — passing 0 here skipped the directional term entirely and
+	// left droplets a few percent brighter than the foam they came from.
+	vec3 lit = whitewaterLight(uColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
-	gl_FragColor = vec4(mix(uColor, uFogColor, fog), 1.0);
+	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
 }`
 	});
-	const sprayMesh = new THREE.InstancedMesh(sprayGeometry, sprayMaterial, MAX_SPRAY);
+	const sprayMesh = new THREE.Points(sprayGeometry, sprayMaterial);
 	sprayMesh.frustumCulled = false;
-	sprayMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-	const sprayDummy = new THREE.Object3D();
-	const sprayDir = new THREE.Vector3();
-	const sprayUp = new THREE.Vector3(0, 1, 0);
 
 	// UNDERSIDE FOAM POINTS: one scaled-up POINT SPRITE per grid
 	// intersection instead of sphere meshes — a single vertex each, so
@@ -990,11 +1067,19 @@ float spriteFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 
 			uAmp: waterUniforms.uAmp,
 			uWaveA: waterUniforms.uWaveA,
 			uWaveB: waterUniforms.uWaveB,
-			uColor: { value: new THREE.Color('#eef6fc') },
+			// SHARED with the foam field: sprites are foam, so they must be
+			// the same colour by construction, not by two matching hexes.
+			uColor: waterUniforms.uFoamColor,
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
 			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) },
-			uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) }
+			uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) },
+			uSkyZenith: waterUniforms.uSkyZenith,
+			uSkyHorizon: waterUniforms.uSkyHorizon,
+			uSunColor: waterUniforms.uSunColor,
+			uSunI: waterUniforms.uSunI,
+			uSunDir: waterUniforms.uSunDir,
+			uSunDiffusion: waterUniforms.uSunDiffusion,
 		},
 		vertexShader: `
 uniform float uTime;
@@ -1005,10 +1090,13 @@ ${wavesGlsl()}
 ${spriteFrameGlsl}
 attribute float aRank;
 varying float vViewZ;
+varying vec3 vNrm;
 void main() {
 	vec3 surf; vec3 Nn; float g;
 	float r = spriteFrame(position.xz, position.y, aRank, surf, Nn, g);
 	vec3 world = surf - Nn * (r * 0.8 * g);
+	// The foam mass rides the water: light it by the surface normal.
+	vNrm = Nn;
 	vec4 view = viewMatrix * vec4(world, 1.0);
 	vViewZ = -view.z;
 	gl_PointSize = r * 2.0 * uPointPx * g;
@@ -1018,14 +1106,32 @@ void main() {
 uniform vec3 uColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+${WHITEWATER_UNIFORM_DECLS}
 varying float vViewZ;
+varying vec3 vNrm;
+${whitewaterLightGlsl()}
 void main() {
 	// Opaque round sprite: discard outside the disc keeps depth honest
 	// (no transparency sorting), so the water still occludes correctly.
 	float dd = length(gl_PointCoord - 0.5) * 2.0;
 	if (dd > 1.0) discard;
+	// FLAT, and matched to the foam. Two corrections to the water normal
+	// first, both because of WHERE these sprites live:
+	//  1. They surface at a FOLD, where the sheet is vertical or fully
+	//     overturned — the normal there points sideways or straight
+	//     DOWN, so lighting by it put most sprites in the dark-sea half
+	//     of the hemisphere ambient. Flip any downward normal back up:
+	//     a foam mass presents its top to the sky no matter which way
+	//     the water under it has rolled.
+	//  2. Bias the result toward world up, so a mass reads as a blob
+	//     sitting proud of the surface rather than a decal painted on a
+	//     near-vertical sheet. A little tilt survives, which is what
+	//     keeps sprites from looking uniformly stamped.
+	vec3 sn = vNrm.y < 0.0 ? -vNrm : vNrm;
+	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(SPRITE.normalTilt)}));
+	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
-	gl_FragColor = vec4(mix(uColor, uFogColor, fog), 1.0);
+	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
 }`
 	});
 	const underSpikeMesh = new THREE.Points(underSpikeGeometry, underSpikeMaterial);
@@ -1049,6 +1155,12 @@ void main() {
 			uColor: { value: new THREE.Color('#f2f8ff') },
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
+			uSkyZenith: waterUniforms.uSkyZenith,
+			uSkyHorizon: waterUniforms.uSkyHorizon,
+			uSunColor: waterUniforms.uSunColor,
+			uSunI: waterUniforms.uSunI,
+			uSunDir: waterUniforms.uSunDir,
+			uSunDiffusion: waterUniforms.uSunDiffusion,
 			uViewH: { value: 900 },
 			// Driver cap on gl_PointSize (often 255 or 1024). The quad must
 			// be clamped to it IN THE SHADER: the GPU clamps the rendered
@@ -1310,6 +1422,64 @@ void main() {
 	const SPHERE_CY = -6;
 	const SPHERE_CZ = 2;
 	const SPHERE_CR = 5;
+
+	// DEBUG: where the light is, relative to the sphere. A dot sits on
+	// the sphere's surface at the sub-light point (the spot the light is
+	// directly over), and a thin arc traces that point's path. The SUN
+	// and MOON are drawn separately — yellow and pale blue — because
+	// they are genuinely different arcs, not two halves of one circle:
+	// computeEnv negates the vector at handover, mirroring the night arc
+	// through the origin onto the opposite side of the sphere.
+	// depthTest off: the sphere sits below the waterline, so the opaque
+	// water hides the markers exactly when they matter most.
+	const SUN_COLOR = '#ffd83a';
+	const MOON_COLOR = '#a8c8ff';
+	const markerGeo = new THREE.SphereGeometry(0.28, 12, 10);
+	const sunDotMat = new THREE.MeshBasicMaterial({ color: SUN_COLOR, depthTest: false });
+	const moonDotMat = new THREE.MeshBasicMaterial({ color: MOON_COLOR, depthTest: false });
+	const sunDot = new THREE.Mesh(markerGeo, sunDotMat);
+	const moonDot = new THREE.Mesh(markerGeo, moonDotMat);
+	sunDot.renderOrder = 12;
+	moonDot.renderOrder = 12;
+
+	function pathMat(color: string) {
+		return new THREE.LineBasicMaterial({
+			color,
+			transparent: true,
+			opacity: 0.55,
+			depthTest: false
+		});
+	}
+	const sunPathMat = pathMat(SUN_COLOR);
+	const moonPathMat = pathMat(MOON_COLOR);
+
+	/** Trace the light's path over the phases where `daytime` holds. The
+	 * sun rules the half where its altitude is positive; the moon takes
+	 * the other half. */
+	function lightPath(daytime: boolean, mat: THREE.LineBasicMaterial) {
+		const pts: THREE.Vector3[] = [];
+		const R = SPHERE_CR + 0.06;
+		const STEPS = 160;
+		for (let i = 0; i <= STEPS; i++) {
+			const phase = i / STEPS;
+			// Same test computeEnv uses to hand over between sun and moon.
+			const isDay = Math.sin((phase - 0.25) * Math.PI * 2) > 0;
+			if (isDay !== daytime) continue;
+			const e = computeEnv(phase);
+			pts.push(
+				new THREE.Vector3(
+					SPHERE_CX + e.lightDir[0] * R,
+					SPHERE_CY + e.lightDir[1] * R,
+					SPHERE_CZ + e.lightDir[2] * R
+				)
+			);
+		}
+		const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat);
+		line.renderOrder = 11;
+		return line;
+	}
+	const sunPath = lightPath(true, sunPathMat);
+	const moonPath = lightPath(false, moonPathMat);
 	function depositContactFoam(t: number) {
 		for (const b of buoys) {
 			const s = sampleOcean(b.x, b.z, t, 1, 1);
@@ -1467,6 +1637,17 @@ void main() {
 			mistMaterial.uniforms.uMistTex.value = mistField.texture;
 
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
+			// Sub-light point on the sphere's surface: the sun's dot while
+			// the sun is up, the moon's while it is not.
+			const isDay = Math.sin((game.time / DAY_SECONDS - 0.25) * Math.PI * 2) > 0;
+			const activeDot = isDay ? sunDot : moonDot;
+			activeDot.position.set(
+				SPHERE_CX + env.lightDir[0] * (SPHERE_CR + 0.06),
+				SPHERE_CY + env.lightDir[1] * (SPHERE_CR + 0.06),
+				SPHERE_CZ + env.lightDir[2] * (SPHERE_CR + 0.06)
+			);
+			sunDot.visible = isDay;
+			moonDot.visible = !isDay;
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
 			waterUniforms.uSunI.value = env.lightIntensity;
 			backdropUniforms.uFloorColor.value.setRGB(
@@ -1619,37 +1800,28 @@ void main() {
 				}
 			}
 
-			// Mirror the spray pool into the instanced mesh: birth ease-in,
-			// death ease-out, and velocity STREAKING — the clump elongates
-			// along its motion (volume-preserving), which reads as flying
-			// water and hides frame-to-frame position hops.
+			// Mirror the spray pool into the point cloud: birth ease-in and
+			// death ease-out on the size, velocity for the streak.
 			for (let i = 0; i < MAX_SPRAY; i++) {
 				const p = sprayParticles[i];
 				if (p.size === 0 || waveTime < p.birth) {
-					sprayDummy.scale.setScalar(0);
-					sprayDummy.quaternion.identity();
-				} else {
-					const grow = Math.min((waveTime - p.birth) / DROPLET.growTime, 1);
-					const shrink =
-						p.dying >= 0 ? Math.max(1 - (waveTime - p.dying) / DROPLET.dieTime, 0) : 1;
-					const size = p.size * grow * shrink;
-					const speed = Math.hypot(p.vx, p.vy, p.vz);
-					if (speed > 0.5) {
-						sprayDir.set(p.vx / speed, p.vy / speed, p.vz / speed);
-						sprayDummy.quaternion.setFromUnitVectors(sprayUp, sprayDir);
-						const stretch = Math.min(1 + speed * DROPLET.streakPerSpeed, DROPLET.streakCap);
-						const thin = size / Math.sqrt(stretch);
-						sprayDummy.scale.set(thin, size * stretch, thin);
-					} else {
-						sprayDummy.quaternion.identity();
-						sprayDummy.scale.setScalar(size);
-					}
-					sprayDummy.position.set(p.x, p.y, p.z);
+					spraySizes[i] = 0;
+					continue;
 				}
-				sprayDummy.updateMatrix();
-				sprayMesh.setMatrixAt(i, sprayDummy.matrix);
+				const grow = Math.min((waveTime - p.birth) / DROPLET.growTime, 1);
+				const shrink =
+					p.dying >= 0 ? Math.max(1 - (waveTime - p.dying) / DROPLET.dieTime, 0) : 1;
+				spraySizes[i] = p.size * grow * shrink;
+				sprayPositions[i * 3] = p.x;
+				sprayPositions[i * 3 + 1] = p.y;
+				sprayPositions[i * 3 + 2] = p.z;
+				sprayVels[i * 3] = p.vx;
+				sprayVels[i * 3 + 1] = p.vy;
+				sprayVels[i * 3 + 2] = p.vz;
 			}
-			sprayMesh.instanceMatrix.needsUpdate = true;
+			sprayPosAttr.needsUpdate = true;
+			spraySizeAttr.needsUpdate = true;
+			sprayVelAttr.needsUpdate = true;
 
 		},
 		{ autoStart: false }
@@ -1698,6 +1870,11 @@ void main() {
 <T.AmbientLight bind:ref={ambient} intensity={env0.ambientIntensity * 1.6} />
 
 <T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
+
+<T is={sunPath} />
+<T is={moonPath} />
+<T is={sunDot} />
+<T is={moonDot} />
 
 <T is={sprayMesh} />
 

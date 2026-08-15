@@ -11,7 +11,9 @@
  */
 
 /** 24 real minutes per in-game day. */
-export const DAY_SECONDS = 24 * 60;
+// A full day in 240s: long enough to read as a cycle, short enough to
+// watch dawn, noon, dusk and night in one sitting while tuning light.
+export const DAY_SECONDS = 240;
 
 export type RGB = [number, number, number];
 
@@ -154,6 +156,16 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 	return t * t * (3 - 2 * t);
 }
 
+/**
+ * Headings of the sun's and moon's orbital planes, radians, measured
+ * like windAngle (0 = +X, increasing toward +Z = clockwise seen from
+ * above). The sun sits a quarter turn clockwise of the old east-west
+ * axis so a low sun crosses the isometric camera's view rather than
+ * facing it; the moon is 5 degrees further round again.
+ */
+const SUN_PATH_HEADING = Math.PI / 2;
+const MOON_PATH_HEADING = SUN_PATH_HEADING + (5 * Math.PI) / 180;
+
 export function computeEnv(phase: number): Env {
 	const p = ((phase % 1) + 1) % 1;
 
@@ -163,20 +175,28 @@ export function computeEnv(phase: number): Env {
 	const b = FRAMES[i + 1];
 	const t = smoothstep(0, 1, (p - a.phase) / (b.phase - a.phase));
 
-	// Sun travels east to west; the moon takes over on the opposite arc.
-	// The 0.6 southern offset keeps a LOW sun well off the east-west axis:
-	// the isometric camera looks along that axis, and with a small offset
-	// every 45-degree sun was either flat frontal light or backlit. This
-	// way morning/afternoon sun is crosswise — classic lit/shadow modeling
-	// on receivers.
+	// Sun and moon each travel a GREAT CIRCLE through the sphere's
+	// centre: a unit circle in the plane spanned by world up and a fixed
+	// horizontal heading. (The previous formulation squashed X by 0.85
+	// and pushed the whole arc south by a constant 0.6, which made both
+	// paths off-centre ellipses — and negating the vector at handover
+	// mirrored the night arc onto the opposite side of the sphere rather
+	// than continuing it.)
+	//
+	// The moon's plane is rotated a few degrees from the sun's, so the
+	// two circles cross rather than coincide.
 	const theta = (p - 0.25) * Math.PI * 2;
 	const sunAltitude = Math.sin(theta);
 	const usingSun = sunAltitude > 0;
-	const raw: RGB = usingSun
-		? [Math.cos(theta) * 0.85, sunAltitude, 0.6]
-		: [-Math.cos(theta) * 0.85, -sunAltitude, -0.6];
-	const len = Math.hypot(raw[0], raw[1], raw[2]);
-	const lightDir: RGB = [raw[0] / len, raw[1] / len, raw[2] / len];
+	// The moon rides the same clock half a turn later, so it is up
+	// exactly when the sun is down.
+	const bodyTheta = usingSun ? theta : theta + Math.PI;
+	const heading = usingSun ? SUN_PATH_HEADING : MOON_PATH_HEADING;
+	const hx = Math.cos(heading);
+	const hz = Math.sin(heading);
+	const ct = Math.cos(bodyTheta);
+	const st = Math.sin(bodyTheta);
+	const lightDir: RGB = [hx * ct, st, hz * ct];
 
 	// Dim through the handover so the light never pops between sun and moon.
 	const horizonFade = smoothstep(0.02, 0.14, Math.abs(sunAltitude));

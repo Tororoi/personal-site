@@ -28,7 +28,7 @@ export const ENABLE = {
   /** Foam masses surfacing from under the fold. */
   foamSprites: true,
   /** Vertical spray thrown off each foam mass. */
-  crestPlumes: true,
+  crestPlumes: false,
   /** Ballistic droplets launched from inside the loops. */
   splashDroplets: true,
   /** Spray kicked up by the buoys. */
@@ -96,6 +96,14 @@ export const SPRITE = {
   cullRadius: 0.07,
   /** How deep the sprite centre sits under the surface, x radius. */
   submersion: 0.8,
+  /**
+   * How much of the WATER's normal a sprite's lighting takes, 0-1.
+   * 0 = every sprite faces straight up and they all share one shade;
+   * 1 = the raw surface normal, which at a fold points sideways or
+   * down and drops them into the dark half of the ambient. The tilt
+   * is the only reason sprites differ in brightness from each other.
+   */
+  normalTilt: 0,
 } as const
 
 /**
@@ -126,7 +134,7 @@ export const PLUME = {
    * height compresses the whole cone — taper and all — into it. Keep
    * reachRadii for the SHAPE and use this for the CUT.
    */
-  clipFrac: 0.9,
+  clipFrac: 1.0,
 
   /** Amplitude (reach x density) at rest, and at `speedFull`. */
   ampIdle: 0.5,
@@ -156,7 +164,7 @@ export const PLUME = {
 
   /** Plume half-width at the base and how much it grows with height. */
   widthBase: 1.75,
-  widthGrowth: 3.5,
+  widthGrowth: 2.5,
 
   /**
    * RISE SPEED — how fast the spray appears to travel UP the plume.
@@ -374,6 +382,34 @@ export const FOAM = {
   decayOld: 3,
   overloadStart: 200,
   overloadFull: 400,
+  /**
+   * FOAM AS A SCATTERER. Foam is a dense froth of air bubbles with an
+   * albedo near 0.9: it integrates light from the whole sky dome and
+   * returns mostly BRIGHTNESS, not the light's hue, and it stays white
+   * long after the sea has gone dark. Shading it like matte paint made
+   * it take the sky's colour completely and black out at night.
+   */
+  /** How much of the light's HUE foam takes on (0 = pure white always,
+   * 1 = fully tinted like paint). Scattering keeps this low. */
+  lightTint: 0.3,
+  /** Ambient floor: the darkest foam ever gets, as a fraction of full
+   * white. Real foam is still visibly white by starlight. */
+  darkFloor: 0.3,
+  /**
+   * Sky-dome gain and direct-sun gain. Their BALANCE is not fixed: it
+   * is set by how diffuse the sun is (SUN_DIFFUSION per preset), since
+   * cloud converts direct sunlight into sky radiance. Overcast storm
+   * light is nearly all ambient; a clear calm day is mostly direct.
+   */
+  skyGain: 3.3,
+  sunGain: 4.9,
+  /** Diffuse fraction even under a clear sky — the atmosphere always
+   * scatters some light, and foam gathers it from every direction. */
+  diffuseBase: 0.2,
+  /** Directional shading floor: how much shape shows. 1 = flat, 0 =
+   * full terminator. Foam self-shadows softly, so this stays high. */
+  shapeFloor: 0.6,
+
   /** Web render: density remap window and cell sizes (m). */
   densStart: 0.04,
   densEnd: 0.65,

@@ -61,7 +61,13 @@ const TILES = 16
 /** Rays per tile side: 5m tile / 48 = 0.104m spacing, the approved density. */
 const TILE_GRID = 48
 /** Vertex budget: cap on simultaneously active tiles (~140k verts). */
-const MAX_TILES = 60
+// Budget for the splat region. A LOW sun needs many more tiles: entry
+// points sit sunward of the landing point by depth * tan(zenith), so the
+// region grows fast as the sun sinks. At 60 the budget ran out around
+// 15 degrees elevation and tiles were dropped in scan order — which
+// showed as caustics vanishing from one quarter of a receiver, then the
+// next, as the cut-off band swept across.
+const MAX_TILES = 160
 const IOR = (1 / 1.33).toFixed(4)
 /**
  * Depth of the beam-space reference plane, meters below rest. Brightness
@@ -380,7 +386,13 @@ export class CausticMap {
     // Surface entry points sit sunward of the landing point by roughly
     // depth * tan(sunZenith); refraction bends rays toward vertical so the
     // un-refracted tangent over-estimates, which is the safe direction.
-    const sy = Math.max(sunDir.y, 0.3)
+    // Slant clamp. Below this the region would grow without bound as the
+    // sun approaches the horizon; 0.3 (about 17 degrees) cut in while the
+    // sun was still high enough to matter, freezing the region while the
+    // real rays kept slanting away from it — receivers then sampled
+    // unsplatted (black) map. Held lower now, with the receiver-side
+    // border fade covering the last few degrees before the light dies.
+    const sy = Math.max(sunDir.y, 0.12)
     const slantX = sunDir.x / sy
     const slantZ = sunDir.z / sy
     const depth = Math.max(-sphere.y, 0) + sphereR

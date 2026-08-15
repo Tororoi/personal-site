@@ -15,7 +15,8 @@
  *  vViewZ - view depth, for fog
  */
 
-import { f, PLUME } from './tuning'
+import { f, FOAM, PLUME } from './tuning'
+import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater'
 
 /**
  * @param coord expression yielding the sprite's 0..1 coords, y running
@@ -39,6 +40,7 @@ uniform vec3 uColor;
 uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform float uTime;
+${WHITEWATER_UNIFORM_DECLS}
 /** Rise rate (x = rows/s at rest, y = rows/s per m/s): a UNIFORM, not
  * a baked constant, so the /spike inspector can slide it live. */
 uniform vec2 uRise;
@@ -51,6 +53,8 @@ varying float vGale;
 /** World XZ of the sprite: lets neighbouring plumes share a streak
  * pattern instead of each randomising its own (see PLUME.coherence). */
 varying vec2 vAnchor;
+
+${whitewaterLightGlsl()}
 
 float hash(vec2 p) {
 	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -137,7 +141,11 @@ void main() {
 	edge *= edge;
 	float a = wisp * body * (1.0 - h) * (1.0 - h) * ${f(PLUME.alpha)} * vBurst * amp * tip * edge;
 	if (a < ${f(PLUME.alphaCull)}) discard;
+	// Spray is a 2D sprite with no meaningful normal, so it takes the
+	// sky/sun COLOUR with no directional relief — airborne droplets are
+	// lit from every side anyway.
+	vec3 lit = whitewaterLight(uColor, vec3(0.0, 1.0, 0.0), 0.0);
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
-	gl_FragColor = vec4(mix(uColor, uFogColor, fog), a);
+	gl_FragColor = vec4(mix(lit, uFogColor, fog), a);
 }`
 }
