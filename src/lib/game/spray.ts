@@ -96,7 +96,68 @@ const WIND_FULL = 15
  */
 const LOOP_SCAN_INTERVAL = DROPLET.scanInterval
 const LOOP_SCAN_STEP = DROPLET.scanStep
-const LOOP_SCAN_EXTENT = DROPLET.scanExtent
+/**
+ * Half-extent of the emission scan, metres. Set from the Scene to match
+ * the FROTH field's own window-derived extent: a fixed 40 m left froth
+ * in the outer corners of a wide window unscanned, so it never threw
+ * droplets. Falls back to the tuning value before the Scene reports in.
+ */
+let LOOP_SCAN_EXTENT: number = DROPLET.scanExtent
+
+export function setScanExtent(halfMetres: number) {
+  LOOP_SCAN_EXTENT = Math.max(halfMetres, DROPLET.scanExtent)
+}
+
+/**
+ * The VISIBLE quad on the water plane, as four world-XZ corners in
+ * order. The scan grid is world-axis aligned, but the camera is
+ * isometric, so what the player sees is a rotated rectangle — the
+ * square that contains it wastes nearly half its samples on ground that
+ * is off screen. Points outside this quad are skipped before the
+ * expensive ocean sample.
+ */
+let viewQuad: number[] | null = null
+
+export function setViewQuad(corners: number[] | null) {
+  viewQuad = corners && corners.length === 8 ? corners : null
+}
+
+
+/** Per-scan census, so it is possible to tell WHY froth is not
+ * throwing: how many grid points were sampled, how many were steep
+ * enough to record, and how many actually cleared every emission gate. */
+export const scanCensus = {
+  sampled: 0,
+  recorded: 0,
+  emitted: 0,
+  blockedFroth: 0,
+  blockedExpose: 0,
+  blockedPeak: 0,
+}
+/** Live tallies for the cycle in progress; published to scanCensus when
+ * the cycle completes, so a reader never catches it mid-count. */
+const censusLive = { ...scanCensus }
+
+/** Convex point-in-quad by consistent edge sign. */
+function inView(x: number, z: number) {
+  if (!viewQuad) return true
+  let sign = 0
+  for (let i = 0; i < 4; i++) {
+    const ax = viewQuad[i * 2]
+    const az = viewQuad[i * 2 + 1]
+    const bx = viewQuad[((i + 1) % 4) * 2]
+    const bz = viewQuad[((i + 1) % 4) * 2 + 1]
+    const cross = (bx - ax) * (z - az) - (bz - az) * (x - ax)
+    if (cross > 0.0001) {
+      if (sign < 0) return false
+      sign = 1
+    } else if (cross < -0.0001) {
+      if (sign > 0) return false
+      sign = -1
+    }
+  }
+  return true
+}
 /** Same J test as the white loop render. */
 const LOOP_J = DROPLET.scanJ
 /** Bonus-emission depth scale: J this far below LOOP_J = guaranteed extra. */
@@ -173,6 +234,28 @@ function surfaceRise(u: number, v: number, t: number) {
 }
 
 /**
+ * The water's ORBITAL velocity at a rest point — the direction the
+ * froth is being carried as it wheels around the fold. On the face of
+ * an overturning crest this points forward and over, which is exactly
+ * the way a mass of froth throws its water. (Time derivative of the
+ * Gerstner displacement: horizontal qAw sin, vertical -Aw cos.)
+ */
+function orbital(u: number, v: number, t: number) {
+  let x = 0
+  let y = 0
+  let z = 0
+  for (const w of waves) {
+    const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
+    const s = Math.sin(theta)
+    const f = w.q * w.amp * w.omega * s
+    x += w.dirX * f
+    z += w.dirZ * f
+    y -= w.amp * w.omega * Math.cos(theta)
+  }
+  return { x, y, z }
+}
+
+/**
  * loopVelocity plus the Gerstner sway at the same rest point, in one
  * wave pass — the per-frame kernel of PINNED flight. A loop particle's
  * rest anchor advects at this velocity, and anchor + sway + its own
@@ -221,6 +304,10 @@ export type SprayParticle = {
   impact: boolean
   /** True for loop droplets: flight is PINNED to the loop's frame. */
   loop: boolean
+  /** Height above the local surface the droplet launches from — the
+   * froth mass's crown plus clearance. Held so a staggered droplet can
+   * keep riding that crown until it is thrown. */
+  crown: number
   /** Time the landing was detected; -1 airborne. The droplet shrinks out
    * over a beat instead of blinking off the frame it touches water. */
   dying: number
@@ -248,6 +335,7 @@ export const sprayParticles: SprayParticle[] = Array.from(
     size: 0,
     impact: false,
     loop: false,
+    crown: 0,
     dying: -1,
     ax: 0,
     az: 0,
@@ -273,6 +361,12 @@ if (typeof window !== 'undefined') {
     active: sprayParticles.filter((p) => p.size > 0).length,
     allocFails,
     culledYoung,
+    ...scanCensus,
+  })
+  // Debug: the exact quad the scan is culled to, in world XZ.
+  ;(window as unknown as Record<string, unknown>).scanQuad = () => ({
+    quad: viewQuad ? [...viewQuad] : null,
+    extent: LOOP_SCAN_EXTENT,
   })
 }
 
@@ -298,6 +392,7 @@ function launch(
   p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
   p.impact = impact
   p.loop = false
+  p.crown = 0
   p.dying = -1
 }
 
@@ -317,6 +412,8 @@ function launchLoop(
   rvx: number,
   vy: number,
   rvz: number,
+  size: number,
+  crown: number,
 ) {
   const p = alloc()
   if (!p) return
@@ -336,9 +433,10 @@ function launchLoop(
   // one frame reads as strobing volleys. A random activation delay
   // spreads the same droplets across the interval — continuous spray.
   p.birth = t + Math.random() * DROPLET.birthStagger
-  p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
+  p.size = size
   p.impact = false
   p.loop = true
+  p.crown = crown
   p.dying = -1
 }
 
@@ -452,18 +550,58 @@ export type LoopHeading = {
 }
 export const loopHeadings: LoopHeading[] = []
 
+/** Froth masses a single scan cell stands for, before density and
+ * visibility thinning: the cell's area over the froth lattice's. */
+const CELL_MASSES =
+  (DROPLET.scanStep / FROTH.lattice) * (DROPLET.scanStep / FROTH.lattice)
+
+/** GLSL-style smoothstep, for the CPU twins of the froth criterion. */
+function smooth01(x: number, e0: number, e1: number) {
+  const u = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1)
+  return u * u * (3 - 2 * u)
+}
+
+/** Mean baked froth radius (FROTH.radiusBase + half the jitter): the
+ * lattice's per-point hash is a GPU detail, so emission uses the mean. */
+const FROTH_MEAN_R = FROTH.radiusBase + FROTH.radiusVar * 0.5
+
 /** Dominant band amplitude — the froth criterion's normaliser. */
 const domAmp = waves.reduce((a, w) => Math.max(a, w.amp), 0)
 
 let coverScanClock = 0
 
+/**
+ * The scan is SLICED across frames. At window scale it samples a few
+ * thousand ocean points, and doing that in a single frame every 0.1s
+ * was a periodic hitch that cost ~9fps of average — the work itself is
+ * affordable, arriving all at once is not. Each call walks one slice of
+ * the x range; the last slice classifies and emits.
+ */
+const SCAN_SLICES = 6
+let scanSlice = 0
+let scanJx = 0
+let scanJz = 0
+
 function scanLoopSplash(t: number) {
-  loopHeadings.length = 0
-  const jx = Math.random() * LOOP_SCAN_STEP
-  const jz = Math.random() * LOOP_SCAN_STEP
+  if (scanSlice === 0) {
+    loopHeadings.length = 0
+    censusLive.sampled = 0
+    censusLive.recorded = 0
+    censusLive.emitted = 0
+    censusLive.blockedFroth = 0
+    censusLive.blockedExpose = 0
+    censusLive.blockedPeak = 0
+    scanJx = Math.random() * LOOP_SCAN_STEP
+    scanJz = Math.random() * LOOP_SCAN_STEP
+  }
+  const jx = scanJx
+  const jz = scanJz
+  const span = 2 * LOOP_SCAN_EXTENT
+  const x0 = -LOOP_SCAN_EXTENT + (span * scanSlice) / SCAN_SLICES
+  const x1 = -LOOP_SCAN_EXTENT + (span * (scanSlice + 1)) / SCAN_SLICES
   for (
-    let x = -LOOP_SCAN_EXTENT + jx;
-    x <= LOOP_SCAN_EXTENT;
+    let x = x0 + jx;
+    x < x1;
     x += LOOP_SCAN_STEP
   ) {
     for (
@@ -471,8 +609,11 @@ function scanLoopSplash(t: number) {
       z <= LOOP_SCAN_EXTENT;
       z += LOOP_SCAN_STEP
     ) {
+      if (!inView(x, z)) continue
+      censusLive.sampled++
       const s1 = sampleOcean(x, z, t, 1, 1)
       if (s1.jacobian > LOOP_J) continue
+      censusLive.recorded++
       // Qualifying points get a REFINED sample for their ANCHOR: the
       // 1-iteration rest inversion is centimeter-grade on calm water but
       // worst exactly at a pinch (the sway gradient there is ~1 by
@@ -495,7 +636,12 @@ function scanLoopSplash(t: number) {
       const lvLen = Math.hypot(lv.x, lv.z)
       const hx = lvLen > 0.01 ? lv.x / lvLen : HEAD_X
       const hz = lvLen > 0.01 ? lv.z / lvLen : HEAD_Z
-      if (loopHeadings.length < 160) {
+      // The cap must exceed what a full window-sized scan can record,
+      // or the list fills partway through the x sweep and every later
+      // slice is silently dropped — which showed as froth throwing
+      // droplets only on one side of the screen. A window scan records
+      // ~600; 2048 leaves room for wider windows and finer steps.
+      if (loopHeadings.length < 2048) {
         loopHeadings.push({
           x,
           y: s.height,
@@ -513,27 +659,51 @@ function scanLoopSplash(t: number) {
       }
     }
   }
+  // Only the final slice has the whole picture: classify and emit.
+  scanSlice = (scanSlice + 1) % SCAN_SLICES
+  if (scanSlice !== 0) return
   // Classify each point by how its NEIGHBORS sit relative to its own
   // heading. A real crest line reads as points BESIDE each other
   // (offset perpendicular to heading) — good spray. A ribbon running
   // ALONG its own travel direction reads as points ahead/behind each
-  // other — looks wrong whitened, worse sprayed. Majority vote inside
-  // a 4 m disc; the 0.45-0.7 |cos| deadband keeps diagonals from
-  // voting both ways.
+  // other. Majority vote inside a 4 m disc; the deadband keeps
+  // diagonals from voting both ways.
+  //
+  // Bucketed into a 4 m hash grid rather than compared all-to-all: the
+  // scan now covers the whole window, and at a few hundred points the
+  // O(n^2) version cost ~9fps on its own.
+  const CELL = 4
+  const buckets = new Map<number, number[]>()
+  const keyOf = (x: number, z: number) =>
+    (Math.floor(x / CELL) + 4096) * 8192 + (Math.floor(z / CELL) + 4096)
+  for (let i = 0; i < loopHeadings.length; i++) {
+    const k = keyOf(loopHeadings[i].x, loopHeadings[i].z)
+    const list = buckets.get(k)
+    if (list) list.push(i)
+    else buckets.set(k, [i])
+  }
   for (let i = 0; i < loopHeadings.length; i++) {
     const a = loopHeadings[i]
     let along = 0
     let beside = 0
-    for (let j = 0; j < loopHeadings.length; j++) {
-      if (j === i) continue
-      const b = loopHeadings[j]
-      const dx = b.x - a.x
-      const dz = b.z - a.z
-      const d2 = dx * dx + dz * dz
-      if (d2 > 16 || d2 < 0.01) continue
-      const cosT = Math.abs((dx * a.hx + dz * a.hz) / Math.sqrt(d2))
-      if (cosT > 0.8) along++
-      else if (cosT < 0.6) beside++
+    const cx = Math.floor(a.x / CELL)
+    const cz = Math.floor(a.z / CELL)
+    for (let ox = -1; ox <= 1; ox++) {
+      for (let oz = -1; oz <= 1; oz++) {
+        const list = buckets.get((cx + ox + 4096) * 8192 + (cz + oz + 4096))
+        if (!list) continue
+        for (const j of list) {
+          if (j === i) continue
+          const b = loopHeadings[j]
+          const dx = b.x - a.x
+          const dz = b.z - a.z
+          const d2 = dx * dx + dz * dz
+          if (d2 > 16 || d2 < 0.01) continue
+          const cosT = Math.abs((dx * a.hx + dz * a.hz) / Math.sqrt(d2))
+          if (cosT > 0.8) along++
+          else if (cosT < 0.6) beside++
+        }
+      }
     }
     // Lean pink for real lines: only a clear fore/aft pattern (2+
     // votes, outnumbering the beside votes) condemns a group point as
@@ -548,35 +718,115 @@ function scanLoopSplash(t: number) {
     // The hop is RELATIVE to the rising crest, like the horizontal is
     // relative to the advancing loop: droplets inherit the surface's
     // upward velocity so the wave can't climb over its own spray.
-    const rise = Math.max(surfaceRise(a.ax, a.az, t), 0)
+    const rise = surfaceRise(a.ax, a.az, t)
 
     if (!ENABLE.splashDroplets) continue
     // Gate on the FROTH criterion: droplets are torn off froth masses,
     // so a break that grows no froth should throw no droplets either.
     const sk = frothFactor(a.ax, a.az, t, a.jacobian)
-    if (sk < FROTH.visStart) continue
+    // Stricter than the froth's own visibility threshold: a faint smear
+    // of froth is fine to look at but has nothing to throw.
+    if (sk < DROPLET.minFroth) {
+      censusLive.blockedFroth++
+      continue
+    }
     // ...and the same factor sets how far ahead the water is thrown: a
     // big plunging loop hurls it forward, a small one barely clears its
     // own crest.
     const sizeK =
       DROPLET.hopFwdSizeFloor +
       (1 - DROPLET.hopFwdSizeFloor) * Math.min(sk / FROTH.sizeCap, 1)
-    for (let k = 0; k < a.count; k++) {
+    // How many froth masses this scan cell stands for: the cell's area
+    // over the froth lattice's, thinned by the same density and
+    // visibility ramps the shader applies. Each throws `perFroth`.
+    const ss = smooth01(sk, FROTH.densStart, FROTH.densEnd)
+    const densFrac = FROTH.densMax + (FROTH.densMin - FROTH.densMax) * ss
+    const visFrac = smooth01(sk, FROTH.visStart, FROTH.visFull)
+    const massCount = CELL_MASSES * densFrac * visFrac
+    const count = Math.max(
+      1,
+      Math.min(Math.round(DROPLET.perFroth * massCount), DROPLET.maxPerPoint),
+    )
+    // Only throw once the froth mass is FULLY OUT of the water — the
+    // sheet has overturned (J < 0, the same inversion that reveals the
+    // mass to the camera) — AND the mass is at the TOP of its arc
+    // around the loop. The second test is what stops droplets leaping
+    // out of the water the instant a mass surfaces: a froth ball throws
+    // its water when the crest carrying it peaks, so the surface must
+    // be high and its climb spent.
+    // The froth's own emergence gate, exactly as the shader computes
+    // it: fully open below gateJFull, closed above gateJStart.
+    const expose = 1 - smooth01(a.jacobian, FROTH.gateJFull, FROTH.gateJStart)
+    if (expose < DROPLET.exposeMin) {
+      censusLive.blockedExpose++
+      continue
+    }
+    const hn = a.y / domAmp
+    if (hn < DROPLET.peakHeight || rise > DROPLET.peakRise) {
+      censusLive.blockedPeak++
+      continue
+    }
+    censusLive.emitted++
+    // Origin is the froth mass's CENTRE. The shader places the mass at
+    // surface - normal * (submersion x radius); on an inverted sheet the
+    // normal points down, so that offset lifts the mass clear of the
+    // water — which is why it becomes visible at all.
+    const frothR = FROTH_MEAN_R * Math.min(sk, FROTH.sizeCap)
+    const centreOff = frothR * FROTH.submersion
+    // Thrown along the froth's own SPIN around the loop: the water's
+    // orbital velocity, which on an overturning face runs forward and
+    // over. Normalised — the hop constants set the speed.
+    const orb = orbital(a.ax, a.az, t)
+    const orbLen = Math.hypot(orb.x, orb.y, orb.z)
+    const ox0 = orbLen > 0.01 ? orb.x / orbLen : a.hx
+    const oy0 = orbLen > 0.01 ? orb.y / orbLen : 1
+    const oz0 = orbLen > 0.01 ? orb.z / orbLen : a.hz
+    for (let k = 0; k < count; k++) {
       const forward =
         (LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR) * sizeK
+      // A droplet can never be larger than a fraction of the mass that
+      // threw it — tiny froth was shedding droplets bigger than itself.
+      const sizeCap = Math.max(frothR * DROPLET.sizeVsFroth, SIZE_MIN)
+      const size = Math.min(
+        SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN),
+        sizeCap,
+      )
+      const up = LOOP_UP_MIN + Math.random() * LOOP_UP_VAR
+      // Start on the froth ball's LEADING FACE, not at its centre: the
+      // mass is a metre across and opaque, so a droplet born at the
+      // centre is simply inside it — invisible until it has travelled
+      // its own radius.
+      const emerge = frothR + size
+      // Every droplet off a mass gets its OWN spawn point and its own
+      // throw. Sharing them made a handful of droplets sit on top of
+      // each other and read as one big blob. Spread across the whole
+      // face (up to a full radius either way, on both horizontal axes
+      // and vertically), and give each its own speed and direction
+      // jitter, so one mass sheds a scattered burst.
+      const sx = (Math.random() * 2 - 1) * frothR
+      const sz = (Math.random() * 2 - 1) * frothR
+      const sy = (Math.random() * 2 - 1) * frothR * 0.6
+      // Per-droplet throw: speed varies around the mass's figure, and
+      // the direction cones out from the spin axis.
+      const spd = forward * (0.65 + Math.random() * 0.7)
+      const coneX = (Math.random() * 2 - 1) * 0.35
+      const coneZ = (Math.random() * 2 - 1) * 0.35
       launchLoop(
         t,
         a.ax,
         a.az,
-        a.y + 0.1,
-        (Math.random() * 2 - 1) * 0.6,
-        (Math.random() * 2 - 1) * 0.6,
-        a.hx * forward + (Math.random() * 2 - 1) * 0.1,
-        rise + LOOP_UP_MIN + Math.random() * LOOP_UP_VAR,
-        a.hz * forward + (Math.random() * 2 - 1) * 0.1,
+        a.y + centreOff + oy0 * emerge + sy,
+        ox0 * emerge + sx,
+        oz0 * emerge + sz,
+        ox0 * spd + coneX,
+        Math.max(rise, 0) + oy0 * spd + up,
+        oz0 * spd + coneZ,
+        size,
+        centreOff + oy0 * emerge + sy,
       )
     }
   }
+  Object.assign(scanCensus, censusLive)
 }
 
 /**
@@ -831,10 +1081,10 @@ export function updateSpray(dt: number, t: number) {
   }
 
   coverScanClock += dt
-  if (coverScanClock >= LOOP_SCAN_INTERVAL) {
+  if (coverScanClock >= LOOP_SCAN_INTERVAL / SCAN_SLICES) {
     coverScanClock = 0
     scanLoopSplash(t)
-    refreshInjectors(t)
+    if (scanSlice === 0) refreshInjectors(t)
   }
   updateInjectors(dt, t)
   emitSpume(dt)
@@ -847,8 +1097,23 @@ export function updateSpray(dt: number, t: number) {
       p.size = 0
       continue
     }
-    // Not yet activated (birth stagger).
-    if (t < p.birth) continue
+    // Not yet activated (birth stagger): the droplet is still PART of
+    // the froth mass, so it rides the loop frame instead of hanging in
+    // space waiting. Otherwise the loop travelled on during the stagger
+    // and the droplet popped into being where the froth used to be —
+    // ahead of nothing, with no throw, just falling.
+    if (t < p.birth) {
+      if (p.loop) {
+        const fr0 = loopFrame(p.ax, p.az, t)
+        p.ax += fr0.vx * dt
+        p.az += fr0.vz * dt
+        p.x = p.ax + fr0.swayX + p.ox
+        p.z = p.az + fr0.swayZ + p.oz
+        // Keep sitting on the froth's crown as the wave lifts and drops.
+        p.y = fr0.h + p.crown
+      }
+      continue
+    }
     // Dying: keep riding the water while the render shrinks it out.
     if (p.dying >= 0) {
       if (t - p.dying > DROPLET.dieTime) p.size = 0
@@ -913,7 +1178,13 @@ export function updateSpray(dt: number, t: number) {
       // land ahead of a RISING face, so their real flights are often
       // shorter than the gate — it was silently eating exactly the
       // crash-front deposits (droplet visibly hits, no foam appears).
-      if (p.loop || t - p.birth > 0.12) {
+      // A landing only counts if the droplet actually FLEW. Loop
+      // droplets used to be exempt (they launched at the waterline and
+      // their real flights were shorter than the gate), but now that
+      // they launch clear of the froth crown a quick death means the
+      // fold's multi-sheet misread killed them — and those were
+      // depositing foam where no droplet was ever visible.
+      if (t - p.birth > DROPLET.minFlight) {
         // Landing: hand the water back (O'Brien & Hodgins). The droplet
         // rings the surface and leaves a slow-dying dot of foam residue,
         // anchored in REST coordinates — the material water point under

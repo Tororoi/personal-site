@@ -315,8 +315,13 @@ export const CURRENT = {
  * owns the vertical (spray.ts).
  */
 export const DROPLET = {
-  /** Pool size. Exhaustion shows as missing spray, not a crash. */
-  maxCount: 1280,
+  /**
+   * Pool size. Exhaustion shows as missing spray, not a crash — and it
+   * WAS exhausting (43k failed allocations a run) once small froth
+   * masses started throwing. Cheap to raise now that a droplet is a
+   * single point-sprite vertex rather than an instanced octahedron.
+   */
+  maxCount: 4096,
   /** m/s^2. Real gravity: these are water, not dust. */
   gravity: 9.8,
   /** Fraction of the wind a flying clump feels (0 = pure ballistics). */
@@ -326,22 +331,35 @@ export const DROPLET = {
   /** Hard lifetime cap, s (landing is the real death). */
   lifeMax: 3,
   /** Art-scaled droplet radii, m — a visible parcel, not a raindrop. */
-  sizeMin: 0.07,
-  sizeMax: 0.24,
+  sizeMin: 0.04,
+  sizeMax: 0.17,
 
   /** Loop scan: cadence (s), grid pitch and half-extent (m). */
   scanInterval: 0.1,
   scanStep: 1.6,
   scanExtent: 40,
-  /** Jacobian below which a sample counts as a loop. */
-  scanJ: 0.02,
+  /**
+   * Jacobian below which a scan sample is recorded. This must reach at
+   * least FROTH.gateJStart, or froth that exists is invisible to the
+   * droplet system: at 0.02 the scan only saw water already at the
+   * point of collapse, while froth appears from J < 0.6 — so every
+   * small and mid-sized froth mass was silently unable to throw.
+   */
+  scanJ: 0.45,
+  /**
+   * How far the froth's emergence gate must be open before a mass
+   * throws (0 = the instant it appears, 1 = fully overturned). The old
+   * test demanded J < 0, i.e. complete inversion, which small crests
+   * never reach at all.
+   */
+  exposeMin: 0.45,
   /** Depth normalisation for the emission-count curve. */
   depthSpan: 0.4,
 
   /** Hop RELATIVE to the loop frame: up, then forward. */
   hopUpMin: 0.3,
   hopUpVar: 0.3,
-  hopFwdMin: 1.0,
+  hopFwdMin: 1.5,
   hopFwdVar: 1.0,
   /**
    * The forward hop SCALES with the loop's size (the same froth factor
@@ -350,10 +368,52 @@ export const DROPLET = {
    * crest. hopFwdMin/Var are therefore the LARGE-loop values, and this
    * is the floor small loops fall to.
    */
-  hopFwdSizeFloor: 0.3,
+  hopFwdSizeFloor: 1.0,
 
-  /** Birth stagger (s): de-synchronises the 0.1s scan volleys. */
+  /** Birth stagger (s): de-synchronises the 0.1s scan volleys. While
+   * staggered a droplet RIDES its froth mass (it has not been thrown
+   * yet), so it enters the air where the froth is at that moment rather
+   * than popping into existence where the froth used to be. */
   birthStagger: 0.1,
+  /**
+   * Minimum froth factor a mass needs before it throws anything. The
+   * froth's own visibility threshold (FROTH.visStart) is deliberately
+   * generous — a faint smear of froth still reads fine — but the
+   * smallest masses have no business hurling spray.
+   */
+  minFroth: 0.2,
+  /**
+   * Ceiling on a droplet's radius as a fraction of the froth mass that
+   * threw it. Without it the tiniest masses were throwing droplets
+   * bigger than themselves.
+   */
+  sizeVsFroth: 0.85,
+  /**
+   * Droplets thrown per FROTH MASS. Emission is scanned on a coarse
+   * grid (scanStep) while froth sits on a fine lattice (FROTH.lattice),
+   * so each scan cell stands for many masses: the count is this figure
+   * times the masses estimated in the cell, capped by `maxPerPoint` to
+   * protect the pool.
+   */
+  perFroth: 4,
+  maxPerPoint: 14,
+  /**
+   * WHEN a froth mass throws its water: at the top of its arc around
+   * the loop, not the moment it clears the surface. The mass is thrown
+   * when the crest carrying it peaks — so emission needs the surface
+   * high (`peakHeight`, as a fraction of the DOMINANT band's amplitude,
+   * not the sea's total: normalising by the sum meant only the very
+   * biggest crests could ever qualify) and its vertical velocity at or
+   * just past zero (`peakRise`, m/s).
+   * Without this, every mass threw the instant it surfaced, which read
+   * as droplets leaping out of the water ahead of the wave.
+   */
+  peakHeight: 0.35,
+  peakRise: 0.6,
+  /** Minimum flight (s) before a landing may deposit foam. A droplet
+   * killed early is a bad surface reading at a fold, not a splash —
+   * letting those deposit painted foam where nothing was ever seen. */
+  minFlight: 0.1,
   /** Render ease in/out (s) and death shrink. */
   growTime: 0.05,
   dieTime: 0.08,
@@ -361,8 +421,22 @@ export const DROPLET = {
   streakPerSpeed: 0.1,
   streakCap: 2.1,
   /** Submersion test grace for young loop droplets (s): the surface is
-   * multi-sheeted at a fold and insta-culled healthy spray. */
+   * multi-sheeted at a fold and insta-culled healthy spray. Launching
+   * from the froth crown fixed the OTHER thing this was hiding (birth
+   * already in contact), but the sheet misread is real and large:
+   * measured at ~1300 culls/second with the grace shortened to 0.08,
+   * versus ~13/s at 0.25. Every one of those culls also deposits foam,
+   * so this value drives foam volume as much as it does spray. */
   submergeGrace: 0.25,
+  /**
+   * Clearance above the FROTH MASS's crown that droplets launch from,
+   * metres. Droplets are torn off the froth, so the froth's own
+   * geometry — not the raw water height — is where they start: the
+   * mass sits FROTH.submersion x radius under the surface, so its
+   * crown is above the waterline, and a droplet needs its own radius
+   * plus this margin to clear its contact test at birth.
+   */
+  launchClearance: 0.06,
   /** Foam deposit radius: floor + per unit droplet size. */
   depositBase: 0.13,
   depositPerSize: 0.5,
@@ -376,7 +450,7 @@ export const DROPLET = {
    */
   depositAmount: 0.9,
   /** Buoy spray leaves less behind than a breaking crest does. */
-  depositAmountBuoy: 0.6,
+  depositAmountBuoy: 0.35,
   /** Buoy deposit radius: floor + per unit droplet size. */
   depositBaseBuoy: 0.13,
   depositPerSizeBuoy: 0.3,

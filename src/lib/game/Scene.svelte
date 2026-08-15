@@ -15,7 +15,14 @@
 	} from './whitecaps';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
-	import { emitImpactSpray, MAX_SPRAY, sprayParticles, updateSpray } from './spray';
+	import {
+		emitImpactSpray,
+		MAX_SPRAY,
+		setScanExtent,
+		setViewQuad,
+		sprayParticles,
+		updateSpray
+	} from './spray';
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import { addFoam, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
 	import { DROPLET, ENABLE, f, FOAM, FROTH, LOOP, MIST, PLUME } from './tuning';
@@ -972,6 +979,47 @@ void main() {
 	// center rides under the surface (hidden by depth) and pops out when
 	// the sheet overturns; the steepness gate scales both the offset and
 	// the pixel size. position = (anchorX, radius, anchorZ).
+	const quadNear = new THREE.Vector3();
+	const quadFar = new THREE.Vector3();
+	const quadCorners: number[] = [];
+	const QUAD_NDC: [number, number][] = [
+		[-1, -1],
+		[1, -1],
+		[1, 1],
+		[-1, 1]
+	];
+	function updateViewQuad() {
+		const cam = camera.current;
+		if (!cam) return;
+		quadCorners.length = 0;
+		for (const [nx, ny] of QUAD_NDC) {
+			quadNear.set(nx, ny, -1).unproject(cam);
+			quadFar.set(nx, ny, 1).unproject(cam);
+			const dy = quadFar.y - quadNear.y;
+			if (Math.abs(dy) < 1e-6) return;
+			const tHit = -quadNear.y / dy;
+			quadCorners.push(
+				quadNear.x + (quadFar.x - quadNear.x) * tHit,
+				quadNear.z + (quadFar.z - quadNear.z) * tHit
+			);
+		}
+		// Push each corner out from the centre: waves sway in from just
+		// past the edge, and their froth should still throw.
+		let cx = 0;
+		let cz = 0;
+		for (let i = 0; i < 4; i++) {
+			cx += quadCorners[i * 2] / 4;
+			cz += quadCorners[i * 2 + 1] / 4;
+		}
+		for (let i = 0; i < 4; i++) {
+			const dx = quadCorners[i * 2] - cx;
+			const dz = quadCorners[i * 2 + 1] - cz;
+			const len = Math.hypot(dx, dz) || 1;
+			quadCorners[i * 2] += (dx / len) * EDGE_MARGIN;
+			quadCorners[i * 2 + 1] += (dz / len) * EDGE_MARGIN;
+		}
+		setViewQuad(quadCorners);
+	}
 	function buildFrothGeometry() {
 		// Dense base lattice; the shader thins it dynamically by sprite
 		// size (small beads pack tight, big masses stay sparse).
@@ -980,6 +1028,9 @@ void main() {
 			0.71 * (window.innerWidth / zoom / 2) +
 			1.34 * (window.innerHeight / zoom / 2) +
 			EDGE_MARGIN;
+		// The droplet scan must cover the same ground as the froth field,
+		// or froth in the window's outer corners never throws.
+		setScanExtent(half);
 		const pos: number[] = [];
 		const rank: number[] = [];
 		for (let gx = -half; gx <= half; gx += S) {
@@ -1585,6 +1636,12 @@ void main() {
 			crestSprayMaterial.uniforms.uMaxPoint.value = maxPointSize;
 			waterUniforms.uTime.value = waveTime;
 
+			// Only scan the ground the camera can SEE: the isometric view is
+			// a rotated rectangle on the water plane, so the axis-aligned
+			// scan square wastes its corners. Recomputed per frame — doing
+			// it at geometry-build time ran before the camera's matrices
+			// existed, and the garbage quad culled the entire scan.
+			updateViewQuad();
 			const wind = windVector(waveTime);
 			waterUniforms.uWind.value.set(wind.x, wind.z);
 			waterUniforms.uWindTravel.value.set(windTravel.x, windTravel.z);
