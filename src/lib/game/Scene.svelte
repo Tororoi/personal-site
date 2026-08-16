@@ -1471,63 +1471,77 @@ void main() {
 	 * a wireframe view has to run the same shader; a plain wireframe
 	 * material would draw the undeformed plane and show nothing useful.
 	 */
-	const bowCrestVertex = `
+	/**
+	 * Where a point on the bow crest's torus is, in world space.
+	 *
+	 * Shared verbatim by the tube and by the froth masses riding it, so
+	 * the two cannot disagree about the surface the masses are on. Takes
+	 * the arc parameter (0-1 across the crest) and an angle around the
+	 * cross-section; returns the world position, the outward normal, the
+	 * taper and the liveness.
+	 */
+	/**
+	 * The preset's clock. timeScale is baked into each wave's omega when
+	 * the spectrum is built, so uTime stays real seconds — anything
+	 * animating on uTime has to scale itself or it runs at wall-clock
+	 * rate while the sea runs at its own.
+	 */
+	const crestTimeScale = activeField.timeScale ?? 1;
+
+	/**
+	 * The tube's NOMINAL cross-section: what it measures at average
+	 * wobble, full taper, for this sea. Masses are at their full size
+	 * here and saturate above it.
+	 *
+	 * DERIVED, never written down. As a hand-copied constant it silently
+	 * went stale the moment CONTACT.width was tuned — the tube shrank,
+	 * the ratio against the stale nominal collapsed, and every mass fell
+	 * under FROTH.cullRadius and vanished. Anything that is a function of
+	 * other knobs has to be computed from them.
+	 */
+	const crestRefThick = Math.max(
+		CONTACT.width * CONTACT_FOAMINESS * BOWCREST.thickPerWidth,
+		0.001
+	);
+
+	const bowCrestPlaceGlsl = `
 uniform float uTime;
 uniform float uAmp;
 uniform vec2 uFlowDir;
-varying float vViewZ;
-varying vec2 vUvC;
-varying vec3 vNrm;
-varying float vTaper;
-varying float vAlive;
 const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
 const float SPHERE_R = 5.0;
-${wavesGlsl()}
-${foamNoiseGlsl}
 
-void main() {
-	// uv.x along the arc, uv.y around the lip.
-	vec2 g = uv;
-	vUvC = g;
+void bowCrestPlace(
+	float arcT, float phi,
+	out vec3 pos, out vec3 nrm, out float taper, out float alive, out float thick
+) {
 	// Centred on the flow's stagnation point — dead ahead of the object.
 	float ang = atan(uFlowDir.y, uFlowDir.x) + 3.14159
-		+ (g.x - 0.5) * 2.0 * ${f(BOWCREST.arc)};
+		+ (arcT - 0.5) * 2.0 * ${f(BOWCREST.arc)};
 	vec2 n = vec2(cos(ang), sin(ang));
-	// WHERE THE WATER MEETS THE SPHERE, solved in WORLD space — because
-	// that is the space the contact collar works in. The collar takes a
-	// real surface fragment and compares its distance to the ring at its
-	// OWN height. Placing the crest by picking a rest position instead
-	// misses by the Gerstner sway, which is metres in a storm: the base
-	// ends up nowhere near the world radius it was aiming for.
+	// WHERE THE WATER MEETS THE SPHERE, solved in WORLD space — the space
+	// the contact collar works in. Placing by a rest position instead
+	// misses by the Gerstner sway, metres in a storm.
 	//
-	// Two nested solves. The outer one is a fixed point — the waterline
-	// radius depends on the surface height there, which depends on the
-	// radius. The inner one inverts the Gerstner map, answering "which
-	// material point lands HERE?", the same 3-iteration inversion the
-	// droplet foam deposits use. The mesh is ~1k vertices, so the nesting
-	// costs nothing.
+	// Two nested solves: the outer is a fixed point (the waterline radius
+	// depends on the height there, which depends on the radius); the
+	// inner inverts the Gerstner map, answering "which material point
+	// lands HERE?".
 	float ringW = SPHERE_R;
 	float collarW = 0.0;
 	vec2 rest = SPHERE_C.xz + n * ringW;
 	vec2 target = rest;
 	vec3 d = vec3(0.0);
 	for (int it = 0; it < 3; it++) {
-		// The collar's own width and wobble, from the same noise at the
-		// same scale, so the crest wanders with the collar's edge rather
-		// than cutting across it.
 		vec2 anchorXZ = SPHERE_C.xz + n * ringW;
 		float wob = foamNoise(anchorXZ * ${f(1 / CONTACT.wobbleScale)}) * 0.6
 			+ foamNoise(anchorXZ * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
 		collarW = ${f(CONTACT.width * CONTACT_FOAMINESS)}
 			* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
 		target = SPHERE_C.xz + n * (ringW + collarW * ${f(BOWCREST.standoffFrac)});
-		// DAMPED and CLAMPED. The plain iteration rest = target - d(rest)
-		// only converges where the displacement gradient is under 1, and
-		// that is exactly what fails at a fold — which is where this crest
-		// lives. Undamped it can walk away and return a height from some
-		// unrelated stretch of sea, putting the tube far below the water
-		// or off in space. Damping keeps it stable, and the clamp bounds
-		// the worst case to the sway the waves can actually produce.
+		// Damped and clamped: the plain iteration only converges where the
+		// displacement gradient is under 1, and that fails at a fold —
+		// which is where this crest lives.
 		for (int k = 0; k < 4; k++) {
 			vec2 want = target - waveDisplacement(rest, uTime, uAmp).xz;
 			rest = mix(rest, want, 0.7);
@@ -1539,43 +1553,48 @@ void main() {
 		float dy = d.y - SPHERE_C.y;
 		ringW = sqrt(max(SPHERE_R * SPHERE_R - dy * dy, 0.0));
 	}
-	// rest + displacement lands ON target by construction, so the base is
-	// exactly the world point asked for, at the true surface height.
+	// As the object goes under, the circle the surface cuts shrinks to
+	// nothing — so the ring radius is itself the liveness test.
+	alive = smoothstep(0.0, ${f(BOWCREST.minRing)}, ringW);
+	float away = abs(arcT - 0.5) * 2.0;
+	taper = pow(max(1.0 - away, 0.0), ${f(BOWCREST.taperPower)});
+	thick = collarW * ${f(BOWCREST.thickPerWidth)}
+		* mix(${f(BOWCREST.taperMin)}, 1.0, taper);
+	// rest + displacement lands ON target by construction.
 	vec3 surf = vec3(target.x, d.y, target.y);
-	// CULL WHEN THERE IS NO WATERLINE. As the sphere goes under, the
-	// circle the surface cuts shrinks to nothing — so the ring radius is
-	// itself the test, and it covers the crown just breaking through as
-	// well as the whole body submerging, with one number and no separate
-	// depth check.
-	vAlive = smoothstep(0.0, ${f(BOWCREST.minRing)}, ringW);
-	// A TORUS: the cross-section is a full circle, not a half lip. That
-	// is what lets froth travel all the way around it — the toroidal
-	// circulation a pinch loop's froth has, rather than a band sliding
-	// over a fixed surface.
-	float phi = g.y * 6.28318;
 	vec3 outw = vec3(n.x, 0.0, n.y);
 	vec3 up = vec3(0.0, 1.0, 0.0);
-	// TAPER away from the nose. 0 dead ahead, 1 at the ends of the arc.
-	float away = abs(g.x - 0.5) * 2.0;
-	vTaper = pow(max(1.0 - away, 0.0), ${f(BOWCREST.taperPower)});
-	// Sized off the collar, so a sea too calm to grow a collar grows no
-	// crest either — one foaminess, not two thresholds to keep aligned.
-	float thick = collarW * ${f(BOWCREST.thickPerWidth)}
-		* mix(${f(BOWCREST.taperMin)}, 1.0, vTaper);
-	// The tube sits ON the water: its centre is one radius up, so the
-	// bottom of the circle touches the surface however thick it is.
+	// The tube sits ON the water: centre one radius up, so the bottom of
+	// the circle touches the surface at whatever thickness it has.
 	vec3 axisC = surf + up * thick + outw * (${f(BOWCREST.lean)} * thick);
-	vec3 pos = axisC + outw * (cos(phi) * thick) + up * (sin(phi) * thick);
-	vNrm = normalize(outw * cos(phi) + up * sin(phi));
+	pos = axisC + outw * (cos(phi) * thick) + up * (sin(phi) * thick);
+	nrm = normalize(outw * cos(phi) + up * sin(phi));
+}`;
+
+	/**
+	 * The crest's SHAPE lives entirely in the shader — the geometry is a
+	 * bare unit plane whose two axes are reinterpreted. A wireframe view
+	 * has to run the same shader; a plain wireframe material would draw
+	 * the undeformed plane.
+	 */
+	const bowCrestVertex = `
+varying float vViewZ;
+varying vec2 vUvC;
+varying vec3 vNrm;
+varying float vTaper;
+varying float vAlive;
+${wavesGlsl()}
+${foamNoiseGlsl}
+${bowCrestPlaceGlsl}
+
+void main() {
+	vUvC = uv;
+	vec3 pos;
+	float thick;
+	bowCrestPlace(uv.x, uv.y * 6.28318, pos, vNrm, vTaper, vAlive, thick);
 	vec4 view = viewMatrix * vec4(pos, 1.0);
 	vViewZ = -view.z;
 	gl_Position = projectionMatrix * view;
-	// NO vertex-level cull. Throwing a vertex to a fixed off-screen point
-	// works for the froth's independent POINTS, but on a mesh a triangle
-	// with only some of its corners moved still rasterises — stretched
-	// out toward that point, which is the streak toward the screen corner
-	// as the object submerges. vAlive rides to the fragment instead and
-	// the whole tube discards there, costing nothing when it is hidden.
 }`;
 
 	const bowCrestUniforms = {
@@ -1621,22 +1640,13 @@ void main() {
 	// ROLLING is shading, not geometry: froth bands travel around the
 	// cross-section. A breaking lip tumbles because its material
 	// circulates, and this stands in for that circulation.
-	// SOLID white across the body, like a froth mass. Banding it read as
-	// stripes painted on a tube rather than as water. The toroidal motion
-	// lives in the BREAKUP below, which circulates — and will show
-	// properly once froth sprites ride the same parametrisation.
+	// SOLID white, with NO pattern of any kind: the tube is a plain mass
+	// of water. Everything that gives the crest texture and motion is the
+	// froth riding it — a tube that patterns itself competes with those
+	// masses and reads as painted rather than as water.
 	// PARTIAL CULL toward the ends, not a uniform fade: the taper is a
 	// threshold against noise, so the tube breaks into patches and thins
 	// out unevenly, which is how froth actually runs out.
-	// NOT named patch: reserved word in GLSL ES (tessellation shaders
-	// claim it). It fails the fragment compile, and a material with a
-	// broken shader draws nothing at all with no error unless the console
-	// is open — which is exactly how this went missing.
-	float mottle = foamNoise(vec2(
-		vUvC.x * ${f(BOWCREST.cullScale)},
-		vUvC.y * ${f(BOWCREST.bands)} - uTime * ${f(BOWCREST.rollRate)}
-	));
-	if (mottle > mix(${f(BOWCREST.cullFloor)}, 1.0, vTaper)) discard;
 	float ends = smoothstep(0.0, ${f(BOWCREST.endFade)}, min(vUvC.x, 1.0 - vUvC.x));
 	float a = ends * vAlive;
 	if (a < 0.02) discard;
@@ -1690,6 +1700,130 @@ void main() {
 	const wireView =
 		typeof window !== 'undefined' &&
 		new URLSearchParams(window.location.search).has('wire');
+
+	/**
+	 * FROTH MASSES riding the torus, carrying the toroidal spin.
+	 *
+	 * The spin has to live here, not on the tube. Crest froth reads as
+	 * tumbling because discrete MASSES move; a smooth white tube has no
+	 * feature to track, so rotation painted on it can only look like
+	 * bands sliding over a static surface. Give the masses an angle
+	 * around the cross-section that advances with time and they circulate
+	 * the way froth does on a real pinch loop — and they inherit the
+	 * tube's own placement, so they cannot drift off it.
+	 */
+	function buildBowFrothGeometry() {
+		const pos: number[] = [];
+		const rank: number[] = [];
+		for (let i = 0; i < BOWCREST.frothAlong; i++) {
+			for (let j = 0; j < BOWCREST.frothAround; j++) {
+				const h = Math.abs(Math.sin(i * 37.719 + j * 53.117) * 24634.6345) % 1;
+				const h2 = Math.abs(Math.sin(i * 12.989 + j * 78.233) * 43758.545) % 1;
+				// x = arc parameter, y = starting angle around the tube,
+				// z = this mass's own baked radius. Jittered per mass the
+				// way the crest froth's is, so no two are the same size.
+				pos.push(
+					(i + 0.5) / BOWCREST.frothAlong,
+					(j + h) / BOWCREST.frothAround,
+					// z is the per-mass JITTER multiplier now, not a radius:
+					// the radius itself comes from the torus in the shader.
+					1 - BOWCREST.frothRadiusVar + 2 * BOWCREST.frothRadiusVar * h2
+				);
+				rank.push(Math.abs(Math.sin(i * 91.331 + j * 17.923) * 15731.743) % 1);
+			}
+		}
+		const g = new THREE.BufferGeometry();
+		g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+		g.setAttribute('aRank', new THREE.Float32BufferAttribute(rank, 1));
+		return g;
+	}
+	const bowFrothGeometry = buildBowFrothGeometry();
+
+	const bowFrothMaterial = new THREE.ShaderMaterial({
+		uniforms: { ...bowCrestUniforms, uPointPx: frothMaterial.uniforms.uPointPx },
+		vertexShader: `
+attribute float aRank;
+uniform float uPointPx;
+varying float vViewZ;
+varying vec3 vNrm;
+varying float vFade;
+${wavesGlsl()}
+${foamNoiseGlsl}
+${bowCrestPlaceGlsl}
+
+void main() {
+	// The angle advances with time: this IS the toroidal spin. NEGATIVE,
+	// because phi runs outward -> up -> inward, so increasing it drags
+	// the top of the roll back toward the hull. A breaking lip throws the
+	// other way: over the top and away from the object.
+	float phi = (position.y - uTime * ${f(BOWCREST.rollRate * crestTimeScale)}) * 6.28318;
+	vec3 pos;
+	float taper;
+	float alive;
+	float thick;
+	bowCrestPlace(position.x, phi, pos, vNrm, taper, alive, thick);
+	// SIZED BY THE CREST FROTH'S OWN LAW, not proportionally to the tube.
+	//
+	// Tying the radius to a fraction of the tube made masses scale 1:1
+	// with it — always the same share of its diameter, so they read as a
+	// lumpy tube rather than as froth sitting on one. A crest mass has an
+	// ABSOLUTE base radius that the froth factor then modulates through a
+	// saturating ramp and a cap, which is why masses stay small against a
+	// big loop. Here the tube's thickness against its nominal plays the
+	// froth factor's part, and the rest of the law is FROTH's verbatim.
+	float sizeFac = thick / ${f(crestRefThick)};
+	// DENSITY RISES AS MASSES SHRINK (FROTH.densMax -> densMin as size
+	// goes up): big masses stay sparse so they read individually, small
+	// ones pack in so a thinning crest breaks into spray, not gaps.
+	float dens = mix(${f(FROTH.densMax)}, ${f(FROTH.densMin)},
+		smoothstep(${f(FROTH.densStart)}, ${f(FROTH.densEnd)}, sizeFac));
+	float keep = smoothstep(0.0, ${f(FROTH.densSoft)}, dens - aRank);
+	float r = ${f(BOWCREST.frothBase)} * position.z
+		* min(sizeFac, ${f(FROTH.sizeCap)})
+		* smoothstep(${f(FROTH.visStart)}, ${f(FROTH.visFull)}, sizeFac)
+		* keep;
+	// Below the crest froth's own cull radius it is noise, not a mass.
+	if (r < ${f(FROTH.cullRadius)}) r = 0.0;
+	// PROUD of the surface, not on it. Sitting exactly on the tube they
+	// are the same flat white as the tube, coincident with it and losing
+	// the depth test to it half the time — so the circulation was real
+	// and completely invisible. Pushed out along the normal they break
+	// the tube's silhouette, and it is that broken outline travelling
+	// round that reads as rotation, not any shading inside it.
+	pos += vNrm * (r * ${f(BOWCREST.frothProud)});
+	vFade = alive * step(0.0001, r);
+	vec4 view = viewMatrix * vec4(pos, 1.0);
+	vViewZ = -view.z;
+	gl_PointSize = r * 2.0 * uPointPx * vFade;
+	gl_Position = projectionMatrix * view;
+}`,
+		fragmentShader: `
+precision highp float;
+uniform vec3 uColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+varying float vViewZ;
+varying vec3 vNrm;
+varying float vFade;
+${WHITEWATER_UNIFORM_DECLS}
+${whitewaterLightGlsl()}
+
+void main() {
+	if (vFade <= 0.0) discard;
+	float dd = length(gl_PointCoord - 0.5) * 2.0;
+	if (dd > 1.0) discard;
+	// FLAT, exactly as the crest froth sprites are lit.
+	vec3 sn = vNrm.y < 0.0 ? -vNrm : vNrm;
+	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
+	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
+}`
+	});
+
+	const bowFrothMesh = new THREE.Points(bowFrothGeometry, bowFrothMaterial);
+	bowFrothMesh.frustumCulled = false;
+	bowFrothMesh.visible = ENABLE.bowCrest;
 
 	const bowCrestMesh = new THREE.Mesh(
 		bowCrestGeometry,
@@ -2438,6 +2572,8 @@ void main() {
 		bowCrestGeometry.dispose();
 		bowCrestMaterial.dispose();
 		bowCrestWireMaterial.dispose();
+		bowFrothGeometry.dispose();
+		bowFrothMaterial.dispose();
 		crestSprayMaterial.dispose();
 		mistGeometry.dispose();
 		mistMaterial.dispose();
@@ -2471,6 +2607,7 @@ void main() {
 
 <T is={frothMesh} />
 <T is={bowCrestMesh} />
+<T is={bowFrothMesh} />
 
 <T is={crestSprayMesh} />
 

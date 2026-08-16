@@ -26,7 +26,7 @@ export const ENABLE = {
   /** Pull of the pinch zone toward the sprite plane. */
   loopStretch: true,
   /** Froth masses surfacing from under the fold. */
-  froth: false,
+  froth: true,
   /** Vertical spray thrown off each foam mass. */
   crestPlumes: false,
   /** Ballistic droplets launched from inside the loops. */
@@ -434,7 +434,7 @@ export const OBJWAVE = {
 export const BOWCREST = {
   /** Arc covered either side of dead-ahead, radians. PI/2 is the whole
    * upstream half; less makes a tighter nose crest. */
-  arc: 1.35,
+  arc: 1.57,
   /**
    * Where the crest sits ACROSS the contact collar's band, 0-1: 0 at the
    * hull edge, 1 at the collar's outer rim. Expressed against the collar
@@ -443,8 +443,10 @@ export const BOWCREST = {
    * instead of being a second set of numbers to keep aligned.
    */
   standoffFrac: 0.5,
-  /** Lip cross-section radius, as a multiple of the collar's width. */
-  thickPerWidth: 1.1,
+  /** Lip cross-section radius, as a multiple of the collar's width.
+   * The masses are sized off this too, so raising it grows the whole
+   * crest together rather than just the tube. */
+  thickPerWidth: 0.2,
   /** How far the tube leans downstream, as a fraction of its radius. */
   lean: 0.6,
   /**
@@ -454,28 +456,33 @@ export const BOWCREST = {
   taperPower: 1.6,
   /** Thickness at the very ends, as a fraction of the nose's. */
   taperMin: 0.12,
-  /** Noise scale for the partial cull along the arc. The taper is used
-   * as a THRESHOLD against this rather than as an opacity, so the tube
-   * breaks into patches toward the ends instead of fading uniformly. */
-  cullScale: 7,
   /**
-   * How much survives the cull at the ENDS of the arc, 0-1. The taper
-   * was used as the threshold directly, which meant two thirds of the
-   * tube discarded by mid-arc and almost all of it near the ends — the
-   * crest was being thinned to nothing before it ever reached the taper
-   * it was meant to have. This floors it, so the ends thin out and
-   * break up rather than vanishing.
+   * Circulation speed in REVOLUTIONS PER SECOND, at timeScale 1.
+   *
+   * Scaled by the preset's timeScale where it is baked into the shader,
+   * because timeScale goes into each wave's OMEGA when the spectrum is
+   * built, not into uTime — so anything driven by uTime keeps wall-clock
+   * pace unless it scales itself, and the crest would have spun on
+   * regardless of how slowly the sea was moving.
+   *
+   * (The tube carries no pattern at all now, so this drives only the
+   * masses. cullScale, cullFloor and bands went with the texture.)
+   *
+   * The PHYSICAL rate, measured against this spectrum, is 0.35 rev/s: a
+   * Gerstner material point circles at its wave's own angular frequency,
+   * and the pinch-weighted mean omega is 2.2 rad/s, a 2.85s turn. That
+   * is much slower than a crest LOOKS, because what reads as churn there
+   * is not the orbit at all — it is masses appearing and vanishing as
+   * the fold sweeps past them. This crest has no such turnover, so it
+   * has to carry the impression on circulation alone and runs faster
+   * than the water really does.
+   *
+   * Ceiling: with `frothAround` masses on the ring a given point is
+   * passed frothAround * rollRate times a second, and past roughly a
+   * quarter of the frame rate it strobes — appearing to drift slowly
+   * BACKWARD — instead of spinning. At 7 masses that is about 2.1.
    */
-  cullFloor: 0.4,
-  /**
-   * How many turns of the breakup pattern per revolution of the
-   * cross-section, and how fast it circulates. The BODY is solid white
-   * like a froth mass — these drive only the patchy cull, so the tumble
-   * reads as froth tearing and reforming rather than as bands painted
-   * across a solid tube.
-   */
-  bands: 3,
-  rollRate: 1.6,
+  rollRate: 1.7,
   /** Fade at the ends of the arc, as a fraction of it. */
   endFade: 0.35,
   /**
@@ -490,9 +497,56 @@ export const BOWCREST = {
    * hides the crest almost always.
    */
   minRing: 0.25,
+  /**
+   * FROTH MASSES riding the torus — how many along the arc and around
+   * the cross-section, and how big each is.
+   *
+   * These carry the toroidal spin, because the tube itself cannot: a
+   * smooth white surface has no feature to track, so rotation on it
+   * reads as bands sliding rather than water circulating. Discrete
+   * masses moving is what makes a pinch loop's froth tumble, and these
+   * are the same masses on the same kind of path.
+   */
+  /**
+   * Masses along the arc and around the cross-section. These are the
+   * SPRITE counts, nothing to do with segArc/segLip, which tessellate
+   * the tube — the tube is a smooth swept shape and needs far fewer
+   * divisions than the froth needs masses.
+   */
+  frothAlong: 64,
+  frothAround: 7,
+  /**
+   * Mean mass radius in METRES, plus the per-mass jitter either side.
+   *
+   * Absolute, not a fraction of the tube: a crest mass has a baked base
+   * radius that the froth factor modulates, and that is what keeps masses
+   * small against a large loop. Scaling them off the tube instead made
+   * them a fixed share of its diameter at every size, so they read as a
+   * lumpy tube rather than as froth on one.
+   *
+   * Neither size response nor density is a knob here — both come from
+   * FROTH (visStart/visFull, sizeCap, densMax/densMin), so the bow crest
+   * sizes and thins exactly as a wave crest does.
+   *
+   * Nor is the nominal tube size the masses are measured against: it is
+   * derived in Scene from CONTACT.width, the chop foaminess and
+   * thickPerWidth. As a hand-written constant it went stale as soon as
+   * the collar was retuned and culled every mass.
+   */
+  frothBase: 0.26,
+  frothRadiusVar: 0.3,
+
+  /**
+   * How far the masses sit PROUD of the tube, as a fraction of their own
+   * radius. Not zero: flush with the surface they are the same white as
+   * the tube and coincident with it, so their motion cannot be seen at
+   * all. Standing out, their silhouettes break the tube's outline, and
+   * that travelling outline is what reads as circulation.
+   */
+  frothProud: 0.8,
   /** Tessellation: segments along the arc and around the lip. */
-  segArc: 96,
-  segLip: 16,
+  segArc: 36,
+  segLip: 8,
 } as const
 
 /**
