@@ -1952,8 +1952,12 @@ void main() {
 						// rebound column, and any interference with other
 						// ripples all come from the wave equation.
 						const impact = Math.abs(riseRate - b.vy);
-						if (impact > 1.2) {
-							const amp = Math.min((impact - 1.2) / 3.5, 1);
+						if (impact > DROPLET.impactMinSpeed) {
+							const amp = Math.min(
+								(impact - DROPLET.impactMinSpeed) /
+									(DROPLET.impactFullSpeed - DROPLET.impactMinSpeed),
+								1
+							);
 							// Two effects: the displacement hat (water pushed
 							// aside, wave equation) and the airborne crown
 							// (ballistic spray, spray.ts) whose landings leave

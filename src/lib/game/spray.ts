@@ -624,6 +624,11 @@ if (typeof window !== 'undefined') {
   })
 }
 
+/**
+ * @param sizeK 0-1 ceiling on droplet size: 0 pins every droplet to
+ *   sizeMin, 1 opens the full sizeMin..sizeMax range. A gentle impact
+ *   throws fine spray, not a scattering of fat parcels.
+ */
 function launch(
   t: number,
   x: number,
@@ -633,6 +638,7 @@ function launch(
   vy: number,
   vz: number,
   impact: boolean,
+  sizeK = 1,
 ) {
   const p = alloc()
   if (!p) return
@@ -643,7 +649,7 @@ function launch(
   p.vy = vy
   p.vz = vz
   p.birth = t
-  p.size = SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN)
+  p.size = SIZE_MIN + Math.random() * (SIZE_MIN + (SIZE_MAX - SIZE_MIN) * sizeK - SIZE_MIN)
   p.impact = impact
   p.loop = false
   p.crown = 0
@@ -760,20 +766,35 @@ export function emitImpactSpray(
   dirZ: number,
   energy: number,
 ) {
-  const count = Math.round(12 + energy * 36)
+  // Scale the crown to how HARD the object actually hit. A buoy
+  // dropping a few centimetres and one falling off a crest were
+  // throwing the same 12-droplet minimum at the same full size range,
+  // so every nudge read as a belly-flop. Count and size both fall away
+  // with the impact, on their own curves: the count can go to almost
+  // nothing, while the size settles toward sizeMin rather than zero —
+  // a light touch still makes spray, just fine spray.
+  const e = Math.min(Math.max(energy, 0), 1)
+  const count = Math.round(
+    DROPLET.impactCountMin +
+      (DROPLET.impactCountMax - DROPLET.impactCountMin) *
+        Math.pow(e, DROPLET.impactCountCurve),
+  )
+  if (count <= 0) return
+  const sizeK = Math.pow(e, DROPLET.impactSizeCurve)
   const s = sampleOcean(x, z, t, 1, 1)
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2
-    const r = (0.6 + Math.random() * 1.4) * (0.5 + energy)
+    const r = (0.6 + Math.random() * 1.4) * (0.5 + e)
     launch(
       t,
       x,
       s.height + 0.1,
       z,
-      Math.cos(a) * r + dirX * 1.6 * energy,
-      (1.2 + Math.random() * 1.6) * (0.6 + energy),
-      Math.sin(a) * r + dirZ * 1.6 * energy,
+      Math.cos(a) * r + dirX * 1.6 * e,
+      (1.2 + Math.random() * 1.6) * (0.6 + e),
+      Math.sin(a) * r + dirZ * 1.6 * e,
       true,
+      sizeK,
     )
   }
 }

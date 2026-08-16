@@ -42,7 +42,7 @@ export const ENABLE = {
    * things and are tuned separately.
    */
   /** Painted collar pinned to the waterline (CONTACT.*). */
-  contactFoam: true,
+  contactFoam: false,
   /** Foam objects EMIT into the field, which then drifts and dies with
    * the rest of it (FOAM.contact*). This is what makes the wake. */
   contactEmit: true,
@@ -455,6 +455,40 @@ export const DROPLET = {
   /** Hard lifetime cap, s (landing is the real death). */
   lifeMax: 3,
   /** Art-scaled droplet radii, m — a visible parcel, not a raindrop. */
+  /**
+   * IMPACT CROWN scaling — how a buoy's splash answers to how hard it
+   * actually landed. The energy is 0 at the splash threshold and 1 at a
+   * full crest-fall.
+   *
+   * Both curves are exponents on that energy, and they are deliberately
+   * different. COUNT may fall to almost nothing, because a gentle touch
+   * should throw a handful of drops. SIZE settles toward sizeMin instead
+   * of vanishing, because a light impact still makes spray — it makes
+   * FINE spray. Previously neither scaled: the smallest qualifying bump
+   * threw 12 droplets across the full size range, so every nudge read as
+   * a belly-flop.
+   */
+  /**
+   * The impact SPEED range, m/s, of buoy against water — the relative
+   * closing speed of the two, so a buoy dropping onto rising water hits
+   * harder than the same fall onto falling water.
+   *
+   * Below `impactMinSpeed` there is no splash at all. At
+   * `impactFullSpeed` the crown is at full count and full size; the
+   * curves below shape everything in between. These two set the SCALE
+   * the curves are read against, so widening the range makes every
+   * ordinary landing gentler without touching the curves themselves.
+   */
+  impactMinSpeed: 1.2,
+  impactFullSpeed: 6.7,
+
+  impactCountMin: 2,
+  impactCountMax: 48,
+  /** >1 holds the count down until the impact is genuinely hard. */
+  impactCountCurve: 1.8,
+  /** >1 keeps droplets near sizeMin except on the heaviest landings. */
+  impactSizeCurve: 1.4,
+
   sizeMin: 0.04,
   sizeMax: 0.17,
 

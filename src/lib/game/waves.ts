@@ -171,6 +171,7 @@ export const SEA_PRESETS = {
     windSpeed: 9,
     // With the wind (0.42): nothing opposing the swell.
     surfaceCurrentHeading: 0.42,
+    surfaceCurrentSpeed: 1.55,
     chop: 2.25,
     // Rings still readable, with some froth on energetic disturbances.
     ripples: {
