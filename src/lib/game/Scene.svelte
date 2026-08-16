@@ -26,7 +26,14 @@
 	} from './spray';
 	import { currentVector } from './current';
 	import { MistField, MIST_EXTENT } from './mistfield';
-	import { addFoam, foamFlow, FoamField, foamGlsl, FOAM_EXTENT } from './foam';
+	import {
+		addFoam,
+		CONTACT_FOAMINESS,
+		foamFlow,
+		FoamField,
+		foamGlsl,
+		FOAM_EXTENT
+	} from './foam';
 	import { CONTACT, DROPLET, ENABLE, f, FOAM, FROTH, LOOP, MIST, PLUME } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
@@ -66,20 +73,6 @@
 	// elevation — the old flat 4m margin let storm seas reveal unrendered
 	// corners.
 	const SWAY_BOUND = waves.reduce((sum, w) => sum + w.q * w.amp, 0);
-	/**
-	 * How foamy this sea is, 0-1, from the preset's CHOP. Chop is what
-	 * drives crests into breaking, and breaking is what makes foam, so it
-	 * separates a big smooth swell from a genuinely frothy sea the way
-	 * wave height cannot. Sets the contact collar's width.
-	 */
-	const CONTACT_FOAMINESS = Math.min(
-		Math.max(
-			(activeField.chop - CONTACT.chopStart) / (CONTACT.chopFull - CONTACT.chopStart),
-			0
-		),
-		1
-	);
-
 	const EDGE_MARGIN = 2 + SWAY_BOUND + 3.2 * significantAmplitude;
 	function buildWaterGeometry() {
 		const size =
@@ -251,7 +244,6 @@
 		uFoamTex: { value: null as THREE.Texture | null },
 		/** Wind+current carry, m/s, the SAME combination the foam field is
 		 * advected by — so the collar leans the way drifting foam goes. */
-		uContactDrift: { value: new THREE.Vector2() },
 		/** Accumulated carry, so the web pattern drifts with the foam. */
 		uFoamFlow: { value: new THREE.Vector2() },
 		uFoamCenter: { value: new THREE.Vector2(0, 0) },
@@ -327,7 +319,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	// dt-aware step keeps every clock wall-clock true across skipped
 	// frames, and the sim (the wave-sum probe especially) is one of the
 	// larger recurring GPU passes.
-	const foamField = new FoamField();
+	const foamField = new FoamField(waterUniforms.uBuoyInv.value);
 	let foamAccum = 0;
 	let foamEven = false;
 
@@ -392,7 +384,6 @@ varying vec2 vRest;
 varying vec2 vSlope;
 varying float vOverhang;
 uniform float uDomAmp;
-uniform vec2 uContactDrift;
 varying float vLoopSk;
 varying float vPinchWhite;
 varying float vViewZ;
@@ -473,90 +464,33 @@ float pinchMask(vec2 restXZ) {
  * FIELD does — it simply exists wherever an object is at the surface.
  */
 /**
- * A TAIL: a wedge leaving the object downstream and tapering to a point
- * over len, starting r0 wide to match the object's own cross-stream
- * half-width. Returns the signed distance in x, and in y how far along
- * the tail the point is, 0 at the object to 1 at the tip — because the
- * tail has to THIN as it goes, not just narrow.
+ * CONTACT FOAM: the collar of foam that sits ON an object at the
+ * waterline. Distinct from the foam objects emit into the field — that
+ * is ordinary foam and drifts away; this stays put for as long as the
+ * object is at the surface, and reads nothing about wind or current.
  *
- * A tail has to be its own shape. Displacing a radial distance field
- * downstream instead — the obvious cheap trick — just moves the ring off
- * the object, so it expands in every direction about the new centre and
- * the object ends up sitting in the corner of a blob. Widening the lee
- * side only thickens one flank. Neither can taper, and tapering is what
- * makes it read as a wake.
+ * Measured per pixel against each object's silhouette AT THIS
+ * FRAGMENT'S OWN HEIGHT, so it tracks the waterline for free: there is
+ * no waterline to compute and nothing to update as the swell passes.
  */
-vec2 tailField(vec2 rel, vec2 dir, float r0, float len) {
-	float along = dot(rel, dir);
-	if (along < 0.0 || len <= 0.0) return vec2(1e5, 1.0);
-	float across = abs(dot(rel, vec2(-dir.y, dir.x)));
-	float t = clamp(along / len, 0.0, 1.0);
-	float halfW = r0 * (1.0 - t);
-	return vec2(max(across - halfW, along - len), t);
-}
-
 float contactFoam(vec3 P) {
-	// Carry direction and strength, normalised against the speed at which
-	// the lean is considered full.
-	float driftSpd = length(uContactDrift);
-	vec2 driftDir = driftSpd > 0.001 ? uContactDrift / driftSpd : vec2(0.0);
-	float driftK = min(driftSpd / ${f(CONTACT.driftFull)}, 1.0);
-	// Width wobbles so the collar is not a clean geometric ring. Two
-	// octaves of value noise, NOT a product of sines: sines are strictly
-	// periodic, so the edge came out with one wavelength and one
-	// amplitude everywhere — uniformly wavy, which reads as a machined
-	// edge rather than a ragged one.
+	// Value noise, not a product of sines: sines are strictly periodic
+	// and gave the edge one wavelength and one amplitude everywhere.
 	float wob = foamNoise(P.xz * ${f(1 / CONTACT.wobbleScale)}) * 0.6
 		+ foamNoise(P.xz * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
 	float w = ${f(CONTACT.width * CONTACT_FOAMINESS)}
 		* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
 	float m = 0.0;
-	// TWO ways water touches a solid, and the collar needs both. Asking
-	// only whether the surface sits between the object's top and bottom
-	// fails the moment a wave washes over the crown: the test goes to
-	// zero and plain water draws straight across where the foam was,
-	// which is what reads as the surface overlapping the foam.
-	//
-	//  BESIDE — water alongside the object, out to w past the
-	//    silhouette AT THIS FRAGMENT'S HEIGHT. This is the waterline
-	//    collar, and it tracks up and down the object for free.
-	//  OVER — water covering the object, faded by how DEEP it is over
-	//    the object's surface at this exact spot. Depth to the surface
-	//    below, not height above the crown: the crown is one point, and
-	//    measuring from it says nothing about the water a few metres out.
-	//
-	// Widening the silhouette to the whole footprint when submerged (the
-	// previous attempt) is only defensible for something buoy-sized. On
-	// the 5m sphere it painted a 10m disc of foam.
+	// SPHERE. Two cases, because height must never be a hard gate: BESIDE
+	// is water alongside, out to w past the silhouette at this height;
+	// OVER is water covering it, faded by how deep it lies above the
+	// object's surface directly beneath — depth to the surface below, not
+	// height above the crown, which says nothing about the flank.
 	float rXZ = length(P.xz - SPHERE_C.xz);
-	// The guard has to clear the TAIL's reach, not just the collar's. It
-	// was written when the collar hugged the silhouette, so once the tail
-	// was added it sliced it off flat at the old radius — which is a hard
-	// edge across the wake, not a fade.
-	if (rXZ < SPHERE_R * ${f(1 + CONTACT.tailRatio)} + w) {
+	if (rXZ < SPHERE_R + w) {
 		float dy = P.y - SPHERE_C.y;
-		// Beside: the circle the surface actually cuts at this height.
 		float ring = sqrt(max(SPHERE_R * SPHERE_R - dy * dy, 0.0));
-		// TEARDROP: the waterline ring UNIONED with a tapering tail. The
-		// ring keeps the upstream side tight against the object; the tail
-		// carries downstream and narrows to a point. The tail is scaled by
-		// the object's own radius, so it stays in proportion whether it is
-		// trailing a 5m sphere or a hand-sized buoy.
-		vec2 rel = P.xz - SPHERE_C.xz;
-		float dRing = rXZ - ring;
-		vec2 tf = tailField(rel, driftDir, ring, ring * ${f(CONTACT.tailRatio)} * driftK);
-		float lee = max(dot(normalize(rel + vec2(1e-5)), driftDir), 0.0);
-		float ws = w * (1.0 + ${f(CONTACT.driftStretch)} * driftK * lee);
-		// The ring stays full thickness against the object; the tail THINS
-		// along its length. Feeding a falling thickness into the web is
-		// what makes the wake dissipate the way the rest of the foam does
-		// — tearing open into lace cell by cell toward the tip — rather
-		// than staying a solid tongue that just stops.
-		float ringPart = 1.0 - smoothstep(ws * ${f(1 - CONTACT.soft)}, ws, max(dRing, 0.0));
-		float tailPart = (1.0 - smoothstep(ws * ${f(1 - CONTACT.soft)}, ws, max(tf.x, 0.0)))
-			* mix(1.0, ${f(CONTACT.tailEnd)}, tf.y);
-		float beside = max(ringPart, tailPart);
-		// Over: the sphere's upper surface directly beneath this point.
+		float beside = 1.0 - smoothstep(w * ${f(1 - CONTACT.soft)}, w, max(rXZ - ring, 0.0));
 		float rc = min(rXZ, SPHERE_R);
 		float topY = SPHERE_C.y + sqrt(max(SPHERE_R * SPHERE_R - rc * rc, 0.0));
 		float over = pow(
@@ -565,68 +499,23 @@ float contactFoam(vec3 P) {
 		) * step(rXZ, SPHERE_R);
 		m = max(m, max(beside, over));
 	}
-	// BUOYS: 2D signed distance to the box footprint in the box's own
-	// frame. The transform is rigid, so local distance is world metres.
-	// A box has constant cross-section, so "over" is just the depth past
-	// its top face, and "beside" its constant footprint.
+	// BUOYS. A box has a height-independent footprint, so this 2D signed
+	// distance settles WHETHER the water is against it — the same shape
+	// of test the foam field uses, which is why the field never tears
+	// around ripples. Height only scales HOW WIDE the collar spreads;
+	// used as a gate it left fragments matching no case, which painted
+	// nothing and let plain water cut across the collar behind them.
 	for (int i = 0; i < 3; i++) {
 		vec3 lp = (uBuoyInv[i] * vec4(P, 1.0)).xyz;
-		// HORIZONTAL FIRST. A box has a height-independent footprint, so
-		// this 2D signed distance is the whole question of whether the
-		// water is against the buoy — the same shape of test the foam
-		// FIELD uses, which is why the field never tears around ripples.
 		vec2 q = abs(lp.xz) - BUOY_HALF.xz;
 		float d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
-		// Same: clear the tail's reach, measured off the box's largest
-		// half-extent so it holds whichever way the buoy is turned.
-		if (d > w * ${f(1 + CONTACT.driftStretch)}
-			+ max(BUOY_HALF.x, BUOY_HALF.z) * ${f(CONTACT.tailRatio + 1)}) continue;
-		// VERTICAL SECOND, and only to set how far the foam SPREADS.
-		//
-		// Every previous version used height as a gate — deck face, side
-		// face, over/beside — and each one left a band where a fragment
-		// was plainly against the buoy yet satisfied no case, so it
-		// painted nothing and drew plain water over the collar behind it.
-		// The buoys ring themselves with ripples, so there is always such
-		// a fragment somewhere on the rim, which is why this shows on
-		// them and not on the static sphere.
-		//
-		// So the height no longer decides IF, only HOW WIDE. It is read
-		// coarsely: a broad falloff above the deck as the buoy goes
-		// under, a fast one below the keel where a lifted hull genuinely
-		// is not touching the water. The spread narrows toward
-		// spreadFloor rather than to nothing, so the collar thins to a
-		// line at the hull instead of tearing a hole in itself.
-		// The exponent is the SUBMERGE RESPONSE and overwash is the
-		// REACH. They have to stay separate: the reach must stay generous
-		// or fragments near the hull fall outside it entirely and tear a
-		// hole in the collar again, but the response can drop off as fast
-		// as wanted inside that reach.
+		if (d > w) continue;
 		float vk = pow(
 			1.0 - smoothstep(0.0, ${f(CONTACT.overwash)}, max(lp.y - BUOY_HALF.y, 0.0)),
 			${f(CONTACT.submergeBias)}
 		) * (1.0 - smoothstep(0.0, ${f(CONTACT.liftFade)}, max(-BUOY_HALF.y - lp.y, 0.0)));
-		// Same downstream stretch as the sphere. The box is rotated, so
-		// carry the DRIFT into its frame rather than trying to recover the
-		// buoy's world centre: the transform is rigid, so rotating the
-		// direction by it (w = 0, no translation) is exact.
-		vec2 driftLocal = (uBuoyInv[i] * vec4(driftDir.x, 0.0, driftDir.y, 0.0)).xz;
-		float lee = max(dot(normalize(lp.xz + vec2(1e-5)), driftLocal), 0.0);
-		float wEff = w * mix(${f(CONTACT.spreadFloor)}, 1.0, vk)
-			* (1.0 + ${f(CONTACT.driftStretch)} * driftK * lee);
-		// Same tail, in the box's frame. Its starting width is the box's
-		// true extent ACROSS the flow — the support function of the
-		// rectangle along the perpendicular, so a buoy presenting a corner
-		// to the current trails a wider wake than one presenting a face.
-		vec2 perp = vec2(-driftLocal.y, driftLocal.x);
-		float halfAcross = abs(perp.x) * BUOY_HALF.x + abs(perp.y) * BUOY_HALF.z;
-		vec2 tf = tailField(
-			lp.xz, driftLocal, halfAcross, halfAcross * ${f(CONTACT.tailRatio)} * driftK
-		);
-		float hull = 1.0 - smoothstep(wEff * ${f(1 - CONTACT.soft)}, wEff, max(d, 0.0));
-		float wake = (1.0 - smoothstep(wEff * ${f(1 - CONTACT.soft)}, wEff, max(tf.x, 0.0)))
-			* mix(1.0, ${f(CONTACT.tailEnd)}, tf.y);
-		m = max(m, max(hull, wake) * vk);
+		float wEff = w * mix(${f(CONTACT.spreadFloor)}, 1.0, vk);
+		m = max(m, (1.0 - smoothstep(wEff * ${f(1 - CONTACT.soft)}, wEff, max(d, 0.0))) * vk);
 	}
 	return m;
 }
@@ -779,9 +668,21 @@ void main() {
 	// summing also means one web where they overlap, not two drawn over
 	// each other.
 	float fieldT = ${ENABLE.foamField ? 'foamThicknessAt(vRest)' : '0.0'};
+	// The pinned collar, ON TOP of whatever the field holds. Objects also
+	// EMIT into the field (foam.ts) and that foam arrives through fieldT,
+	// already drifting and dying like the rest — the two are meant to be
+	// seen together, the collar marking the waterline and the emission
+	// trailing off it. Baked out entirely when the sea is too calm to
+	// foam, rather than left at zero width: a zero-width smoothstep has
+	// equal edges, which is undefined in GLSL and returns 1, so the
+	// calmest sea got the THICKEST collar.
 	float contactT = ${
-		ENABLE.contactFoam ? `contactFoam(vWorld) * ${f(CONTACT.alpha)}` : '0.0'
+		ENABLE.contactFoam && CONTACT_FOAMINESS > 0
+			? `contactFoam(vWorld) * ${f(CONTACT.alpha)}`
+			: '0.0'
 	};
+	// One web over both, so a fading collar tears into the same lace the
+	// field does, and overlapping foam draws one pattern rather than two.
 	float foamAmt = foamWeb(vRest, max(fieldT, contactT), vJacobian);
 	vec3 foamN = normalize(vec3(-slope.x, 1.0, -slope.y));
 	vec3 foamLit = whitewaterLight(uFoamColor, foamN, ${f(1 - FOAM.shapeFloor)});
@@ -1918,13 +1819,6 @@ void main() {
 			// breeze and the current only. (Crest plumes take the opposite
 			// deal: gust alone, no base.)
 			const windSteady = windBase(waveTime);
-			{
-				const cur = currentVector(waveTime);
-				waterUniforms.uContactDrift.value.set(
-					windSteady.x * FOAM.drift + cur.x * FOAM.currentCarry,
-					windSteady.z * FOAM.drift + cur.z * FOAM.currentCarry
-				);
-			}
 			waterUniforms.uWindTravel.value.set(windTravel.x, windTravel.z);
 
 			// Mirror the event array into the shader uniforms.

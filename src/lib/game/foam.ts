@@ -28,7 +28,7 @@
 import * as THREE from 'three'
 import { ENABLE, FOAM, FROTH } from './tuning'
 import { currentVector } from './current'
-import { waves, wavesGlsl } from './waves'
+import { activeField, waves, wavesGlsl } from './waves'
 
 export const FOAM_RESOLUTION = 512
 /**
@@ -41,6 +41,26 @@ export const FOAM_RESOLUTION = 512
  * ever read as inconsistent.
  */
 export const FOAM_EXTENT = 100
+
+/**
+ * How foamy this sea is, 0-1, from the preset's CHOP — the same measure
+ * the crest foam uses. Chop is what drives crests into breaking, so it
+ * separates a big smooth swell from a genuinely frothy one in a way wave
+ * height cannot. A pure property of the sea — the two consumers (the
+ * painted collar and the emission) apply their own ENABLE flags, so
+ * neither can switch the other off. Declared up here because the shader
+ * strings below
+ * interpolate it at module load, and a const declared later is still in
+ * its temporal dead zone at that point — it bakes in as NaN.
+ */
+export const CONTACT_FOAMINESS = Math.min(
+  Math.max(
+    (activeField.chop - FOAM.contactChopStart) /
+      (FOAM.contactChopFull - FOAM.contactChopStart),
+    0,
+  ),
+  1,
+)
 
 /**
  * Decay time constants on calm water, seconds to 1/e — TWO of them,
@@ -244,6 +264,11 @@ uniform float uAmp;
 uniform vec4 uInject[${MAX_INJECT}]; // x, z, sigma, amp
 uniform float uDomAmp;
 uniform sampler2D uWebTex;
+uniform mat4 uBuoyInv[3];
+// Must match Scene.svelte's water shader and caustics.ts.
+const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
+const float SPHERE_R = 5.0;
+const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
 /** Same accumulated carry the water fragment uses, so the cell a parcel
  *  of foam is standing in travels WITH it. Without this the stubborn
  *  cells are fixed places in the sea and the foam drifts through them. */
@@ -262,12 +287,16 @@ ${foamNoiseGlsl}
  * weights reuse the sine that J needs — so the whole froth field costs a
  * handful of extra accumulators rather than a second wave pass.
  */
-void frothProbe(vec2 p, float t, float ampScale, out float J, out float sk) {
+void frothProbe(
+	vec2 p, float t, float ampScale,
+	out float J, out float sk, out float pinch, out vec3 disp
+) {
 	float jxx = 1.0;
 	float jzz = 1.0;
 	float jxz = 0.0;
 	float wAmp = 0.0;
 	float wsum = 0.0;
+	disp = vec3(0.0);
 	for (int i = 0; i < WAVE_COUNT; i++) {
 		vec4 a = uWaveA[i];
 		vec3 b = uWaveB[i];
@@ -281,6 +310,16 @@ void frothProbe(vec2 p, float t, float ampScale, out float J, out float sk) {
 		pw *= pw;
 		wAmp += b.x * pw;
 		wsum += pw;
+		// The Gerstner displacement rides along: the field is indexed by
+		// REST position, but objects sit in WORLD space, so the object
+		// test needs to know where this material point actually is. One
+		// extra cosine per wave, against a whole second wave pass if
+		// waveDisplacement were called separately.
+		float amp = b.x * ampScale;
+		float c = cos(theta);
+		disp.x += b.y * amp * a.x * c;
+		disp.z += b.y * amp * a.y * c;
+		disp.y += amp * s;
 	}
 	J = jxx * jzz - jxz * jxz;
 	float ampK = clamp(
@@ -288,11 +327,13 @@ void frothProbe(vec2 p, float t, float ampScale, out float J, out float sk) {
 		${FROTH.ampRatioFloor.toFixed(3)},
 		1.0
 	);
-	float intK = mix(
-		${FROTH.intFloor.toFixed(3)},
-		1.0,
-		clamp((${FROTH.intJStart.toFixed(3)} - J) / ${FROTH.intJSpan.toFixed(3)}, 0.0, 1.0)
-	);
+	// The RAW pinch: how far the surface has folded, 0 on water that is
+	// not folding at all. Reported separately from intK because intK
+	// floors at intFloor — that floor exists to keep froth masses above a
+	// minimum SIZE, and it is exactly wrong as a test of whether the
+	// water is breaking.
+	pinch = clamp((${FROTH.intJStart.toFixed(3)} - J) / ${FROTH.intJSpan.toFixed(3)}, 0.0, 1.0);
+	float intK = mix(${FROTH.intFloor.toFixed(3)}, 1.0, pinch);
 	sk = ampK * intK;
 	sk *= 1.0 + ${FROTH.curveBoost.toFixed(3)} * smoothstep(
 		${FROTH.curveStart.toFixed(3)},
@@ -323,7 +364,9 @@ void main() {
 	// invisible foam out there just decays quietly.
 	float J = 1.0;
 	float frothSk = 0.0;
-	if (dot(world, world) < 1764.0) frothProbe(world, uTime, uAmp, J, frothSk);
+	float frothPinch = 0.0;
+	vec3 disp = vec3(0.0);
+	if (dot(world, world) < 1764.0) frothProbe(world, uTime, uAmp, J, frothSk, frothPinch, disp);
 	${
 		ENABLE.turbDissipation
 			? `float turb = 1.0 - smoothstep(${TURB_J_FULL.toFixed(2)}, ${TURB_J_START.toFixed(2)}, J);`
@@ -461,7 +504,22 @@ void main() {
 	// down: a plain smoothstep is monotonic, so every knob on it moves
 	// small and large froth together. The rolloff is the only way to take
 	// foam off the biggest breaks while leaving the small ones alone.
-	h += smoothstep(
+	// AND the water must actually be FOLDING. The size test alone is not
+	// enough, because the froth factor behind it is RELATIVE: its
+	// amplitude ratio is measured against the preset's own dominant wave,
+	// so a calm sea's biggest ripples score as high as a storm's crests,
+	// and intK's floor keeps the product well clear of zero even on flat
+	// water. On the calm preset that came out around 0.5m of nominal
+	// froth radius everywhere — straight through the size gate, at full
+	// rate, on a sea with no breaking waves at all.
+	//
+	// The raw pinch has no floor and no normalisation: it is zero unless
+	// the surface is genuinely folding, whatever sea this is.
+	h += ${ENABLE.foamTrail ? '1.0' : '0.0'} * smoothstep(
+		${FOAM.layPinchStart.toFixed(3)},
+		${FOAM.layPinchFull.toFixed(3)},
+		frothPinch
+	) * smoothstep(
 		${FOAM.layMinRadius.toFixed(3)},
 		${FOAM.layFullRadius.toFixed(3)},
 		frothR
@@ -470,6 +528,48 @@ void main() {
 		${FOAM.layBigFull.toFixed(3)},
 		frothR
 	)) * ${FOAM.layRate.toFixed(5)} * uDtScale;
+
+	// OBJECT CONTACT, as a source rather than a painted shape.
+	//
+	// Foam at a waterline is foam: it should be made here and then live
+	// like all the rest, drifting on the current, diffusing, decaying and
+	// webbing. Painting it into the water shader instead meant carrying a
+	// private copy of every one of those behaviours — its own drift, its
+	// own tail, its own fade — each hand-shaped and none of it agreeing
+	// with the field automatically. Emitting into the field gets the wake
+	// for free: the collar is round, and the current pulls it out.
+	//
+	// The rate scales with CHOP, so a glassy sea wets its buoys without
+	// foaming them and a storm rings them hard.
+	{
+		vec2 surfXZ = world + disp.xz;
+		float surfY = disp.y;
+		float touch = 0.0;
+		// Sphere: the circle the surface cuts at this height.
+		float dyS = surfY - SPHERE_C.y;
+		float ringS = sqrt(max(SPHERE_R * SPHERE_R - dyS * dyS, 0.0));
+		if (ringS > 0.0) {
+			// abs(), not max(d, 0): the band STRADDLES the waterline. Using
+			// the outside-only distance made the whole interior emit too,
+			// which as a painted collar was invisible behind the object but
+			// as a SOURCE meant the sphere laying a solid disc up to 10m
+			// across every time a trough exposed it — and the field then
+			// spread that over everything.
+			float dS = length(surfXZ - SPHERE_C.xz) - ringS;
+			touch = max(touch, 1.0 - smoothstep(0.0, ${FOAM.contactBand.toFixed(3)}, abs(dS)));
+		}
+		// Buoys: 2D footprint, with height only fading the strength.
+		for (int i = 0; i < 3; i++) {
+			vec3 lp = (uBuoyInv[i] * vec4(surfXZ.x, surfY, surfXZ.y, 1.0)).xyz;
+			vec2 qb = abs(lp.xz) - BUOY_HALF.xz;
+			float db = length(max(qb, vec2(0.0))) + min(max(qb.x, qb.y), 0.0);
+			float vk = (1.0 - smoothstep(0.0, ${FOAM.contactOverwash.toFixed(3)}, max(lp.y - BUOY_HALF.y, 0.0)))
+				* (1.0 - smoothstep(0.0, ${FOAM.contactLift.toFixed(3)}, max(-BUOY_HALF.y - lp.y, 0.0)));
+			touch = max(touch, (1.0 - smoothstep(0.0, ${FOAM.contactBand.toFixed(3)}, abs(db))) * vk);
+		}
+		h += touch * ${ENABLE.contactEmit ? FOAM.contactRate.toFixed(5) : '0.0'}
+			* ${CONTACT_FOAMINESS.toFixed(4)} * uDtScale;
+	}
 
 	// Deposits below come from landing droplets: discrete splashes, which
 	// genuinely are point events, unlike the break itself.
@@ -499,7 +599,12 @@ export class FoamField {
   private simCamera: THREE.OrthographicCamera
   private webTarget: THREE.WebGLRenderTarget | null = null
 
-  constructor() {
+  /**
+   * @param buoyInv the water material's own inverse buoy transforms,
+   *   passed by reference so the sim and the water shader can never see
+   *   different buoy positions.
+   */
+  constructor(buoyInv: THREE.Matrix4[]) {
     const makeTarget = () =>
       new THREE.WebGLRenderTarget(FOAM_RESOLUTION, FOAM_RESOLUTION, {
         type: THREE.HalfFloatType,
@@ -525,6 +630,9 @@ export class FoamField {
         uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) },
         uWebTex: { value: null as THREE.Texture | null },
         uFlow: { value: new THREE.Vector2() },
+        // Shared with the water material: the same array object, so the
+        // two can never see different buoy positions.
+        uBuoyInv: { value: buoyInv },
         uDecayOld: { value: Math.exp(-1 / (60 * DECAY_TAU_OLD)) },
         uOverload: { value: 0 },
         uDiffusion: { value: DIFFUSION },

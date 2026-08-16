@@ -37,8 +37,15 @@ export const ENABLE = {
   foamField: true,
   /** Continuous foam laid by the sim wherever froth appears. */
   foamTrail: true,
-  /** Static foam collar where the surface meets a solid. */
-  contactFoam: true,
+  /**
+   * The two OBJECT foams, switched independently — they are different
+   * things and are tuned separately.
+   */
+  /** Painted collar pinned to the waterline (CONTACT.*). */
+  contactFoam: false,
+  /** Foam objects EMIT into the field, which then drifts and dies with
+   * the rest of it (FOAM.contact*). This is what makes the wake. */
+  contactEmit: true,
   /**
    * Turbulence-scaled EVAPORATION: breaking water thinning the foam
    * floating on it, at up to 6x the calm rate. Switch off to see foam
@@ -331,119 +338,47 @@ export const LOOP = {
 } as const
 
 /**
- * CONTACT FOAM — the collar of foam where the water surface meets a
- * solid: the buoys and the sphere.
+ * CONTACT FOAM — the painted collar where the surface meets a solid.
  *
- * A separate substance from the foam FIELD, and deliberately so. The
- * field is a simulation — it drifts, diffuses, decays and is governed by
- * a mass budget — and none of that is right here. This foam is pinned to
- * the object, does not spread, and does not fade while the object is at
- * the surface, because it is not stored anywhere: it is evaluated
- * analytically from the object's position every frame. The two never
- * mix, since this one has no state to mix with.
+ * Distinct from the foam objects EMIT into the field (FOAM.contact*).
+ * That emission is ordinary foam and behaves like all the rest: it
+ * drifts off downstream, spreads and dies. This is the collar that stays
+ * ON the object — pinned, not drifting, present for as long as the
+ * object is at the surface. The two are meant to be seen together: the
+ * collar marks the waterline, the emission trails away from it.
  *
- * The collar is found per pixel rather than as a ring at a fixed
- * waterline, so it tracks the surface up and down the object as the
- * waves pass, with no waterline to compute.
+ * Nothing here reads wind or current. Drift belongs to the emitted foam,
+ * which gets it from the field for free.
  */
 export const CONTACT = {
   /** Collar width in metres at full foaminess. */
-  width: 0.55,
-  /**
-   * Foaminess comes from the preset's CHOP, not its wave height. Chop is
-   * what makes crests break, and breaking is what makes foam — a big
-   * smooth swell is tall without being foamy, so amplitude would have
-   * given largeSwell a thick collar for the wrong reason.
-   *
-   * Against the presets: calm 0.55 -> nothing, largeSwell 2.25 -> about
-   * a third width, storm 5 -> full.
-   */
-  chopStart: 1,
-  chopFull: 5,
-  /** Opacity of the collar at its base. */
+  width: 0.35,
+  /** Opacity of the collar, applied as thickness into the foam web. */
   alpha: 0.95,
-  /**
-   * How DEEP water can lie over an object and still foam, metres,
-   * measured to the object's surface directly below each point — not to
-   * its highest point. That distinction matters on anything large: the
-   * crown is a single point, and its height says nothing about the water
-   * a few metres out along the flank.
-   *
-   * Without this the collar exists only while the surface is between the
-   * object's top and bottom, so a wave washing over it erases the foam
-   * and the surface appears to overlap it.
-   */
-  overwash: 0.9,
-  /**
-   * SUBMERGE RESPONSE: how readily white still shows once an object is
-   * under. An exponent on the overwash falloff, so it shapes the curve
-   * without shortening its reach.
-   *
-   *   1   = the plain falloff, white lingers well down
-   *   2   = gone about twice as fast for the same depth
-   *   3-4 = only the shallowest cover still foams
-   *
-   * Deliberately separate from `overwash`. That sets the REACH, and the
-   * reach has to stay generous — shortening it puts fragments near the
-   * hull outside every case, and they paint nothing and tear a hole in
-   * the collar, which was the original bug. Shape the response here and
-   * leave the reach alone.
-   */
-  submergeBias: 2,
-  /**
-   * Narrowest the collar gets, as a fraction of `width`, when an object
-   * is at the limit of overwash. Not 0: the vertical reading is coarse
-   * on purpose, and a spread that collapses to nothing would put the
-   * gate back in through the side door — the collar has to thin to a
-   * line at the hull rather than tear a hole in itself.
-   */
-  spreadFloor: 0.25,
-  /** How quickly the collar drops away below an object lifted clear of
-   * the water, metres. Short: a hull out of the water is not touching
-   * it, and unlike overwash there is nothing there to keep foaming. */
-  liftFade: 0.08,
-  /**
-   * DOWNSTREAM STRETCH. The collar widens on the lee side, along the
-   * same wind-plus-current carry the foam FIELD is advected by, so foam
-   * leaving an object goes the way all the other foam goes instead of
-   * ringing it evenly. 0.6 = half again as wide directly downstream.
-   */
-  driftStretch: 0.5,
-  /**
-   * TAIL LENGTH, as a multiple of the object's cross-stream radius at
-   * full carry. 1.4 = a wake not quite half again the object's width,
-   * tapering to a point. Proportional rather than absolute so the same
-   * value suits the sphere and the buoys.
-   *
-   * This is what makes the shape a teardrop. Displacing the collar's
-   * centre downstream — the previous attempt — only slides the ring off
-   * the object, so it grows in every direction about the new centre and
-   * the object ends up in the corner of a blob. A tail has to taper, and
-   * only its own primitive can do that.
-   */
-  tailRatio: 1.8,
-  /**
-   * Thickness at the TIP of the tail, against 1 at the object. The tail
-   * feeds this falling thickness into the same web the rest of the foam
-   * uses, so the wake tears open into lace as it goes instead of running
-   * out as a solid tongue. Low: by the tip there should be little left.
-   */
-  tailEnd: 0.05,
-  /** Carry speed, m/s, at which the stretch is fully applied. */
-  driftFull: 0.9,
+  /** Softness of the outer edge, as a fraction of the width. Not 0 —
+   * a hard cut aliases against a curved silhouette. */
+  soft: 0.18,
   /** Width wobble, as a fraction, so the collar is not a clean ring. */
   wobble: 0.3,
-  /** Wobble wavelength, metres — the size of one bulge in the edge.
-   * A second octave at ~1/2.7 of it breaks up the larger one. */
+  /** Wobble wavelength, metres: the size of one bulge in the edge. */
   wobbleScale: 2.5,
   /**
-   * Softness of the outer edge, as a fraction of the width. The fade
-   * runs from `width * (1 - soft)` out to `width`, so 0.55 spent over
-   * half the collar fading and left it looking like a glow; low values
-   * keep the collar solid to a crisp rim. Not 0 — that aliases badly
-   * against a curved silhouette.
+   * How DEEP water can lie over an object and still show a collar,
+   * metres, measured to the object's surface directly below each point.
+   * Generous on purpose: this is the REACH, and shortening it leaves
+   * fragments near the hull outside every case, so they paint nothing
+   * and tear a hole in the collar. Shape the response with
+   * `submergeBias` instead.
    */
-  soft: 0.35,
+  overwash: 0.9,
+  /** Exponent on the overwash falloff: how readily white still shows
+   * once an object is under. Higher = gone sooner, same reach. */
+  submergeBias: 2,
+  /** How fast the collar stops below a hull lifted clear, metres. */
+  liftFade: 0.08,
+  /** Narrowest the collar gets, as a fraction of `width`. Not 0, or the
+   * vertical reading becomes a gate again and tears the collar. */
+  spreadFloor: 0.25,
 } as const
 
 /**
@@ -737,6 +672,50 @@ export const FOAM = {
    * rolloff eats into the mid sizes it is meant to spare. */
   layBigStart: 0.18,
   layBigFull: 0.4,
+
+  /**
+   * The laydown's ABSOLUTE test: how far the surface must have folded
+   * before it lays any foam, as the raw pinch (0 = not folding, 1 = J
+   * fully collapsed). Nothing else in the froth criterion is absolute —
+   * the amplitude ratio is measured against each preset's own dominant
+   * wave, so it cannot tell a calm sea from a storm, and intK floors
+   * well above zero by design. Without this the calm preset foamed
+   * everywhere.
+   *
+   * For scale: J = 0.1 is the onset of pinching, J = 0 the fold line,
+   * J < 0 inverted. Those map to pinch 0, 0.18 and upward.
+   */
+  /**
+   * OBJECT CONTACT — foam made where the surface meets a solid.
+   *
+   * Emitted into the field rather than painted on the water, so it
+   * drifts, spreads, decays and webs like every other kind of foam. The
+   * wake shape is then emergent: the source is a plain collar and the
+   * current pulls it downstream on its own. The painted version this
+   * replaced needed a private copy of each of those behaviours — its own
+   * drift term, its own tapering tail, its own fade — and none of them
+   * agreed with the field without being hand-matched.
+   */
+  /** Width of the emitting band around an object's waterline, metres. */
+  contactBand: 0.45,
+  /** Thickness laid per 1/60s at the hull, before the chop scaling. */
+  contactRate: 0.012,
+  /** How deep water can lie over an object and still foam, metres. */
+  contactOverwash: 0.9,
+  /** How fast it stops below a hull lifted clear of the water, metres. */
+  contactLift: 0.08,
+  /**
+   * Chop at which objects start foaming, and at which they foam fully.
+   * Chop drives breaking, and breaking makes foam, so it separates a big
+   * smooth swell from a frothy sea in a way wave height cannot. Against
+   * the presets: calm 0.55 -> nothing, largeSwell 2.25 -> about a third,
+   * storm 5 -> full.
+   */
+  contactChopStart: 1,
+  contactChopFull: 5,
+
+  layPinchStart: 0.05,
+  layPinchFull: 0.35,
 
   layMinRadius: 0.03,
   layFullRadius: 0.15,
