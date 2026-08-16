@@ -159,11 +159,17 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 /**
  * Headings of the sun's and moon's orbital planes, radians, measured
  * like windAngle (0 = +X, increasing toward +Z = clockwise seen from
- * above). The sun sits a quarter turn clockwise of the old east-west
- * axis so a low sun crosses the isometric camera's view rather than
- * facing it; the moon is 5 degrees further round again.
+ * above). The moon's plane is 5 degrees further round again, so the two
+ * circles cross rather than coincide.
+ *
+ * PI/4 puts the plane on the camera's own axis. The camera sits at
+ * (34, 30, 34), azimuth 45 degrees, so a body on this heading rises
+ * behind it and sets at azimuth 225 — directly opposite, in the middle
+ * of the view. That is the arrangement that makes a specular highlight
+ * plainest: at dusk the sun is straight ahead and its reflection comes
+ * back along the line of sight.
  */
-const SUN_PATH_HEADING = Math.PI / 2;
+const SUN_PATH_HEADING = Math.PI / 4;
 const MOON_PATH_HEADING = SUN_PATH_HEADING + (5 * Math.PI) / 180;
 
 export function computeEnv(phase: number): Env {

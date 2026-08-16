@@ -22,19 +22,19 @@ export const f = (n: number, digits = 4) => n.toFixed(digits)
  */
 export const ENABLE = {
   /** White ribbon on the folding mesh itself. */
-  loopWhite: true,
+  loopWhite: false,
   /** Pull of the pinch zone toward the sprite plane. */
   loopStretch: true,
   /** Froth masses surfacing from under the fold. */
-  froth: true,
+  froth: false,
   /** Vertical spray thrown off each foam mass. */
   crestPlumes: false,
   /** Ballistic droplets launched from inside the loops. */
-  splashDroplets: true,
+  splashDroplets: false,
   /** Spray kicked up by the buoys. */
   buoySpray: true,
   /** Persistent foam residue field (deposits from landings). */
-  foamField: true,
+  foamField: false,
   /** Continuous foam laid by the sim wherever froth appears. */
   foamTrail: true,
   /**
@@ -68,6 +68,14 @@ export const ENABLE = {
   objectWave: false,
   /** Mesh crest riding the water at an object's nose (BOWCREST). */
   bowCrest: false,
+  /**
+   * Detail waves from a GPU inverse FFT of a random-phase Phillips
+   * spectrum (fftwaves.ts) instead of the baked sinusoid sum in waves.ts.
+   * Both read the same `detail` block per preset, so `slope` means the
+   * same thing either way and the two are directly comparable. Off gives
+   * the old sum back, which is the point of keeping the flag.
+   */
+  fftDetail: true,
   /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
    * study replaced them with loop-driven emission. */
   whitecapEvents: false,
@@ -591,6 +599,101 @@ export const CONTACT = {
   /** Narrowest the collar gets, as a fraction of `width`. Not 0, or the
    * vertical reading becomes a gate again and tears the collar. */
   spreadFloor: 0.25,
+} as const
+
+/**
+ * SUN SPECULAR — the sun's own mirror image on the water.
+ *
+ * Separate from the sky reflection, and added AFTER the Fresnel blend
+ * rather than folded into the reflected sky. Folded in, it was
+ * multiplied by a Fresnel that bases at 0.25, so a highlight lost three
+ * quarters of its strength at exactly the angles this camera views
+ * from. That is wrong for the sun specifically: water's reflectance at
+ * those angles really is a few percent, but the sun's radiance is so
+ * enormous that its glitter still blows out to white. Reflectance and
+ * radiance both matter, and only one of them was represented.
+ *
+ * Everything keys off the preset's sky.diffusion — the same cloudiness
+ * that softens the caustics. A clear sky gives a tight, blazing glitter
+ * path; overcast smears it into the broad sheen it had before.
+ */
+export const SPECULAR = {
+  /**
+   * Highlight tightness under a clear sky and under full overcast, as a
+   * Phong exponent. Half-width is roughly sqrt(2*ln2 / n) radians, so
+   * 260 gives about 4.2 degrees and 30 about 12.
+   *
+   * There is a floor on how tight this can usefully be, and it comes
+   * from the CAMERA. Orthographic means one view direction for every
+   * pixel, so the sun's mirror image appears only where the surface
+   * normal equals the half-vector between view and sun — and that
+   * half-vector sits 24 to 63 degrees off vertical depending on the
+   * hour, 29 at noon. Water has to be tilted that far before it can
+   * reflect the sun at all, which happens on wave FACES, never on flat
+   * water. A highlight only 1.8 degrees wide (n = 1400) would flash
+   * across such a face for a sliver of a degree and read as nothing.
+   *
+   * Two consequences worth knowing. Sun glitter here lives on steep
+   * faces, not as the broad path a perspective camera would give — with
+   * parallel rays there is no path, only a slope that qualifies or does
+   * not. And on genuinely flat water there will be no highlight at any
+   * setting; chop is what supplies the angles.
+   */
+  sharpClear: 3000,
+  sharpOvercast: 300,
+  /**
+   * Peak brightness, as a multiple of the sun's colour. Above 1 on
+   * purpose — a specular highlight is meant to clip to white — but it
+   * also SETS THE SIZE of the white core, which is easy to miss:
+   *
+   *   white core half-angle ~= sqrt(2 * ln(gain) / sharp)
+   *
+   * because everything above 1.0 clips, so a big gain drags the lobe's
+   * tails over the line. At sharp 260 / gain 14 the core came out at
+   * 8.2 degrees against a nominal 4.2 half-width — twice the intended
+   * size, and the reason it read as a blob rather than a glint. Raise
+   * `sharp` alongside `gain`, or the highlight grows as it brightens.
+   */
+  gainClear: 16,
+  gainOvercast: 0.35,
+  /**
+   * How much the surface's Fresnel dims the highlight, 0-1. 0 adds it at
+   * full strength whatever the angle, 1 obeys Fresnel exactly. Partial,
+   * because obeying it fully loses the glitter this camera is looking
+   * for and ignoring it makes the sea shine from underneath.
+   */
+  fresnelMix: 1.0,
+  /**
+   * Which view geometry the highlight uses. true = rays converging on a
+   * virtual eye; false = the camera's true orthographic direction. The
+   * rest of the water is unaffected either way, so this is a clean A/B.
+   *
+   * On, because orthographic cannot produce a glitter PATH at all: with
+   * one shared view ray a slope qualifies everywhere or nowhere, so the
+   * highlight comes out as slivers scattered over whichever faces happen
+   * to hit the angle, all equally bright regardless of distance. The
+   * path in a photograph exists because perspective gives neighbouring
+   * points different view rays, and this is the cheapest way to buy that
+   * back without changing the projection.
+   */
+  virtualEye: true,
+  /**
+   * VIRTUAL EYE distance, metres, when `virtualEye` is on.
+   *
+   * The camera is orthographic, so every pixel shares one view direction
+   * and a slope either satisfies the mirror condition everywhere or
+   * nowhere — there is no glitter PATH, only slivers on qualifying
+   * faces. A real path exists because perspective gives each point its
+   * own view ray, so a continuum of positions satisfies the condition.
+   *
+   * This puts a virtual eye at that distance along the view axis and
+   * measures the specular against rays converging on it. Deliberately a
+   * cheat, and only the highlight uses it — the sky reflection and
+   * Fresnel keep the true orthographic direction, so nothing else about
+   * the water changes. Smaller values spread the path wider; very large
+   * ones converge back on the orthographic behaviour.
+   */
+  eyeDistance: 42,
 } as const
 
 /**

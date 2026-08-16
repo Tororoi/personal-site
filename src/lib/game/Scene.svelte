@@ -6,6 +6,7 @@
 	import {
 		activeField,
 		causticsGlsl,
+		detailSlopeGlsl,
 		objectWaveGlsl,
 		objectWaveSlopeGlsl,
 		significantAmplitude,
@@ -22,6 +23,7 @@
 		windBase,
 		windVector
 	} from './whitecaps';
+	import { fftSlopeGlsl, makeFftDetail } from './fftwaves';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
 	import {
@@ -54,6 +56,7 @@
 		BOWCREST,
 		MIST,
 		OBJWAVE,
+		SPECULAR,
 		PLUME
 	} from './tuning';
 	import { plumeFragmentGlsl } from './plume';
@@ -216,6 +219,11 @@
 		uRippleTex: { value: null as THREE.Texture | null },
 		uRippleCenter: { value: new THREE.Vector2(0, 0) },
 		uRippleExtent: { value: RIPPLE_EXTENT },
+		// Detail-wave slope cascades (fftwaves.ts). Static textures once the
+		// field exists, but they are render targets, so they are pointed at
+		// after the first step rather than at construction.
+		uFftA: { value: null as THREE.Texture | null },
+		uFftB: { value: null as THREE.Texture | null },
 		// Solid-mode water, pool-style (Wallace/jeantimex): a Fresnel blend
 		// between transmitted water color and reflected sky, plus sun
 		// specular. Facets facing the camera show the water; tilted facets
@@ -389,6 +397,12 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	let foamAccum = 0;
 	let foamEven = false;
 
+	// The FFT detail-wave cascades that own uFftA/uFftB. Unlike the other
+	// sims this one has no state to carry frame to frame — each step is a
+	// fresh transform of the same spectrum evolved to the current time — so
+	// it can be skipped or restarted freely.
+	const fftDetail = ENABLE.fftDetail ? makeFftDetail() : null;
+
 	// Forward-splat caustic map (pool-style differential area) over the
 	// full wave surface, blurred by the preset's sun diffusion.
 	const causticMap = new CausticMap();
@@ -469,6 +483,7 @@ ${whitewaterLightGlsl()}
 ${foamGlsl()}
 ${ripplesGlsl()}
 ${wavesGlsl()}
+${ENABLE.fftDetail ? fftSlopeGlsl() : detailSlopeGlsl()}
 ${ENABLE.objectWave ? objWaveGlsl : ''}
 ${ENABLE.objectWave ? objectWaveSlopeGlsl() : ''}
 
@@ -622,7 +637,15 @@ void main() {
 	// Ripples and the object wave both shade at their own resolution
 	// rather than the mesh's: their slopes are recomputed here and added
 	// onto the interpolated analytic wave normal.
-	vec2 slope = vSlope + rippleShadeGrad(vWorld.xz) ${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
+	// Ripples, the small surface waves and the object wave all shade at
+	// their OWN resolution rather than the mesh's: each slope is
+	// recomputed here per pixel and added onto the interpolated analytic
+	// wave normal. That is what lets detail finer than a 0.5m quad tilt
+	// the surface for lighting without a single extra vertex — and the
+	// specular lives on exactly that, since a glint appears only where
+	// the normal reaches the mirror angle.
+	vec2 slope = vSlope + rippleShadeGrad(vWorld.xz) + detailSlope(vWorld.xz, uTime)
+		${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
 	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
 
 
@@ -681,12 +704,42 @@ void main() {
 	float fresnel = mix(0.25, 1.0, pow(1.0 - facing, 3.0));
 	vec3 reflectedRay = reflect(eye, normal);
 	vec3 skyCol = mix(uSkyHorizon, uSkyZenith, clamp(reflectedRay.y, 0.0, 1.0));
-	// The glare is the sun's mirror image: a diffused (clouded) sun makes
-	// it broader and dimmer, same cause as the caustic blur.
-	float glareExp = mix(350.0, 30.0, uSunDiffusion);
-	float glareGain = 2.0 * (1.0 - 0.85 * uSunDiffusion);
-	skyCol += uSunColor * uSunI * glareGain * pow(max(dot(reflectedRay, normalize(uSunDir)), 0.0), glareExp);
 	vec3 col = mix(transmitted, skyCol, fresnel);
+
+	// SUN SPECULAR — the sun's mirror image, added on top of the Fresnel
+	// blend rather than mixed into the reflected sky.
+	//
+	// Inside the blend it was multiplied by a Fresnel basing at 0.25, so
+	// a highlight kept a quarter of its strength at the angles this
+	// camera works at, and read as a diffuse sheen. Water's reflectance
+	// there really is small — but the sun's radiance is large enough that
+	// its glitter still clips to white, and only the reflectance half of
+	// that was being modelled. fresnelMix sets how much of the angle
+	// dependence to keep.
+	//
+	// Tightness and strength both key off cloudiness, the same diffusion
+	// that blurs the caustics: a clear sky concentrates the disc into a
+	// hard glitter path, overcast spreads it into the old broad sheen.
+	// ORTHOGRAPHIC or VIRTUAL PERSPECTIVE, switched by SPECULAR.virtualEye.
+	//
+	// Orthographic is what the camera really is: every pixel shares one
+	// view ray, so a slope satisfies the mirror condition everywhere or
+	// nowhere and the highlight can only be slivers on qualifying faces —
+	// there is no glitter path, because a path needs neighbouring points
+	// to see the sun at different angles. Converging the rays on a
+	// virtual eye supplies exactly that and nothing else; the sky
+	// reflection and Fresnel keep the true direction either way.
+	${
+		SPECULAR.virtualEye
+			? `vec3 eyeP = uViewDir * ${f(SPECULAR.eyeDistance)};
+	vec3 reflectedSpec = reflect(-normalize(eyeP - vWorld), normal);`
+			: `vec3 reflectedSpec = reflectedRay;`
+	}
+	float sunAlign = max(dot(reflectedSpec, normalize(uSunDir)), 0.0);
+	float specSharp = mix(${f(SPECULAR.sharpClear)}, ${f(SPECULAR.sharpOvercast)}, uSunDiffusion);
+	float specGain = mix(${f(SPECULAR.gainClear)}, ${f(SPECULAR.gainOvercast)}, uSunDiffusion);
+	col += uSunColor * (uSunI * specGain * pow(sunAlign, specSharp)
+		* mix(1.0, fresnel, ${f(SPECULAR.fresnelMix)}));
 
 	// Whiteness: the active boil (churn/ripple seethe) plus PERSISTENT
 	// foam residue (foam.ts) — patches left behind by the strongest
@@ -2316,6 +2369,12 @@ void main() {
 			// freshly written side of the ping-pong pair.
 			rippleSim.step(renderer);
 			waterUniforms.uRippleTex.value = rippleSim.texture;
+			if (fftDetail) {
+				fftDetail.step(renderer, waveTime);
+				const [a, b] = fftDetail.textures;
+				waterUniforms.uFftA.value = a;
+				waterUniforms.uFftB.value = b;
+			}
 			backdropUniforms.uRippleCTex.value = rippleSim.texture;
 			causticMap.step(renderer, rippleSim.texture, waterUniforms.uSunDir.value, waveTime);
 			backdropUniforms.uCausticMap.value = causticMap.texture;
@@ -2580,6 +2639,7 @@ void main() {
 		mistField.dispose();
 		toonGradient.dispose();
 		rippleSim.dispose();
+		fftDetail?.dispose();
 		foamField.dispose();
 	});
 </script>

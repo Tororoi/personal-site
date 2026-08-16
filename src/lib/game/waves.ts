@@ -112,6 +112,32 @@ export type WaveFieldConfig = {
     frothSigma?: number
   }
   /**
+   * SMALL SURFACE WAVES, for SHADING only.
+   *
+   * Between the mesh's reach and the capillaries there is a band — very
+   * roughly 0.3m to 4m — that matters enormously for how the water
+   * catches light and cannot be carried by geometry: the water is about
+   * 0.5m quads, so anything shorter than a couple of metres aliases
+   * rather than resolving. Putting it in `bands` would only add noise.
+   *
+   * So these are evaluated PER PIXEL as a slope added onto the shading
+   * normal, the same trick ripples use (rippleShadeGrad) and the same
+   * reason capillaries exist for the caustics. They tilt the surface for
+   * lighting without displacing a single vertex.
+   *
+   * This is what a specular highlight needs. A sun glint only appears
+   * where the normal reaches the mirror angle, so it is limited by how
+   * finely the normal varies — not by the wave heights at all. Coarse
+   * waves give a coarse, blobby glint however it is tuned.
+   */
+  detail?: {
+    count?: number
+    minLambda?: number
+    maxLambda?: number
+    /** Wave slope (amp * k); sets how hard these tilt the normal. */
+    slope?: number
+  }
+  /**
    * Sub-pixel capillary ripples for caustics: too small to move a pixel at
    * our zoom, so they are computed only where they are observable, in the
    * caustic Hessian (causticsGlsl). Real pools dapple finely because
@@ -181,6 +207,8 @@ export const SEA_PRESETS = {
     },
     // Big weather brewing: a light overcast gray, sun well scattered.
     sky: { zenith: '#c3cbd1', horizon: '#e9edf0', diffusion: 0.4 },
+    // Wind chop riding the swell: plenty of fine tilt.
+    detail: { count: 18, minLambda: 0.4, maxLambda: 4, slope: 0.055 },
     foam: { pinchJStart: 0.3 },
     bands: [
       // Primary swell: the long rolling system on the wind heading.
@@ -253,6 +281,9 @@ export const SEA_PRESETS = {
     },
     // A gentle day mirrors a blue sky; near-point sun, crisp caustics.
     sky: { zenith: '#2e6fb2', horizon: '#a9cfe8', diffusion: 0.05 },
+    // Glassy, but never mirror-flat: a fine cat's-paw texture is what
+    // gives a calm sea its glitter under a clear sun.
+    detail: { count: 16, minLambda: 0.3, maxLambda: 5.4, slope: 0.01 },
     bands: [
       // One long, low swell rolling through.
       {
@@ -325,6 +356,8 @@ export const SEA_PRESETS = {
     // Heavy cloud deck: a medium gray, darker than the swell's overcast;
     // a ghost of the caustic web survives it.
     sky: { zenith: '#6b737a', horizon: '#98a0a7', diffusion: 0.7 },
+    // Torn-up surface: short, steep, every which way.
+    detail: { count: 10, minLambda: 0.35, maxLambda: 3, slope: 0.055 },
     // Storm J dips below 0.65 nearly everywhere; only genuinely breaking
     // water (J < 0.3) may generate foam or the sea saturates white.
     foam: { pinchJStart: 0.1 },
@@ -470,6 +503,96 @@ const CAPILLARY_DEFAULTS = {
 }
 
 /** Caustic-only capillary band; see the `capillary` config doc above. */
+const DETAIL_DEFAULTS = {
+  /**
+   * Number of components, and the knob that decides whether the set
+   * reads as waves or as a pattern. A handful of sinusoids beat against
+   * each other visibly however they are jittered — the repeat only goes
+   * away as the count rises. Each is a single cos per pixel, so the
+   * ceiling is high and the mid-teens are cheap.
+   */
+  count: 16,
+  minLambda: 0.35,
+  maxLambda: 3.5,
+  slope: 0.05,
+  /** Max heading offset from the wind, radians. Near-isotropic by
+   * default: short waves are far less organised than swell, and an
+   * aligned set reads as corduroy. */
+  spread: 2.8,
+}
+
+/**
+ * Small surface waves, generated like a band but never meshed: they
+ * exist only as a per-pixel slope on the shading normal.
+ */
+const detailWaves = (() => {
+  const cfg = { ...DETAIL_DEFAULTS, ...(activeField.detail ?? {}) }
+  const rand = mulberry32(activeField.seed + 907)
+  const out: {
+    dirX: number
+    dirZ: number
+    k: number
+    omega: number
+    amp: number
+    phase: number
+  }[] = []
+  for (let i = 0; i < cfg.count; i++) {
+    // Full jitter within each octave slot, not a nudge around an even
+    // spacing: evenly spaced wavelengths beat against each other on a
+    // regular lattice, which is half of why a small set looks patterned.
+    const f = (i + rand()) / cfg.count
+    const lambda = cfg.minLambda * Math.pow(cfg.maxLambda / cfg.minLambda, f)
+    const k = (2 * Math.PI) / lambda
+    const angle = activeField.windAngle + (rand() - 0.5) * 2 * cfg.spread
+    out.push({
+      dirX: Math.cos(angle),
+      dirZ: Math.sin(angle),
+      k,
+      omega:
+        Math.sqrt(G * k) *
+        (activeField.timeScale ?? 1) *
+        // Detune each wave off exact dispersion. On physical omega the
+        // whole set shares one beat period and the pattern visibly
+        // cycles; detuned, it never quite repeats.
+        (0.75 + rand() * 0.5),
+      amp: ((cfg.slope * lambda) / (2 * Math.PI)) * (0.55 + rand() * 0.9),
+      phase: rand() * Math.PI * 2,
+    })
+  }
+  return out
+})()
+
+/**
+ * The detail waves' contribution to the SHADING normal: d(height)/dx and
+ * d(height)/dz, baked as literals since they are static per preset.
+ * Added onto the interpolated analytic slope in the water fragment,
+ * exactly as ripples are.
+ */
+export function detailSlopeGlsl(): string {
+  const f = (n: number) => n.toFixed(6)
+  const lines = detailWaves
+    .map(
+      (w) =>
+        `	d += vec2(${f(w.dirX)}, ${f(w.dirZ)}) * (${f(w.amp * w.k)} * cos(` +
+        `(p.x * ${f(w.dirX)} + p.y * ${f(w.dirZ)}) * ${f(w.k)} - ${f(w.omega)} * t + ${f(w.phase)}));`,
+    )
+    .join(String.fromCharCode(10))
+  // NO DOMAIN WARP. It was tried and removed: at any amplitude strong
+  // enough to disguise the lattice, the warp's OWN wavelength becomes
+  // the dominant feature and the fine waves read as smeared bands
+  // following it. Warping trades a small regular pattern for a large
+  // one, which is the wrong trade when the large one is this legible.
+  //
+  // The only honest cure for a sinusoid sum looking like a sinusoid sum
+  // is more components — each is one cos per pixel, so it is affordable.
+  return `
+vec2 detailSlope(vec2 p, float t) {
+	vec2 d = vec2(0.0);
+${lines}
+	return d;
+}`
+}
+
 const capillaries = (() => {
   const cfg = { ...CAPILLARY_DEFAULTS, ...(activeField.capillary ?? {}) }
   const rand = mulberry32(activeField.seed + 101)
