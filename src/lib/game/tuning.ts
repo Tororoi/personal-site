@@ -42,7 +42,7 @@ export const ENABLE = {
    * things and are tuned separately.
    */
   /** Painted collar pinned to the waterline (CONTACT.*). */
-  contactFoam: false,
+  contactFoam: true,
   /** Foam objects EMIT into the field, which then drifts and dies with
    * the rest of it (FOAM.contact*). This is what makes the wake. */
   contactEmit: true,
@@ -352,7 +352,7 @@ export const LOOP = {
  */
 export const CONTACT = {
   /** Collar width in metres at full foaminess. */
-  width: 0.35,
+  width: 0.15,
   /** Opacity of the collar, applied as thickness into the foam web. */
   alpha: 0.95,
   /** Softness of the outer edge, as a fraction of the width. Not 0 —
