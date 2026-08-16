@@ -30,11 +30,11 @@ export const ENABLE = {
   /** Vertical spray thrown off each foam mass. */
   crestPlumes: false,
   /** Ballistic droplets launched from inside the loops. */
-  splashDroplets: false,
+  splashDroplets: true,
   /** Spray kicked up by the buoys. */
   buoySpray: true,
   /** Persistent foam residue field (deposits from landings). */
-  foamField: false,
+  foamField: true,
   /** Continuous foam laid by the sim wherever froth appears. */
   foamTrail: true,
   /**
@@ -42,7 +42,7 @@ export const ENABLE = {
    * things and are tuned separately.
    */
   /** Painted collar pinned to the waterline (CONTACT.*). */
-  contactFoam: false,
+  contactFoam: true,
   /** Foam objects EMIT into the field, which then drifts and dies with
    * the rest of it (FOAM.contact*). This is what makes the wake. */
   contactEmit: true,
@@ -67,7 +67,7 @@ export const ENABLE = {
   /** Standing Gerstner wave at an object's waterline (OBJWAVE). */
   objectWave: false,
   /** Mesh crest riding the water at an object's nose (BOWCREST). */
-  bowCrest: true,
+  bowCrest: false,
   /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
    * study replaced them with loop-driven emission. */
   whitecapEvents: false,
