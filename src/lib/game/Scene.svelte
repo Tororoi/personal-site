@@ -3,7 +3,13 @@
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 	import { onDestroy } from 'svelte';
-	import { activeField, causticsGlsl, significantAmplitude, waves, wavesGlsl } from './waves';
+	import {
+		activeField,
+		causticsGlsl,
+		significantAmplitude,
+		waves,
+		wavesGlsl
+	} from './waves';
 	import {
 		events,
 		MAX_EVENTS,
@@ -1312,7 +1318,12 @@ varying vec3 vNrm;
 void main() {
 	vec3 surf; vec3 Nn; float g;
 	float r = frothFrame(position.xz, position.y, aRank, surf, Nn, g);
-	vec3 world = surf - Nn * (r * 0.8 * g);
+	// (The hand-built bow froth that used to sit here — proximity band,
+	// windward dot, authored roll cycle — is gone. The object PINCH does
+	// that job upstream by bending the Gerstner map, so these masses now
+	// surface through the ORDINARY froth criterion and inherit its
+	// sizing, gating and motion instead of carrying private copies.)
+	vec3 world = surf - Nn * (r * ${f(FROTH.submersion)} * g);
 	// The foam mass rides the water: light it by the surface normal.
 	vNrm = Nn;
 	vec4 view = viewMatrix * vec4(world, 1.0);

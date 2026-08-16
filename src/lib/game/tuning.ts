@@ -42,7 +42,7 @@ export const ENABLE = {
    * things and are tuned separately.
    */
   /** Painted collar pinned to the waterline (CONTACT.*). */
-  contactFoam: false,
+  contactFoam: true,
   /** Foam objects EMIT into the field, which then drifts and dies with
    * the rest of it (FOAM.contact*). This is what makes the wake. */
   contactEmit: true,
@@ -732,6 +732,24 @@ export const FOAM = {
    */
   /** Width of the emitting band around an object's waterline, metres. */
   contactBand: 0.45,
+  /**
+   * WINDWARD BIAS. Water running into an object piles up and froths on
+   * the face it strikes, so the emitting band is strengthened there and
+   * left alone on the lee side.
+   *
+   * The velocity is the water's RELATIVE to the object: its per-texel
+   * Gerstner orbital motion plus the surface current. The objects are
+   * moored, so that is just the water's own motion — but it is written
+   * as a relative velocity, so giving a buoy real horizontal movement
+   * later needs no change here.
+   */
+  /** Extra emission on the face taking the flow head-on, as a multiple
+   * of the base rate. 2 = three times as much foam on the nose. */
+  contactBowGain: 2,
+  /** Relative speed, m/s, at which that bias is fully applied. Orbital
+   * motion alone reaches a few m/s in a storm and near nothing on calm,
+   * so this mostly decides how quickly the effect arrives with weather. */
+  contactFlowFull: 2,
   /** Thickness laid per 1/60s at the hull, before the chop scaling. */
   contactRate: 0.012,
   /** How deep water can lie over an object and still foam, metres. */

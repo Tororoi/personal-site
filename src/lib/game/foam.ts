@@ -265,6 +265,9 @@ uniform vec4 uInject[${MAX_INJECT}]; // x, z, sigma, amp
 uniform float uDomAmp;
 uniform sampler2D uWebTex;
 uniform mat4 uBuoyInv[3];
+/** Surface current, m/s. Added to the per-texel orbital velocity to get
+ *  the water's true motion past a moored object. */
+uniform vec2 uCurrent;
 // Must match Scene.svelte's water shader and caustics.ts.
 const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
 const float SPHERE_R = 5.0;
@@ -289,7 +292,7 @@ ${foamNoiseGlsl}
  */
 void frothProbe(
 	vec2 p, float t, float ampScale,
-	out float J, out float sk, out float pinch, out vec3 disp
+	out float J, out float sk, out float pinch, out vec3 disp, out vec2 vel
 ) {
 	float jxx = 1.0;
 	float jzz = 1.0;
@@ -297,6 +300,7 @@ void frothProbe(
 	float wAmp = 0.0;
 	float wsum = 0.0;
 	disp = vec3(0.0);
+	vel = vec2(0.0);
 	for (int i = 0; i < WAVE_COUNT; i++) {
 		vec4 a = uWaveA[i];
 		vec3 b = uWaveB[i];
@@ -320,6 +324,13 @@ void frothProbe(
 		disp.x += b.y * amp * a.x * c;
 		disp.z += b.y * amp * a.y * c;
 		disp.y += amp * s;
+		// Horizontal ORBITAL velocity: the time derivative of the sway
+		// above. Since theta carries -omega*t, d/dt of the cosine term is
+		// +q*A*omega*dir*sin(theta) — and the sine is already in hand, so
+		// this is two multiply-adds per wave, not another pass.
+		float qao = b.y * amp * a.w * s;
+		vel.x += qao * a.x;
+		vel.y += qao * a.y;
 	}
 	J = jxx * jzz - jxz * jxz;
 	float ampK = clamp(
@@ -366,7 +377,9 @@ void main() {
 	float frothSk = 0.0;
 	float frothPinch = 0.0;
 	vec3 disp = vec3(0.0);
-	if (dot(world, world) < 1764.0) frothProbe(world, uTime, uAmp, J, frothSk, frothPinch, disp);
+	vec2 orbital = vec2(0.0);
+	if (dot(world, world) < 1764.0)
+		frothProbe(world, uTime, uAmp, J, frothSk, frothPinch, disp, orbital);
 	${
 		ENABLE.turbDissipation
 			? `float turb = 1.0 - smoothstep(${TURB_J_FULL.toFixed(2)}, ${TURB_J_START.toFixed(2)}, J);`
@@ -544,6 +557,14 @@ void main() {
 	{
 		vec2 surfXZ = world + disp.xz;
 		float surfY = disp.y;
+		// The water's velocity RELATIVE to the object. Orbital motion plus
+		// the surface current; the objects are moored, so their own
+		// velocity is zero and relative velocity is just the water's. Give
+		// a buoy real horizontal motion later and it subtracts here.
+		vec2 relVel = orbital + uCurrent;
+		float flowSpd = length(relVel);
+		vec2 flowDir = flowSpd > 0.0001 ? relVel / flowSpd : vec2(0.0);
+		float flowK = min(flowSpd / ${FOAM.contactFlowFull.toFixed(3)}, 1.0);
 		float touch = 0.0;
 		// Sphere: the circle the surface cuts at this height.
 		float dyS = surfY - SPHERE_C.y;
@@ -555,8 +576,13 @@ void main() {
 			// as a SOURCE meant the sphere laying a solid disc up to 10m
 			// across every time a trough exposed it — and the field then
 			// spread that over everything.
-			float dS = length(surfXZ - SPHERE_C.xz) - ringS;
-			touch = max(touch, 1.0 - smoothstep(0.0, ${FOAM.contactBand.toFixed(3)}, abs(dS)));
+			vec2 rel = surfXZ - SPHERE_C.xz;
+			float dS = length(rel) - ringS;
+			float band = 1.0 - smoothstep(0.0, ${FOAM.contactBand.toFixed(3)}, abs(dS));
+			// WINDWARD face: the side the flow is running into. The outward
+			// normal there points back up the flow, so the dot is negative.
+			float bow = max(-dot(normalize(rel + vec2(1e-5)), flowDir), 0.0);
+			touch = max(touch, band * (1.0 + ${FOAM.contactBowGain.toFixed(3)} * bow * flowK));
 		}
 		// Buoys: 2D footprint, with height only fading the strength.
 		for (int i = 0; i < 3; i++) {
@@ -565,7 +591,13 @@ void main() {
 			float db = length(max(qb, vec2(0.0))) + min(max(qb.x, qb.y), 0.0);
 			float vk = (1.0 - smoothstep(0.0, ${FOAM.contactOverwash.toFixed(3)}, max(lp.y - BUOY_HALF.y, 0.0)))
 				* (1.0 - smoothstep(0.0, ${FOAM.contactLift.toFixed(3)}, max(-BUOY_HALF.y - lp.y, 0.0)));
-			touch = max(touch, (1.0 - smoothstep(0.0, ${FOAM.contactBand.toFixed(3)}, abs(db))) * vk);
+			// Same windward bias, with the flow carried into the box's own
+			// frame — the transform is rigid, so rotating the direction by
+			// it (w = 0) is exact and needs no world-space buoy centre.
+			vec2 flowLocal = (uBuoyInv[i] * vec4(flowDir.x, 0.0, flowDir.y, 0.0)).xz;
+			float bowB = max(-dot(normalize(lp.xz + vec2(1e-5)), flowLocal), 0.0);
+			float bandB = 1.0 - smoothstep(0.0, ${FOAM.contactBand.toFixed(3)}, abs(db));
+			touch = max(touch, bandB * vk * (1.0 + ${FOAM.contactBowGain.toFixed(3)} * bowB * flowK));
 		}
 		h += touch * ${ENABLE.contactEmit ? FOAM.contactRate.toFixed(5) : '0.0'}
 			* ${CONTACT_FOAMINESS.toFixed(4)} * uDtScale;
@@ -633,6 +665,7 @@ export class FoamField {
         // Shared with the water material: the same array object, so the
         // two can never see different buoy positions.
         uBuoyInv: { value: buoyInv },
+        uCurrent: { value: new THREE.Vector2() },
         uDecayOld: { value: Math.exp(-1 / (60 * DECAY_TAU_OLD)) },
         uOverload: { value: 0 },
         uDiffusion: { value: DIFFUSION },
@@ -752,6 +785,7 @@ export class FoamField {
     foamFlow.x += (windX * FOAM_DRIFT + cur.x * FOAM.currentCarry) * d
     foamFlow.z += (windZ * FOAM_DRIFT + cur.z * FOAM.currentCarry) * d
     ;(u.uFlow.value as THREE.Vector2).set(foamFlow.x, foamFlow.z)
+    ;(u.uCurrent.value as THREE.Vector2).set(cur.x, cur.z)
     const shift = u.uShift.value as THREE.Vector2
     shift.set(
       ((windX * FOAM_DRIFT + cur.x * FOAM.currentCarry) * d) / FOAM_EXTENT,
