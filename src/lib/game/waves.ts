@@ -648,6 +648,101 @@ float waveJacobian(vec2 p, float t, float ampScale) {
  *
  * Requires wavesGlsl() earlier in the same shader (uses waveJacobian).
  */
+/**
+ * A STANDING GERSTNER WAVE anchored to an object's waterline.
+ *
+ * Not a shaped deformation — a wave, in the same form as every wave in
+ * the spectrum, so it folds for the same reason they do. Its horizontal
+ * and vertical displacements are in QUADRATURE (cos against sin), which
+ * is the whole point: that 90-degree offset is what makes material trace
+ * circles and a crest throw forward over its own base. A disturbance
+ * whose horizontal and vertical parts share a profile can only bunch and
+ * wring sideways, however hard it is driven.
+ *
+ * Phase is set so the crest sits AT the waterline: radial displacement
+ * is zero there (water is neither pushed into nor pulled off the hull)
+ * while the height and the compression are both at maximum. Compression
+ * peaking with the crest is correct — it is what an ordinary Gerstner
+ * wave does too.
+ *
+ * FOLD CONDITION, exactly as for the spectrum: q * A * k > 1, i.e.
+ *
+ *   q * amp * 2*pi / wavelength > 1
+ *
+ * so short and steep folds where long and gentle only humps. Short also
+ * keeps the pile small, which is what is wanted against a hull.
+ *
+ * Standing (no time term) because a moored object in a current holds its
+ * bow wave still in the world frame. A moving hull generalises to
+ * omega = k * U, which stands still in the hull's frame instead.
+ */
+export function objectWaveGlsl(o: {
+  centre: [number, number, number]
+  radius: number
+  amp: number
+  wavelength: number
+  q: number
+  reach: number
+  windward: number
+  flow: [number, number]
+}): string {
+  const k = (2 * Math.PI) / o.wavelength
+  const f = (n: number) => n.toFixed(5)
+  return `
+vec3 objectWave(vec2 p, float surfY) {
+	vec2 rel = p - vec2(${f(o.centre[0])}, ${f(o.centre[2])});
+	float r = length(rel);
+	if (r < 0.0001) return vec3(0.0);
+	// The circle the surface cuts at this height: the wave is anchored to
+	// the WATERLINE, so it rides up and down the hull as the swell passes.
+	float dy = surfY - ${f(o.centre[1])};
+	float ring = ${f(o.radius)} * ${f(o.radius)} - dy * dy;
+	if (ring <= 0.0) return vec3(0.0);
+	// max(), not an early return: a hard cut is a C0 discontinuity in the
+	// displacement and shows as a crease along the whole waterline.
+	float d = max(r - sqrt(ring), 0.0);
+	vec2 n = rel / r;
+	// Blend between a full ring and a nose-only wave. A hard angular mask
+	// varies fast around the hull and its derivative is pure shear, which
+	// is what reads as the mesh twisting; keeping some ring in the mix
+	// keeps that gentle.
+	// smoothstep, not max(): max() has a kink where it reaches zero, and
+	// that kink runs right down the object's beam line.
+	float face = mix(1.0, smoothstep(-0.15, 0.55, -dot(n, vec2(${f(o.flow[0])}, ${f(o.flow[1])}))), ${f(o.windward)});
+	float env = exp(-d / ${f(o.reach)}) * face;
+	float th = ${f(k)} * d;
+	vec3 disp;
+	// Quadrature: -sin radially, +cos vertically. At the hull that is
+	// zero radial displacement and a full-height crest.
+	disp.xz = n * (-${f(o.q * o.amp)} * sin(th) * env);
+	disp.y = ${f(o.amp)} * cos(th) * env;
+	return disp;
+}`
+}
+
+/**
+ * The object wave's SHADING slope, evaluated per pixel.
+ *
+ * The same split ripples use, and for the same reason. Geometry has to
+ * carry the FOLD — no amount of shading can make a surface overturn —
+ * but it does not have to carry the shading. Left to the vertex frame
+ * alone this wave's normal is interpolated linearly across each quad,
+ * and at a 3m wavelength against 0.5m quads that is six samples per
+ * wave, which reads as flat facets. Recomputing the slope here decouples
+ * how it SHADES from how finely it is tessellated.
+ */
+export function objectWaveSlopeGlsl(): string {
+  return `
+vec2 objectWaveSlope(vec2 p, float surfY) {
+	float e = 0.06;
+	float h = objectWave(p, surfY).y;
+	return vec2(
+		objectWave(p + vec2(e, 0.0), surfY).y - h,
+		objectWave(p + vec2(0.0, e), surfY).y - h
+	) / e;
+}`
+}
+
 export function causticsGlsl(): string {
   const seaScatter = (1 / (1 + significantAmplitude * 1.2)).toFixed(3)
   const f = (n: number) => n.toFixed(6)

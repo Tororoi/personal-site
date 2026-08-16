@@ -6,6 +6,8 @@
 	import {
 		activeField,
 		causticsGlsl,
+		objectWaveGlsl,
+		objectWaveSlopeGlsl,
 		significantAmplitude,
 		waves,
 		wavesGlsl
@@ -38,9 +40,22 @@
 		foamFlow,
 		FoamField,
 		foamGlsl,
+		foamNoiseGlsl,
 		FOAM_EXTENT
 	} from './foam';
-	import { CONTACT, DROPLET, ENABLE, f, FOAM, FROTH, LOOP, MIST, PLUME } from './tuning';
+	import {
+		CONTACT,
+		DROPLET,
+		ENABLE,
+		f,
+		FOAM,
+		FROTH,
+		LOOP,
+		BOWCREST,
+		MIST,
+		OBJWAVE,
+		PLUME
+	} from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
@@ -278,6 +293,51 @@
 		return terms.reduce((a, b) => `max(${a}, ${b})`);
 	};
 
+	/** The object wave, shared verbatim by every shader that builds a
+	 * displacement gradient. One definition: the water mesh, its fragment
+	 * refinement and the froth sprites must agree about where the water
+	 * is, or one of them silently undoes another. */
+	const objWaveGlsl = objectWaveGlsl({
+		centre: [3, -6, 2],
+		radius: 5,
+		amp: OBJWAVE.amp,
+		wavelength: OBJWAVE.wavelength,
+		q: OBJWAVE.q,
+		reach: OBJWAVE.reach,
+		windward: OBJWAVE.windward,
+		flow: [
+			Math.cos(activeField.surfaceCurrentHeading ?? 0),
+			Math.sin(activeField.surfaceCurrentHeading ?? 0)
+		]
+	});
+
+	/** Folds the object wave into a caller's displacement gradient.
+	 * Emits nothing when the sample is out of the wave's reach.
+	 * @param pos   GLSL vec2 expression: where to sample, world XZ
+	 * @param surfY GLSL float expression: the surface height there
+	 * @param apply GLSL statement adding `ow` to the caller's position */
+	const objWaveApply = (pos: string, surfY: string, apply: string) =>
+		!ENABLE.objectWave
+			? ''
+			: `
+	{
+		vec3 ow = objectWave(${pos}, ${surfY});
+		if (dot(ow, ow) > 1e-9) {
+			// Gradient by finite difference: the wave is one sin, one cos
+			// and an exp, so three samples cost far less than deriving and
+			// maintaining an analytic Jacobian for the envelope as well.
+			float owe = 0.08;
+			vec3 owx = (objectWave(${pos} + vec2(owe, 0.0), ${surfY}) - ow) / owe;
+			vec3 owz = (objectWave(${pos} + vec2(0.0, owe), ${surfY}) - ow) / owe;
+			txx += owx.x;
+			txy += owx.y;
+			txz += 0.5 * (owx.z + owz.x);
+			tzy += owz.y;
+			tzz += owz.z;
+			${apply}
+		}
+	}`;
+
 	// Wet-side receiver shading, shared VERBATIM by the water's raytraced
 	// underwater view and the sphere mesh's submerged branch: one tuning
 	// surface, twins cannot drift. Hosts declare the uniforms (uSunDir,
@@ -409,6 +469,8 @@ ${whitewaterLightGlsl()}
 ${foamGlsl()}
 ${ripplesGlsl()}
 ${wavesGlsl()}
+${ENABLE.objectWave ? objWaveGlsl : ''}
+${ENABLE.objectWave ? objectWaveSlopeGlsl() : ''}
 
 // The fold ramps at FRAGMENT resolution (see the gate in main): one
 // tangent loop yields both tests — the unnormalized Na.y IS the
@@ -439,6 +501,11 @@ float pinchMask(vec2 restXZ) {
 		wAmp += wb.x * pw;
 		wsum += pw;
 	}
+	// The same wave the vertex used. This refinement runs wherever the
+	// vertex reported a partial value — exactly where the object wave is
+	// — so leaving it out here would rebuild a spectrum-only frame and
+	// erase the vertex's verdict.
+	${objWaveApply('vWorld.xz', 'vWorld.y', '')}
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
 	vec3 Na = cross(Tv, Tu);
@@ -552,7 +619,10 @@ void main() {
 	// slope from the sim texture (rings shade at texture resolution no
 	// matter how coarse the mesh is). Churn zones keep the chaotic facet
 	// normal — those facets ARE the boil's look.
-	vec2 slope = vSlope + rippleShadeGrad(vWorld.xz);
+	// Ripples and the object wave both shade at their own resolution
+	// rather than the mesh's: their slopes are recomputed here and added
+	// onto the interpolated analytic wave normal.
+	vec2 slope = vSlope + rippleShadeGrad(vWorld.xz) ${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
 	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
 
 
@@ -732,6 +802,7 @@ varying float vLoopSk;
 varying float vPinchWhite;
 
 ${wavesGlsl()}
+${ENABLE.objectWave ? objWaveGlsl : ''}
 ${whitecapsGlsl()}
 ${ripplesGlsl()}
 
@@ -787,9 +858,14 @@ void main() {
 		hwz += wa.y * pw;
 		wsum += pw;
 	}
+	${objWaveApply('world.xz', 'p.y', 'p += ow;')}
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
 	vec3 Na = cross(Tv, Tu);
+	// From the FULL frame, object wave included. waveJacobian above sees
+	// only the spectrum, so without this every consumer of J carries on
+	// as though the object's wave were not there.
+	vJacobian = Na.y;
 	vSlope = -Na.xz / max(Na.y, 0.2);
 	// NORMALIZED normal y: -> 0 means the surface tips vertical, < 0
 	// means it OVERHANGS — the visible rolling tongue of a breaking
@@ -1247,6 +1323,7 @@ float frothFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 N
 		wAmp += wb.x * pw;
 		wsum += pw;
 	}
+	${objWaveApply('anchor + d.xz', 'd.y', 'd += ow;')}
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
 	vec3 Na = cross(Tv, Tu);
@@ -1311,6 +1388,7 @@ uniform float uAmp;
 uniform float uPointPx;
 uniform float uDomAmp;
 ${wavesGlsl()}
+${ENABLE.objectWave ? objWaveGlsl : ''}
 ${frothFrameGlsl}
 attribute float aRank;
 varying float vViewZ;
@@ -1366,6 +1444,260 @@ void main() {
 	const frothMesh = new THREE.Points(frothGeometry, frothMaterial);
 	frothMesh.frustumCulled = false;
 
+	// ---- BOW CREST: a strip of mesh riding the water at the nose ----
+	//
+	// Its own geometry rather than a deformation of the water, so its
+	// shape owes nothing to the water's tessellation — which is the whole
+	// point. Deforming the water can only express a fold several metres
+	// across, because a fold costs a pile of water as big as itself; a
+	// separate strip can be as tight as it likes.
+	//
+	// It stays welded to the surface by sampling the SAME wave
+	// displacement at the same rest positions, so it rises, falls and
+	// sways with the swell with nothing to keep in sync.
+	//
+	// The plane's two axes are reinterpreted: x runs ALONG the arc, y runs
+	// AROUND the lip's cross-section.
+	const bowCrestGeometry = new THREE.PlaneGeometry(
+		1,
+		1,
+		BOWCREST.segArc,
+		BOWCREST.segLip
+	);
+
+	/**
+	 * The crest's SHAPE lives entirely in this vertex shader — the
+	 * geometry is a bare unit plane whose two axes are reinterpreted. So
+	 * a wireframe view has to run the same shader; a plain wireframe
+	 * material would draw the undeformed plane and show nothing useful.
+	 */
+	const bowCrestVertex = `
+uniform float uTime;
+uniform float uAmp;
+uniform vec2 uFlowDir;
+varying float vViewZ;
+varying vec2 vUvC;
+varying vec3 vNrm;
+varying float vTaper;
+varying float vAlive;
+const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
+const float SPHERE_R = 5.0;
+${wavesGlsl()}
+${foamNoiseGlsl}
+
+void main() {
+	// uv.x along the arc, uv.y around the lip.
+	vec2 g = uv;
+	vUvC = g;
+	// Centred on the flow's stagnation point — dead ahead of the object.
+	float ang = atan(uFlowDir.y, uFlowDir.x) + 3.14159
+		+ (g.x - 0.5) * 2.0 * ${f(BOWCREST.arc)};
+	vec2 n = vec2(cos(ang), sin(ang));
+	// WHERE THE WATER MEETS THE SPHERE, solved in WORLD space — because
+	// that is the space the contact collar works in. The collar takes a
+	// real surface fragment and compares its distance to the ring at its
+	// OWN height. Placing the crest by picking a rest position instead
+	// misses by the Gerstner sway, which is metres in a storm: the base
+	// ends up nowhere near the world radius it was aiming for.
+	//
+	// Two nested solves. The outer one is a fixed point — the waterline
+	// radius depends on the surface height there, which depends on the
+	// radius. The inner one inverts the Gerstner map, answering "which
+	// material point lands HERE?", the same 3-iteration inversion the
+	// droplet foam deposits use. The mesh is ~1k vertices, so the nesting
+	// costs nothing.
+	float ringW = SPHERE_R;
+	float collarW = 0.0;
+	vec2 rest = SPHERE_C.xz + n * ringW;
+	vec2 target = rest;
+	vec3 d = vec3(0.0);
+	for (int it = 0; it < 3; it++) {
+		// The collar's own width and wobble, from the same noise at the
+		// same scale, so the crest wanders with the collar's edge rather
+		// than cutting across it.
+		vec2 anchorXZ = SPHERE_C.xz + n * ringW;
+		float wob = foamNoise(anchorXZ * ${f(1 / CONTACT.wobbleScale)}) * 0.6
+			+ foamNoise(anchorXZ * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
+		collarW = ${f(CONTACT.width * CONTACT_FOAMINESS)}
+			* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
+		target = SPHERE_C.xz + n * (ringW + collarW * ${f(BOWCREST.standoffFrac)});
+		// DAMPED and CLAMPED. The plain iteration rest = target - d(rest)
+		// only converges where the displacement gradient is under 1, and
+		// that is exactly what fails at a fold — which is where this crest
+		// lives. Undamped it can walk away and return a height from some
+		// unrelated stretch of sea, putting the tube far below the water
+		// or off in space. Damping keeps it stable, and the clamp bounds
+		// the worst case to the sway the waves can actually produce.
+		for (int k = 0; k < 4; k++) {
+			vec2 want = target - waveDisplacement(rest, uTime, uAmp).xz;
+			rest = mix(rest, want, 0.7);
+			vec2 off = rest - target;
+			float ol = length(off);
+			if (ol > ${f(SWAY_BOUND)}) rest = target + off * (${f(SWAY_BOUND)} / ol);
+		}
+		d = waveDisplacement(rest, uTime, uAmp);
+		float dy = d.y - SPHERE_C.y;
+		ringW = sqrt(max(SPHERE_R * SPHERE_R - dy * dy, 0.0));
+	}
+	// rest + displacement lands ON target by construction, so the base is
+	// exactly the world point asked for, at the true surface height.
+	vec3 surf = vec3(target.x, d.y, target.y);
+	// CULL WHEN THERE IS NO WATERLINE. As the sphere goes under, the
+	// circle the surface cuts shrinks to nothing — so the ring radius is
+	// itself the test, and it covers the crown just breaking through as
+	// well as the whole body submerging, with one number and no separate
+	// depth check.
+	vAlive = smoothstep(0.0, ${f(BOWCREST.minRing)}, ringW);
+	// A TORUS: the cross-section is a full circle, not a half lip. That
+	// is what lets froth travel all the way around it — the toroidal
+	// circulation a pinch loop's froth has, rather than a band sliding
+	// over a fixed surface.
+	float phi = g.y * 6.28318;
+	vec3 outw = vec3(n.x, 0.0, n.y);
+	vec3 up = vec3(0.0, 1.0, 0.0);
+	// TAPER away from the nose. 0 dead ahead, 1 at the ends of the arc.
+	float away = abs(g.x - 0.5) * 2.0;
+	vTaper = pow(max(1.0 - away, 0.0), ${f(BOWCREST.taperPower)});
+	// Sized off the collar, so a sea too calm to grow a collar grows no
+	// crest either — one foaminess, not two thresholds to keep aligned.
+	float thick = collarW * ${f(BOWCREST.thickPerWidth)}
+		* mix(${f(BOWCREST.taperMin)}, 1.0, vTaper);
+	// The tube sits ON the water: its centre is one radius up, so the
+	// bottom of the circle touches the surface however thick it is.
+	vec3 axisC = surf + up * thick + outw * (${f(BOWCREST.lean)} * thick);
+	vec3 pos = axisC + outw * (cos(phi) * thick) + up * (sin(phi) * thick);
+	vNrm = normalize(outw * cos(phi) + up * sin(phi));
+	vec4 view = viewMatrix * vec4(pos, 1.0);
+	vViewZ = -view.z;
+	gl_Position = projectionMatrix * view;
+	// NO vertex-level cull. Throwing a vertex to a fixed off-screen point
+	// works for the froth's independent POINTS, but on a mesh a triangle
+	// with only some of its corners moved still rasterises — stretched
+	// out toward that point, which is the streak toward the screen corner
+	// as the object submerges. vAlive rides to the fragment instead and
+	// the whole tube discards there, costing nothing when it is hidden.
+}`;
+
+	const bowCrestUniforms = {
+			uTime: waterUniforms.uTime,
+			uAmp: waterUniforms.uAmp,
+			uWaveA: waterUniforms.uWaveA,
+			uWaveB: waterUniforms.uWaveB,
+			uColor: waterUniforms.uFoamColor,
+			uFogColor: waterUniforms.uFogColor,
+			uFogDensity: waterUniforms.uFogDensity,
+			uFlowDir: { value: new THREE.Vector2(1, 0) },
+			uSkyZenith: waterUniforms.uSkyZenith,
+			uSkyHorizon: waterUniforms.uSkyHorizon,
+			uSunColor: waterUniforms.uSunColor,
+			uSunI: waterUniforms.uSunI,
+			uSunDir: waterUniforms.uSunDir,
+			uSunDiffusion: waterUniforms.uSunDiffusion
+	};
+
+	const bowCrestMaterial = new THREE.ShaderMaterial({
+		uniforms: bowCrestUniforms,
+		vertexShader: bowCrestVertex,
+		fragmentShader: `
+precision highp float;
+uniform vec3 uColor;
+uniform vec3 uFogColor;
+uniform float uFogDensity;
+uniform float uTime;
+varying float vViewZ;
+varying vec2 vUvC;
+varying vec3 vNrm;
+varying float vTaper;
+varying float vAlive;
+${foamNoiseGlsl}
+// whitewaterLightGlsl emits only the FUNCTION; the uniforms it reads are
+// a separate export. Omitting them fails the fragment compile, and a
+// material with a broken shader draws nothing at all with no error
+// unless the console is open — which is how this went invisible.
+${WHITEWATER_UNIFORM_DECLS}
+${whitewaterLightGlsl()}
+
+void main() {
+	// ROLLING is shading, not geometry: froth bands travel around the
+	// cross-section. A breaking lip tumbles because its material
+	// circulates, and this stands in for that circulation.
+	// SOLID white across the body, like a froth mass. Banding it read as
+	// stripes painted on a tube rather than as water. The toroidal motion
+	// lives in the BREAKUP below, which circulates — and will show
+	// properly once froth sprites ride the same parametrisation.
+	// PARTIAL CULL toward the ends, not a uniform fade: the taper is a
+	// threshold against noise, so the tube breaks into patches and thins
+	// out unevenly, which is how froth actually runs out.
+	// NOT named patch: reserved word in GLSL ES (tessellation shaders
+	// claim it). It fails the fragment compile, and a material with a
+	// broken shader draws nothing at all with no error unless the console
+	// is open — which is exactly how this went missing.
+	float mottle = foamNoise(vec2(
+		vUvC.x * ${f(BOWCREST.cullScale)},
+		vUvC.y * ${f(BOWCREST.bands)} - uTime * ${f(BOWCREST.rollRate)}
+	));
+	if (mottle > mix(${f(BOWCREST.cullFloor)}, 1.0, vTaper)) discard;
+	float ends = smoothstep(0.0, ${f(BOWCREST.endFade)}, min(vUvC.x, 1.0 - vUvC.x));
+	float a = ends * vAlive;
+	if (a < 0.02) discard;
+	// FLAT, exactly as the froth sprites are lit: any downward normal is
+	// flipped back up, then biased toward world up by FROTH.normalTilt —
+	// at 0 every part of the tube takes one shade, so it matches the
+	// sprites by construction rather than by two settings agreeing.
+	vec3 sn = vNrm.y < 0.0 ? -vNrm : vNrm;
+	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
+	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	gl_FragColor = vec4(mix(lit, uFogColor, fog), a);
+}`,
+		transparent: true,
+		depthWrite: false,
+		side: THREE.DoubleSide
+	});
+
+	/**
+	 * ?wire — the crest as a red wireframe, over everything.
+	 *
+	 * Same vertex shader, so it shows the ACTUAL deformed strip. depthTest
+	 * off because the crest rides the waterline and the opaque water hides
+	 * it exactly where its shape matters most.
+	 */
+	const bowCrestWireMaterial = new THREE.ShaderMaterial({
+		uniforms: bowCrestUniforms,
+		vertexShader: bowCrestVertex,
+		fragmentShader: `
+precision highp float;
+varying float vViewZ;
+varying vec2 vUvC;
+varying vec3 vNrm;
+varying float vTaper;
+varying float vAlive;
+void main() {
+	// Obey the SAME liveness cull as the shaded pass. Without it the wire
+	// view drew the tube even where the shaded one discards it entirely,
+	// so the two disagreed and the wireframe could not be used to
+	// diagnose the shaded pass — it showed a healthy tube while nothing
+	// was on screen.
+	if (vAlive <= 0.0) discard;
+	gl_FragColor = vec4(1.0, 0.15, 0.15, 1.0);
+}`,
+		wireframe: true,
+		depthTest: false,
+		depthWrite: false,
+		side: THREE.DoubleSide
+	});
+
+	const wireView =
+		typeof window !== 'undefined' &&
+		new URLSearchParams(window.location.search).has('wire');
+
+	const bowCrestMesh = new THREE.Mesh(
+		bowCrestGeometry,
+		wireView ? bowCrestWireMaterial : bowCrestMaterial
+	);
+	bowCrestMesh.frustumCulled = false;
+	bowCrestMesh.visible = ENABLE.bowCrest;
+
 	// CREST SPRAY: a second pass over the SAME points. Each sprite's
 	// quad is enlarged upward and the fragment paints a vertical plume
 	// above the bubble — spray lifting off that specific foam mass. The
@@ -1415,6 +1747,7 @@ uniform float uMaxPoint;
 uniform vec2 uWindScreen;
 uniform float uWindSpeed;
 ${wavesGlsl()}
+${ENABLE.objectWave ? objWaveGlsl : ''}
 ${frothFrameGlsl}
 attribute float aRank;
 varying float vViewZ;
@@ -1830,6 +2163,13 @@ void main() {
 			// breeze and the current only. (Crest plumes take the opposite
 			// deal: gust alone, no base.)
 			const windSteady = windBase(waveTime);
+			{
+				// The crest sits dead ahead of the object in the flow, so it
+				// needs the same steady carry the foam rides.
+				const cur = currentVector(waveTime);
+				const cs = Math.hypot(cur.x, cur.z);
+				if (cs > 1e-4) bowCrestMaterial.uniforms.uFlowDir.value.set(cur.x / cs, cur.z / cs);
+			}
 			waterUniforms.uWindTravel.value.set(windTravel.x, windTravel.z);
 
 			// Mirror the event array into the shader uniforms.
@@ -2095,6 +2435,9 @@ void main() {
 		sprayMaterial.dispose();
 		frothGeometry.dispose();
 		frothMaterial.dispose();
+		bowCrestGeometry.dispose();
+		bowCrestMaterial.dispose();
+		bowCrestWireMaterial.dispose();
 		crestSprayMaterial.dispose();
 		mistGeometry.dispose();
 		mistMaterial.dispose();
@@ -2127,6 +2470,7 @@ void main() {
 <T is={sprayMesh} />
 
 <T is={frothMesh} />
+<T is={bowCrestMesh} />
 
 <T is={crestSprayMesh} />
 

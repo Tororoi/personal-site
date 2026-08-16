@@ -26,15 +26,15 @@ export const ENABLE = {
   /** Pull of the pinch zone toward the sprite plane. */
   loopStretch: true,
   /** Froth masses surfacing from under the fold. */
-  froth: true,
+  froth: false,
   /** Vertical spray thrown off each foam mass. */
   crestPlumes: false,
   /** Ballistic droplets launched from inside the loops. */
-  splashDroplets: true,
+  splashDroplets: false,
   /** Spray kicked up by the buoys. */
   buoySpray: true,
   /** Persistent foam residue field (deposits from landings). */
-  foamField: true,
+  foamField: false,
   /** Continuous foam laid by the sim wherever froth appears. */
   foamTrail: true,
   /**
@@ -42,7 +42,7 @@ export const ENABLE = {
    * things and are tuned separately.
    */
   /** Painted collar pinned to the waterline (CONTACT.*). */
-  contactFoam: true,
+  contactFoam: false,
   /** Foam objects EMIT into the field, which then drifts and dies with
    * the rest of it (FOAM.contact*). This is what makes the wake. */
   contactEmit: true,
@@ -64,6 +64,10 @@ export const ENABLE = {
   mist: false,
   /** Downslope gusts shaping the mist. */
   mistGusts: true,
+  /** Standing Gerstner wave at an object's waterline (OBJWAVE). */
+  objectWave: false,
+  /** Mesh crest riding the water at an object's nose (BOWCREST). */
+  bowCrest: true,
   /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
    * study replaced them with loop-driven emission. */
   whitecapEvents: false,
@@ -278,8 +282,21 @@ export const LOOP = {
    *    the seam into the compressed water around it, so it is what
    *    widens the read past the sliver.
    */
-  /** Weight of the exact backface term, 0-1. */
-  backfaceWhite: 1.0,
+  /**
+   * Weight of the backface term, 0-1.
+   *
+   * Zero by default, because gl_FrontFacing is decided PER TRIANGLE: a
+   * tri is entirely front- or back-facing, so white driven by it has
+   * hard polygon edges and no shading smoothing can help. That is
+   * invisible on the ambient crests, where the ribbon is thin and froth
+   * covers it, but obvious on an object's wave.
+   *
+   * Nothing is lost by dropping it. Backface means J < 0, and the ramp
+   * term computes 1 - smoothstep(0, whiteJRamp, J) per PIXEL in
+   * pinchMask — the same fact, feathered, at fragment resolution. Raise
+   * this only to check what the exact geometric test would have said.
+   */
+  backfaceWhite: 0.0,
   /** Weight of the reconstructed fold-ramp term, 0-1. */
   rampWhite: 1.0,
 
@@ -335,6 +352,147 @@ export const LOOP = {
   /** Near-binary gate: pinches below the sprite criterion stay dark. */
   gateStart: 0.1,
   gateFull: 0.16,
+} as const
+
+/**
+ * OBJECT WAVE — a standing Gerstner wave anchored to an object's
+ * waterline. Its own feature rather than part of FROTH: it is a wave,
+ * and anything downstream of the wave field responds to it.
+ *
+ * Currently OFF (ENABLE.objectWave). It was built to manufacture a pinch
+ * loop at an object and is not good at that — a fold the mesh can
+ * resolve has to be several metres across, so it suits a large swell
+ * around a hull rather than a tight crest. Kept because that IS a useful
+ * effect in its own right.
+ */
+export const OBJWAVE = {
+  /**
+   * OBJECT WAVE — a real standing Gerstner wave at an object's
+   * waterline, rather than a shaped deformation.
+   *
+   * It folds for the same reason the spectrum's waves do, and every
+   * downstream system (mesh whitening, froth, droplets, foam) responds
+   * through its ordinary criteria with nothing written twice.
+   *
+   * The fold condition is the ordinary Gerstner one:
+   *
+   *   q * amp * 2*pi / wavelength > 1
+   *
+   * At q 3 / amp 0.73 / lambda 12 that is 1.15, so it folds — just.
+   *
+   * WAVELENGTH IS SET BY THE MESH, not by taste. The fold — the part of
+   * the wave where compression exceeds 1 — spans about a SIXTH of the
+   * wavelength, so against 0.5m quads:
+   *
+   *   lambda 3   fold ~0.5m = 1 quad. Neighbouring vertices land on
+   *              opposite sides of it and displace opposite ways, which
+   *              aliases into a checkerboard of torn triangles.
+   *   lambda 12  fold ~2m   = 4 quads. Resolves.
+   *
+   * Amplitude then has to RISE with wavelength to keep folding, since
+   * the condition is q*A*2*pi/lambda > 1. A resolvable fold is therefore
+   * always a large wave — metres of water on something sphere- or
+   * boat-sized. Fine at that scale, impossible at a buoy's, which is the
+   * same wall the artificial pinch kept hitting.
+   *
+   * Going far ABOVE the threshold does not help either: at qAk of 10 the
+   * map is inverted many times over and the mesh simply shreds.
+   */
+  amp: 0.95,
+  wavelength: 12,
+  /** Gerstner chop for this wave. Raising it steepens toward the fold
+   * without making the wave any taller. */
+  q: 3,
+  /** How far the wave carries from the hull before dying, metres. */
+  reach: 8,
+  /**
+   * 0 = a full ring around the object, 1 = the upstream face only.
+   * A hard nose-only mask varies fast around the hull and its derivative
+   * is pure shear, which reads as the mesh twisting rather than curling;
+   * keeping some ring in the mix holds that down.
+   */
+  windward: 0.6,
+} as const
+
+/**
+ * BOW CREST — a strip of MESH riding the water at an object's nose.
+ *
+ * Every attempt to manufacture a crest by deforming the water failed on
+ * the same constraint: a fold the mesh can resolve costs a pile of water
+ * as big as the fold, so it is only expressible at swell scale. This
+ * sidesteps it. The crest is its own geometry, so its shape owes nothing
+ * to the water's tessellation and it can be as tight as wanted.
+ *
+ * It stays welded to the surface by sampling the SAME wave displacement
+ * the water does, at the same rest positions — so it rises, falls and
+ * sways with the swell exactly, with no matching to maintain.
+ *
+ * The rolling is shading, not geometry: froth bands scroll around the
+ * cross-section. A real breaking lip tumbles because its material
+ * circulates, and circulating material is what the scroll stands in for.
+ */
+export const BOWCREST = {
+  /** Arc covered either side of dead-ahead, radians. PI/2 is the whole
+   * upstream half; less makes a tighter nose crest. */
+  arc: 1.35,
+  /**
+   * Where the crest sits ACROSS the contact collar's band, 0-1: 0 at the
+   * hull edge, 1 at the collar's outer rim. Expressed against the collar
+   * rather than in metres so the two stay registered — the crest tracks
+   * the collar's width, its wobble and its chop scaling automatically,
+   * instead of being a second set of numbers to keep aligned.
+   */
+  standoffFrac: 0.5,
+  /** Lip cross-section radius, as a multiple of the collar's width. */
+  thickPerWidth: 1.1,
+  /** How far the tube leans downstream, as a fraction of its radius. */
+  lean: 0.6,
+  /**
+   * TAPER away from the nose. The exponent on (1 - distance along the
+   * arc): higher keeps the crest full further round before dropping off.
+   */
+  taperPower: 1.6,
+  /** Thickness at the very ends, as a fraction of the nose's. */
+  taperMin: 0.12,
+  /** Noise scale for the partial cull along the arc. The taper is used
+   * as a THRESHOLD against this rather than as an opacity, so the tube
+   * breaks into patches toward the ends instead of fading uniformly. */
+  cullScale: 7,
+  /**
+   * How much survives the cull at the ENDS of the arc, 0-1. The taper
+   * was used as the threshold directly, which meant two thirds of the
+   * tube discarded by mid-arc and almost all of it near the ends — the
+   * crest was being thinned to nothing before it ever reached the taper
+   * it was meant to have. This floors it, so the ends thin out and
+   * break up rather than vanishing.
+   */
+  cullFloor: 0.4,
+  /**
+   * How many turns of the breakup pattern per revolution of the
+   * cross-section, and how fast it circulates. The BODY is solid white
+   * like a froth mass — these drive only the patchy cull, so the tumble
+   * reads as froth tearing and reforming rather than as bands painted
+   * across a solid tube.
+   */
+  bands: 3,
+  rollRate: 1.6,
+  /** Fade at the ends of the arc, as a fraction of it. */
+  endFade: 0.35,
+  /**
+   * Waterline radius, metres, below which the crest fades out entirely.
+   * The circle the surface cuts shrinks to nothing as an object goes
+   * under, so this one number covers both a submerged object and a crown
+   * only just breaking through — no separate depth test.
+   *
+   * Kept low. Measured on the storm preset, the sphere has ANY waterline
+   * only about a quarter of the time — its crown sits at y = -1 while
+   * the surface there swings between -5.4 and +4.9 — so a high threshold
+   * hides the crest almost always.
+   */
+  minRing: 0.25,
+  /** Tessellation: segments along the arc and around the lip. */
+  segArc: 96,
+  segLip: 16,
 } as const
 
 /**
