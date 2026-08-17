@@ -20,7 +20,7 @@
  * point iteration (3 rounds, exact to millimeters at our steepness).
  */
 
-import { SEA } from './tuning'
+import { CURRENT, SEA } from './tuning'
 
 export type WaveParams = {
   /** Unit direction of travel. */
@@ -347,7 +347,7 @@ export const SEA_PRESETS = {
         count: 6,
         minLambda: 10,
         maxLambda: 18,
-        heading: 0.2,
+        heading: 0,
         spread: 1.5,
         slope: 0.00557744,
         speed: 1.2,
@@ -357,7 +357,7 @@ export const SEA_PRESETS = {
         count: 5,
         minLambda: 6,
         maxLambda: 10,
-        heading: -0.3,
+        heading: 0,
         spread: 1.4,
         slope: 0.00438202,
       },
@@ -366,7 +366,7 @@ export const SEA_PRESETS = {
         count: 6,
         minLambda: 2,
         maxLambda: 5,
-        heading: 0.5,
+        heading: 0,
         spread: 1.4,
         slope: 0.00399991,
       },
@@ -477,6 +477,145 @@ function pickPreset(): WaveFieldConfig {
   return DEFAULT_FIELD
 }
 
+/**
+ * SEA STATE — the presets as keyframes on one continuous axis.
+ *
+ * 0 = calm, 1 = largeSwell, 2 = storm, and anything between is a genuine
+ * blend rather than a snap. This works only because the three now share a
+ * seed AND a band structure: generateWaves walks the RNG band by band, so
+ * component i draws the same jitter and phase in every preset. Sliding the
+ * dial therefore DEFORMS one sea into the next — each wave keeps its
+ * identity and changes wavelength, amplitude and heading — instead of
+ * regenerating a different random field at every step.
+ *
+ * Interpolation is straight linear between neighbouring keyframes. It is
+ * not perceptually even — calm to largeSwell is a 17x jump in amplitude,
+ * so most of that segment already looks like weather — but the dial itself
+ * is the curve: pick 0.2 rather than bending the mapping underneath.
+ */
+const SEA_SEQUENCE: WaveFieldConfig[] = [
+  SEA_PRESETS.calm,
+  SEA_PRESETS.largeSwell,
+  SEA_PRESETS.storm,
+]
+
+const lerpN = (a: number, b: number, t: number) => a + (b - a) * t
+/** Resolve an optional field to the value its consumer would have used. */
+const opt = (x: number | undefined, fallback: number) =>
+  x === undefined ? (x ?? fallback) : x
+
+function lerpHex(a: string, b: string, t: number): string {
+  const pa = parseInt(a.slice(1), 16)
+  const pb = parseInt(b.slice(1), 16)
+  const ch = (sh: number) =>
+    Math.round(lerpN((pa >> sh) & 255, (pb >> sh) & 255, t))
+      .toString(16)
+      .padStart(2, '0')
+  return `#${ch(16)}${ch(8)}${ch(0)}`
+}
+
+function blendFields(
+  a: WaveFieldConfig,
+  b: WaveFieldConfig,
+  t: number,
+): WaveFieldConfig {
+  if (a.seed !== b.seed) {
+    throw new Error(
+      `sea blend needs one seed: ${a.seed} vs ${b.seed}. Different seeds mean ` +
+        `different waves, so the blend would reshuffle rather than deform.`,
+    )
+  }
+  return {
+    seed: a.seed,
+    windAngle: lerpN(a.windAngle, b.windAngle, t),
+    windSpeed: lerpN(opt(a.windSpeed, 5), opt(b.windSpeed, 5), t),
+    surfaceCurrentHeading: lerpN(
+      opt(a.surfaceCurrentHeading, a.windAngle),
+      opt(b.surfaceCurrentHeading, b.windAngle),
+      t,
+    ),
+    surfaceCurrentSpeed: lerpN(
+      opt(a.surfaceCurrentSpeed, CURRENT.speed),
+      opt(b.surfaceCurrentSpeed, CURRENT.speed),
+      t,
+    ),
+    chop: lerpN(a.chop, b.chop, t),
+    timeScale: lerpN(opt(a.timeScale, 1), opt(b.timeScale, 1), t),
+    ripples: {
+      displayGain: lerpN(
+        opt(a.ripples?.displayGain, 1),
+        opt(b.ripples?.displayGain, 1),
+        t,
+      ),
+      speed: lerpN(opt(a.ripples?.speed, 2.2), opt(b.ripples?.speed, 2.2), t),
+      damping: lerpN(
+        opt(a.ripples?.damping, 0.96),
+        opt(b.ripples?.damping, 0.96),
+        t,
+      ),
+    },
+    sky: {
+      zenith: lerpHex(
+        a.sky?.zenith ?? '#2e6fb2',
+        b.sky?.zenith ?? '#2e6fb2',
+        t,
+      ),
+      horizon: lerpHex(
+        a.sky?.horizon ?? '#a9cfe8',
+        b.sky?.horizon ?? '#a9cfe8',
+        t,
+      ),
+      diffusion: lerpN(opt(a.sky?.diffusion, 0), opt(b.sky?.diffusion, 0), t),
+    },
+    detail: {
+      minLambda: lerpN(
+        opt(a.detail?.minLambda, 0.35),
+        opt(b.detail?.minLambda, 0.35),
+        t,
+      ),
+      maxLambda: lerpN(
+        opt(a.detail?.maxLambda, 3.5),
+        opt(b.detail?.maxLambda, 3.5),
+        t,
+      ),
+      slope: lerpN(opt(a.detail?.slope, 0.05), opt(b.detail?.slope, 0.05), t),
+    },
+    foam: {
+      pinchJStart: lerpN(
+        opt(a.foam?.pinchJStart, 0.65),
+        opt(b.foam?.pinchJStart, 0.65),
+        t,
+      ),
+    },
+    bands: a.bands.map((ba, i) => {
+      const bb = b.bands[i]
+      if (!bb || ba.count !== bb.count) {
+        throw new Error(
+          `sea blend needs matching band structure at band ${i}: ` +
+            `count ${ba.count} vs ${bb?.count}. Component i must be the same ` +
+            `wave in both, or the field reshuffles mid-slide.`,
+        )
+      }
+      return {
+        count: ba.count,
+        minLambda: lerpN(ba.minLambda, bb.minLambda, t),
+        maxLambda: lerpN(ba.maxLambda, bb.maxLambda, t),
+        heading: lerpN(ba.heading, bb.heading, t),
+        spread: lerpN(ba.spread, bb.spread, t),
+        slope: lerpN(ba.slope, bb.slope, t),
+        speed: lerpN(opt(ba.speed, 1), opt(bb.speed, 1), t),
+      }
+    }),
+  }
+}
+
+/** The sea at a point on the calm -> largeSwell -> storm axis. */
+export function fieldForSeaState(x: number): WaveFieldConfig {
+  const c = Math.min(Math.max(x, 0), SEA_SEQUENCE.length - 1)
+  const i = Math.min(Math.floor(c), SEA_SEQUENCE.length - 2)
+  return blendFields(SEA_SEQUENCE[i], SEA_SEQUENCE[i + 1], c - i)
+}
+
 /** Deterministic PRNG so the field is identical across sessions and twins. */
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0
@@ -527,7 +666,8 @@ export function generateWaves(
 }
 
 /** The preset actually in effect this session (after the ?sea= override). */
-export const activeField: WaveFieldConfig = pickPreset()
+export const activeField: WaveFieldConfig =
+  SEA.seaState >= 0 ? fieldForSeaState(SEA.seaState) : pickPreset()
 
 // Test override, applied BEFORE the field is generated: chop sets every
 // wave's Gerstner q below, so it has to land before generateWaves runs.

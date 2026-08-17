@@ -1668,6 +1668,17 @@ export const SEA = {
    * that once at load. Every step needs an Apply.
    */
   chopOverride: -1,
+  /**
+   * Position on the continuous sea-state axis: 0 calm, 1 largeSwell,
+   * 2 storm. Negative uses the preset as loaded (?sea=), unblended.
+   *
+   * Overrides which preset is in effect. chopOverride still applies on
+   * top, so the two compose — blend to 0.6 and then push chop separately.
+   *
+   * STAGED like chopOverride, and for the same reason: the field is built
+   * once at load.
+   */
+  seaState: -1,
 }
 
 /**

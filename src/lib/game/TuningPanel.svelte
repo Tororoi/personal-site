@@ -198,6 +198,7 @@
 		// of the real range, and letting the slider run beyond it only buys
 		// unreachable sea states at the cost of resolution across the real ones.
 		'SEA.chopOverride': { min: -1, max: 5, step: 0.05 },
+		'SEA.seaState': { min: -1, max: 2, step: 0.01 },
 		// Chop thresholds, so they need the chop range — not the 0..1 the
 		// heuristic infers from a default under 1.
 		'SPECULAR.calmAtChop': { min: 0, max: 5, step: 0.05 },
