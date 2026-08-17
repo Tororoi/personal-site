@@ -11,7 +11,9 @@
 		wavesGlsl,
 		applySeaState,
 		fieldForSeaState,
-		generateWaves
+		generateWaves,
+		waveUniformA,
+		waveUniformB
 	} from './waves';
 	import {
 		events,
@@ -154,7 +156,12 @@
 	// the caustic map's source-size blur (caustics.ts), the receiver-side
 	// flatten that carries heavy overcast past the practical blur radius,
 	// and the softening of the sun's glare on the water.
-	const SUN_DIFFUSION = activeField.sky?.diffusion ?? 0;
+	// Cloud cover, which the sea state carries. Read live rather than
+	// captured: it sets the caustic blur radius and the specular's
+	// clear/overcast blend, and both were freezing at whatever the page
+	// loaded with — a storm's soft caustics persisting into a calm sea.
+	const sunDiffusion = () => activeField.sky?.diffusion ?? 0;
+	const SUN_DIFFUSION = sunDiffusion();
 	const CAUSTIC_FLAT = THREE.MathUtils.smoothstep(SUN_DIFFUSION, 0.35, 1.0);
 
 	// ---- Wireframe tuning mode ----
@@ -175,8 +182,9 @@
 		uHeightScale: { value: 3.5 },
 		// The wave field itself: uploaded from the same array the CPU sampler
 		// reads, so the two twins cannot disagree about parameters.
-		uWaveA: { value: waves.map((w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega)) },
-		uWaveB: { value: waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase)) },
+		// Shared with the caustic, foam and mist sims — see waveUniformA.
+		uWaveA: { value: waveUniformA },
+		uWaveB: { value: waveUniformB },
 		uLineColor: { value: new THREE.Color('#55c4fe') },
 		uFogColor: { value: new THREE.Color('#0f131a') },
 		uFogDensity: { value: 0.0075 },
@@ -535,12 +543,6 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 		if (key === seaApplied) return;
 		seaApplied = key;
 		applySeaState(seaEased, SEA.chopOverride);
-		const wa = waterUniforms.uWaveA.value;
-		const wb = waterUniforms.uWaveB.value;
-		for (let i = 0; i < waves.length; i++) {
-			wa[i].set(waves[i].dirX, waves[i].dirZ, waves[i].k, waves[i].omega);
-			wb[i].set(waves[i].amp, waves[i].q, waves[i].phase);
-		}
 		const dom = waves.reduce((a, b) => Math.max(a, b.amp), 0);
 		frothMaterial.uniforms.uDomAmp.value = dom;
 		waterUniforms.uWindDir.value.set(
@@ -552,6 +554,14 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 		// The FFT spectrum is CPU work — two 128^2 float textures — so it is
 		// marked stale here and rebuilt on a throttle rather than inline.
 		fftStale = true;
+		const dif = sunDiffusion();
+		waterUniforms.uSunDiffusion.value = dif;
+		causticMap.diffusion = dif;
+		waterUniforms.uCausticFlat.value = THREE.MathUtils.smoothstep(dif, 0.35, 1.0);
+		// The foam sim keeps its OWN dominant-amplitude reference, and the
+		// froth criterion divides by it — left at load it made a calm sea
+		// read as though a storm's crests were the yardstick.
+		foamField.setDomAmp(waves.reduce((a, b) => Math.max(a, b.amp), 0));
 		waterUniforms.uSkyZenith.value.set(activeField.sky?.zenith ?? '#a8c8d8');
 		waterUniforms.uSkyHorizon.value.set(activeField.sky?.horizon ?? '#d5e3ea');
 	}
@@ -772,6 +782,14 @@ float pinchMask(vec2 restXZ) {
  * no waterline to compute and nothing to update as the swell passes.
  */
 float contactFoam(vec3 P) {
+	// A sea too calm to foam has NO collar, and this has to be tested at
+	// runtime. It used to be a build-time gate on CONTACT_FOAMINESS, which
+	// baked the collar out entirely whenever the page loaded on calm — so
+	// blending up to a storm never grew one. Testing here also covers the
+	// original hazard: at zero width the smoothstep below has equal edges,
+	// which is undefined in GLSL and returns 1, giving the calmest sea the
+	// THICKEST collar.
+	if (uFoaminess < 0.001) return 0.0;
 	// Value noise, not a product of sines: sines are strictly periodic
 	// and gave the edge one wavelength and one amplitude everywhere.
 	float wob = foamNoise(P.xz * ${f(1 / CONTACT.wobbleScale)}) * 0.6
@@ -1051,9 +1069,7 @@ void main() {
 	// equal edges, which is undefined in GLSL and returns 1, so the
 	// calmest sea got the THICKEST collar.
 	float contactT = ${
-		ENABLE.contactFoam && CONTACT_FOAMINESS > 0
-			? `contactFoam(vWorld) * ${f(CONTACT.alpha)}`
-			: '0.0'
+		ENABLE.contactFoam ? `contactFoam(vWorld) * ${f(CONTACT.alpha)}` : '0.0'
 	};
 	// One web over both, so a fading collar tears into the same lace the
 	// field does, and overlapping foam draws one pattern rather than two.

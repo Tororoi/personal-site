@@ -28,7 +28,7 @@
 import * as THREE from 'three'
 import { ENABLE, FOAM, FROTH } from './tuning'
 import { currentVector } from './current'
-import { activeField, waves, wavesGlsl, onFieldChange } from './waves'
+import { activeField, waves, wavesGlsl, onFieldChange, waveUniformA, waveUniformB } from './waves'
 
 export const FOAM_RESOLUTION = 512
 /**
@@ -697,14 +697,9 @@ export class FoamField {
         uExtent: { value: FOAM_EXTENT },
         uTime: { value: 0 },
         uAmp: { value: 1 },
-        uWaveA: {
-          value: waves.map(
-            (w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega),
-          ),
-        },
-        uWaveB: {
-          value: waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase)),
-        },
+        // Shared with every other wave material; see waveUniformA.
+        uWaveA: { value: waveUniformA },
+        uWaveB: { value: waveUniformB },
         uInject: {
           value: Array.from({ length: MAX_INJECT }, () => new THREE.Vector4()),
         },
@@ -831,6 +826,11 @@ export class FoamField {
     renderer.render(this.simScene, this.simCamera)
     renderer.setRenderTarget(previousTarget)
     this.current = next
+  }
+
+  /** Dominant wave amplitude, the froth criterion's yardstick. */
+  setDomAmp(v: number) {
+    this.material.uniforms.uDomAmp.value = v
   }
 
   dispose() {

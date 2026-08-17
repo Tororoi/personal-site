@@ -20,6 +20,7 @@
  * point iteration (3 rounds, exact to millimeters at our steepness).
  */
 
+import * as THREE from 'three'
 import { CURRENT, SEA } from './tuning'
 
 export type WaveParams = {
@@ -665,6 +666,7 @@ export function applySeaState(state: number, chopOverride: number) {
   }
   for (let i = 0; i < waves.length; i++) Object.assign(waves[i], fresh[i])
   maxSurfaceRate = waves.reduce((sum, w) => sum + Math.abs(w.amp * w.omega), 0)
+  syncWaveUniforms()
   for (const fn of fieldListeners) fn()
 }
 
@@ -737,6 +739,29 @@ if (SEA.chopOverride >= 0) activeField.chop = SEA.chopOverride
 
 /** The live field. One array; the GPU uniforms and the CPU sampler both read it. */
 export const waves = generateWaves(activeField)
+
+/**
+ * THE GPU MIRROR of `waves` — one set of objects, shared by every material
+ * that embeds wavesGlsl().
+ *
+ * Shared rather than copied because copies were exactly the bug: the
+ * caustic map, foam sim and mist field each built their own arrays at
+ * construction, so a live field change reached the water and nothing else.
+ * The caustics went on refracting a storm under a calm sea. One array
+ * means a future module cannot forget to update.
+ */
+export const waveUniformA = waves.map(
+  (w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega),
+)
+export const waveUniformB = waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase))
+
+function syncWaveUniforms() {
+  for (let i = 0; i < waves.length; i++) {
+    waveUniformA[i].set(waves[i].dirX, waves[i].dirZ, waves[i].k, waves[i].omega)
+    waveUniformB[i].set(waves[i].amp, waves[i].q, waves[i].phase)
+  }
+}
+
 
 /**
  * Typical crest height (RMS sum): use for normalizing height-based color.

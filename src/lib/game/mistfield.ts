@@ -23,7 +23,7 @@
  */
 
 import * as THREE from 'three'
-import { waves, wavesGlsl } from './waves'
+import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 import { ENABLE, MIST } from './tuning'
 
 /** Full domain width, meters, centered on the origin. */
@@ -347,14 +347,9 @@ export class MistField {
       uAmpScale: { value: 1 },
       uGust: { value: 0 },
       uTravel: { value: new THREE.Vector2(dom.dirX, dom.dirZ) },
-      uWaveA: {
-        value: waves.map(
-          (w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega),
-        ),
-      },
-      uWaveB: {
-        value: waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase)),
-      },
+      // Shared with every other wave material; see waveUniformA.
+      uWaveA: { value: waveUniformA },
+      uWaveB: { value: waveUniformB },
       uSplatPos: { value: this.splatPos },
       uSplatVel: { value: this.splatVel },
     })

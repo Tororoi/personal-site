@@ -39,7 +39,7 @@
 
 import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
-import { waves, wavesGlsl } from './waves'
+import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
 export const CAUSTIC_RESOLUTION = 2048
 /**
@@ -284,12 +284,9 @@ export class CausticMap {
         uPlaneDepth: { value: CAUSTIC_PLANE_DEPTH },
         uTime: { value: 0 },
         uAmp: { value: 1 },
-        uWaveA: {
-          value: waves.map((w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega)),
-        },
-        uWaveB: {
-          value: waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase)),
-        },
+        // Shared with every other wave material; see waveUniformA.
+        uWaveA: { value: waveUniformA },
+        uWaveB: { value: waveUniformB },
       },
       vertexShader: splatVertex,
       fragmentShader: splatFragment,
