@@ -42,6 +42,10 @@ export type Sample = {
   cpuRest: number
   checkRun: number
   checkSkip: number
+  sEmit: number
+  sScan: number
+  sTracks: number
+  sParticles: number
 }
 
 let queue: string[] = []

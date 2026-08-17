@@ -64,5 +64,10 @@ export const perf = $state({
 	cpuRest: 0,
 	/** Landing checks actually sampled, and skipped by the height bound. */
 	checkRun: 0,
-	checkSkip: 0
+	checkSkip: 0,
+	/** updateSpray's own split: emission, loop scan, tracks, particles. */
+	sEmit: 0,
+	sScan: 0,
+	sTracks: 0,
+	sParticles: 0
 });

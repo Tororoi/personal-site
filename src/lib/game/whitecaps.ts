@@ -21,7 +21,13 @@
  */
 
 import { ENABLE, WIND } from './tuning'
-import { activeField, sampleSurface, surfaceHeight, type SurfaceSample } from './waves'
+import {
+  activeField,
+  sampleSurface,
+  sampleSurfaceInto,
+  surfaceHeight,
+  type SurfaceSample,
+} from './waves'
 
 export const MAX_EVENTS = 8
 
@@ -179,6 +185,20 @@ export function oceanHeight(
 ): number {
   const h = surfaceHeight(x, z, t, ampScale, iterations)
   return h + eventSurface(x, z, t, h)
+}
+
+/** sampleOcean into a caller-owned object; see sampleSurfaceInto. */
+export function sampleOceanInto(
+  out: SurfaceSample,
+  x: number,
+  z: number,
+  t: number,
+  ampScale = 1,
+  iterations = 3,
+): SurfaceSample {
+  sampleSurfaceInto(out, x, z, t, ampScale, iterations)
+  out.height += eventSurface(x, z, t, out.height)
+  return out
 }
 
 export function sampleOcean(

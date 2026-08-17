@@ -102,7 +102,11 @@
 						cpuCurrent: +perf.cpuCurrent.toFixed(2),
 						cpuRest: +perf.cpuRest.toFixed(2),
 						checkRun: perf.checkRun,
-						checkSkip: perf.checkSkip
+						checkSkip: perf.checkSkip,
+						sEmit: +perf.sEmit.toFixed(2),
+						sScan: +perf.sScan.toFixed(2),
+						sTracks: +perf.sTracks.toFixed(2),
+						sParticles: +perf.sParticles.toFixed(2)
 					});
 					sAcc = 0;
 					sFrames = 0;
@@ -141,7 +145,8 @@
 			foam {perf.foam.toFixed(0)} · spray {perf.spray}<br />
 			wc {perf.cpuWhitecaps.toFixed(1)} · spr {perf.cpuSpray.toFixed(1)} · cur {perf.cpuCurrent.toFixed(1)}
 			· rest {perf.cpuRest.toFixed(1)}<br />
-			checks {perf.checkRun} run · {perf.checkSkip} skipped
+			checks {perf.checkRun} run · {perf.checkSkip} skipped<br />
+			emit {perf.sEmit.toFixed(1)} · scan {perf.sScan.toFixed(1)} · trk {perf.sTracks.toFixed(1)} · part {perf.sParticles.toFixed(1)}
 			{#if ENABLE.gpuProfile}
 				<br />
 				<span class="warn">profiling — total inflated</span><br />

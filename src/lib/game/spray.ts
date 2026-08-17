@@ -32,8 +32,8 @@ import { addFoam } from './foam'
 import { queueMistSplat } from './mistfield'
 import { DROPLET, ENABLE, FROTH, MIST, PROFILE } from './tuning'
 import { injectRipple } from './ripples'
-import { waves, maxSurfaceRate, SIN_TABLE, COS_TABLE, TRIG_SCALE, TRIG_MASK } from './waves'
-import { events, MAX_EVENTS, oceanHeight, sampleOcean, windVector } from './whitecaps'
+import { waves, maxSurfaceRate, SIN_TABLE, COS_TABLE, TRIG_SCALE, TRIG_MASK, type SurfaceSample } from './waves'
+import { events, MAX_EVENTS, oceanHeight, sampleOcean, windVector, sampleOceanInto } from './whitecaps'
 
 export const MAX_SPRAY = DROPLET.maxCount
 
@@ -936,6 +936,16 @@ function markHotCells() {
   }
 }
 
+/**
+ * Two buffers for the scan, because it holds both samples live: the
+ * coarse one qualifies the cell and its jacobian is read again after the
+ * refined one is taken. The scan visits thousands of cells a step and was
+ * allocating two objects at each — the same pattern that produced
+ * multi-second GC pauses in the landing check.
+ */
+const scanCoarse: SurfaceSample = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 }
+const scanFine: SurfaceSample = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 }
+
 function scanLoopSplash(t: number) {
   if (scanSlice === 0) {
     loopHeadings.length = 0
@@ -978,7 +988,7 @@ function scanLoopSplash(t: number) {
         continue
       }
       censusLive.sampled++
-      const s1 = sampleOcean(x, z, t, 1, 1)
+      const s1 = sampleOceanInto(scanCoarse, x, z, t, 1, 1)
       if (s1.jacobian > LOOP_J) continue
       censusLive.recorded++
       // Qualifying points get a REFINED sample for their ANCHOR: the
@@ -988,7 +998,7 @@ function scanLoopSplash(t: number) {
       // heading. Qualification and depth stay on the COARSE sample —
       // re-testing J at the refined rest point silently culled sites
       // (the two samples straddle the pinch and disagree near its edge).
-      const s = sampleOcean(x, z, t, 1, 3)
+      const s = sampleOceanInto(scanFine, x, z, t, 1, 3)
       // Exponential in loop size: emission doubles per half-depth, so
       // shallow grazes stay at 4 while the deepest inversions throw 16
       // (2x the old flat-bonus max). Stochastic rounding keeps the
@@ -1414,7 +1424,29 @@ const burstFor = new Float64Array(MAX_EVENTS).fill(-1)
 // evaluates pinch per texel, so every visible pinch grows foam.
 
 /** Fixed-step update: emission from live breaks, then ballistics. */
+/**
+ * Where updateSpray's time goes, in milliseconds, accumulated across the
+ * steps of one frame. Zeroed by sprayCostStats().
+ *
+ * Exists because normalising the total by droplet count — the figure this
+ * whole optimisation pass was steered by — silently assumes the cost IS
+ * per-droplet. Several things in here are per-STEP and independent of how
+ * many droplets exist (the loop scan, the track and injector updates), so
+ * that normalisation would hide them and make a fixed cost look like a
+ * per-droplet one that refuses to come down.
+ */
+const cost = { emit: 0, scan: 0, tracks: 0, particles: 0 }
+export function sprayCostStats() {
+  const r = { ...cost }
+  cost.emit = 0
+  cost.scan = 0
+  cost.tracks = 0
+  cost.particles = 0
+  return r
+}
+
 export function updateSpray(dt: number, t: number) {
+  const c0 = performance.now()
   const wind = windVector(t)
   const windSpeed = Math.hypot(wind.x, wind.z)
   const windFactor = Math.min(windSpeed / WIND_FULL, 2)
@@ -1440,15 +1472,23 @@ export function updateSpray(dt: number, t: number) {
     for (let k = 0; k < n; k++) emitCrest(t, e.x, e.z, e.sigma)
   }
 
+  const c1 = performance.now()
+  cost.emit += c1 - c0
+
   coverScanClock += dt
   if (coverScanClock >= LOOP_SCAN_INTERVAL / SCAN_SLICES) {
     coverScanClock = 0
     scanLoopSplash(t)
     if (scanSlice === 0) refreshInjectors(t)
   }
+  const c2 = performance.now()
+  cost.scan += c2 - c1
+
   updateLoopTracks(dt, t)
   updateInjectors(dt, t)
   emitSpume(dt)
+  const c3 = performance.now()
+  cost.tracks += c3 - c2
 
   checkParity ^= 1
   for (let i = 0; i < sprayParticles.length; i++) {
@@ -1617,4 +1657,5 @@ export function updateSpray(dt: number, t: number) {
       p.dying = t
     }
   }
+  cost.particles += performance.now() - c3
 }

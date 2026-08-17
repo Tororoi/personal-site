@@ -126,8 +126,17 @@ export const ENABLE = {
  * "bubbles" (saved for a future underwater effect).
  */
 export const FROTH = {
-  /** Anchor lattice spacing, metres. Denser = more masses. */
-  lattice: 0.33,
+  /**
+   * Anchor lattice spacing, metres. Denser = more masses.
+   *
+   * Was 0.33 while buildFrothGeometry actually used a hardcoded 0.25, so
+   * this knob both did nothing AND misinformed the one place that did
+   * read it: spray.ts's CELL_MASSES, which converts a scan cell's area
+   * into a froth-mass count and was therefore under-counting by 1.74x.
+   * Corrected to the value the geometry really uses, and the geometry now
+   * reads it, so the two cannot drift apart again.
+   */
+  lattice: 0.25,
   /** Baked radius before scaling: base + jitter, metres. */
   radiusBase: 0.9,
   radiusVar: 0.36,
@@ -169,6 +178,23 @@ export const FROTH = {
 
   /** Masses smaller than this (metres) are culled as noise. */
   cullRadius: 0.07,
+  /**
+   * Smallest a froth mass may be DRAWN, in screen pixels. Below this it
+   * is culled outright rather than rendered as a speck.
+   *
+   * Needed on top of cullRadius because that tests the mass's radius
+   * while the drawn size is radius x the emergence gate g. A mass on a
+   * peak that is only mildly pinching has a perfectly legal radius and a
+   * small g, so it passed the metre test and still painted two or three
+   * pixels — a rash of white dots along every crest.
+   *
+   * Being in pixels rather than metres is deliberate: whether a sprite
+   * reads as froth or as dirt on the screen depends on how big it lands,
+   * which is a function of zoom and DPR, not of its size in the water.
+   * 1.0 is the rasterisation floor (below it the driver clamps and paints
+   * one pixel anyway); raise it until the specks go.
+   */
+  minPixels: 4.0,
   /** How deep a mass's centre sits under the surface, x radius. */
   submersion: 0.8,
   /**
@@ -1530,7 +1556,10 @@ const GROUPS = {
  * Reset restores, so the panel keeps telling the truth about which knobs
  * have been moved even across many sessions of stored overrides.
  */
-export const TUNING_DEFAULTS: Record<string, Record<string, Knob>> = Object.fromEntries(
+export const TUNING_DEFAULTS: Record<
+  string,
+  Record<string, Knob>
+> = Object.fromEntries(
   Object.entries(GROUPS).map(([name, group]) => [name, { ...group }]),
 )
 

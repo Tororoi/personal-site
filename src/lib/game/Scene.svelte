@@ -32,6 +32,7 @@
 		setViewQuad,
 		sprayParticles,
 		sprayCheckStats,
+		sprayCostStats,
 		updateSpray
 	} from './spray';
 	import { currentVector } from './current';
@@ -1260,7 +1261,17 @@ void main() {
 	float sp = length(aVel);
 	vStretch = min(1.0 + sp * ${f(DROPLET.streakPerSpeed)}, ${f(DROPLET.streakCap)});
 	vDir = length(d) > 0.00001 ? normalize(d) : vec2(1.0, 0.0);
-	gl_PointSize = aSize * 2.0 * uPointPx * vStretch;
+	// Same cull as the froth masses — see the note there. This one has
+	// been invisible only by luck: a spent droplet's last position is at or
+	// under the water, where the opaque surface hides its stray pixel. One
+	// that expires in mid-air would show.
+	float px = aSize * 2.0 * uPointPx * vStretch;
+	if (px < 1.0) {
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		gl_PointSize = 0.0;
+		return;
+	}
+	gl_PointSize = px;
 	gl_Position = c0;
 }`,
 		fragmentShader: `
@@ -1342,7 +1353,9 @@ void main() {
 	function buildFrothGeometry() {
 		// Dense base lattice; the shader thins it dynamically by sprite
 		// size (small beads pack tight, big masses stay sparse).
-		const S = 0.25;
+		// Read from the knob, not duplicated: spray.ts sizes its droplet
+		// emission from the same number, and the two silently disagreed.
+		const S = FROTH.lattice;
 		const half =
 			0.71 * (window.innerWidth / zoom / 2) +
 			1.34 * (window.innerHeight / zoom / 2) +
@@ -1356,7 +1369,9 @@ void main() {
 			for (let gz = -half; gz <= half; gz += S) {
 				const h2 = Math.abs(Math.sin(gx * 37.719 + gz * 53.117) * 24634.6345) % 1;
 				const h3 = Math.abs(Math.sin(gx * 91.331 + gz * 17.923) * 15731.743) % 1;
-				pos.push(gx, (0.3 + 0.12 * h2) * 3.0, gz);
+				// radiusBase + radiusVar, carried as the attribute frothFrame
+				// reads as baseR. (The /3 x3 pairing was a leftover scale.)
+				pos.push(gx, FROTH.radiusBase + FROTH.radiusVar * h2, gz);
 				rank.push(h3);
 			}
 		}
@@ -1399,35 +1414,38 @@ float frothFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 N
 	vec3 Na = cross(Tv, Tu);
 	Nn = Na / max(length(Na), 0.0001);
 	// EASED motion, statelessly: a WIDER J band stretches growth over
-	// the fold's whole approach, and a second Jacobian evaluated 0.35s
-	// in the PAST gives a release tail.
-	float gNow = 1.0 - smoothstep(0.08, 0.6, Na.y);
+	// the fold's whole approach, and a second Jacobian evaluated
+	// FROTH.gateLag seconds in the PAST gives a release tail.
+	float gNow = 1.0 - smoothstep(${f(FROTH.gateJFull)}, ${f(FROTH.gateJStart)}, Na.y);
 	float jxx = 1.0; float jzz = 1.0; float jxz = 0.0;
 	for (int i = 0; i < WAVE_COUNT; i++) {
 		vec4 wa = uWaveA[i];
 		vec3 wb = uWaveB[i];
-		float th = (anchor.x * wa.x + anchor.y * wa.y) * wa.z - wa.w * (uTime - 0.35) + wb.z;
+		float th = (anchor.x * wa.x + anchor.y * wa.y) * wa.z - wa.w * (uTime - ${f(FROTH.gateLag)}) + wb.z;
 		float qak = wb.y * wb.x * uAmp * wa.z * sin(th);
 		jxx -= qak * wa.x * wa.x;
 		jzz -= qak * wa.y * wa.y;
 		jxz -= qak * wa.x * wa.y;
 	}
 	float Jp = jxx * jzz - jxz * jxz;
-	float gPast = 1.0 - smoothstep(0.08, 0.6, Jp);
-	g = max(gNow, gPast * 0.9);
+	float gPast = 1.0 - smoothstep(${f(FROTH.gateJFull)}, ${f(FROTH.gateJStart)}, Jp);
+	g = max(gNow, gPast * ${f(FROTH.gateLagWeight)});
 	// Size = folder amplitude ratio (ceiling) x pinch intensity.
 	float loopAmp = wsum > 0.0001 ? wAmp / wsum : 0.0;
-	float ampK = clamp(loopAmp / uDomAmp, 0.3, 1.0);
-	float iNow = clamp((0.1 - Na.y) / 0.55, 0.0, 1.0);
-	float iPast = clamp((0.1 - Jp) / 0.55, 0.0, 1.0);
-	float intK = mix(0.4, 1.0, max(iNow, iPast * 0.9));
+	float ampK = clamp(loopAmp / uDomAmp, ${f(FROTH.ampRatioFloor)}, 1.0);
+	float iNow = clamp((${f(FROTH.intJStart)} - Na.y) / ${f(FROTH.intJSpan)}, 0.0, 1.0);
+	float iPast = clamp((${f(FROTH.intJStart)} - Jp) / ${f(FROTH.intJSpan)}, 0.0, 1.0);
+	// The lagged intensity is weighted by the same gateLagWeight as the
+	// lagged gate above: it is the one "how much does the past count"
+	// number, and having two independent 0.9s here was how it read before.
+	float intK = mix(${f(FROTH.intFloor)}, 1.0, max(iNow, iPast * ${f(FROTH.gateLagWeight)}));
 	float sk = ampK * intK;
-	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
-	float visible = smoothstep(0.1, 0.42, sk);
-	float dens = mix(1.0, 0.55, smoothstep(0.15, 0.5, sk));
-	float keep = smoothstep(0.0, 0.1, dens - rank);
-	float r = baseR * min(sk, 1.2) * visible * keep;
-	if (r < 0.07) r = 0.0;
+	sk *= 1.0 + ${f(FROTH.curveBoost)} * smoothstep(${f(FROTH.curveStart)}, ${f(FROTH.curveEnd)}, sk);
+	float visible = smoothstep(${f(FROTH.visStart)}, ${f(FROTH.visFull)}, sk);
+	float dens = mix(${f(FROTH.densMax)}, ${f(FROTH.densMin)}, smoothstep(${f(FROTH.densStart)}, ${f(FROTH.densEnd)}, sk));
+	float keep = smoothstep(0.0, ${f(FROTH.densSoft)}, dens - rank);
+	float r = baseR * min(sk, ${f(FROTH.sizeCap)}) * visible * keep;
+	if (r < ${f(FROTH.cullRadius)}) r = 0.0;
 	surf = vec3(anchor.x + d.x, d.y, anchor.y + d.z);
 	return r;
 }`;
@@ -1476,7 +1494,30 @@ void main() {
 	vNrm = Nn;
 	vec4 view = viewMatrix * vec4(world, 1.0);
 	vViewZ = -view.z;
-	gl_PointSize = r * 2.0 * uPointPx * g;
+	// CULLED SPRITES MUST LEAVE CLIP SPACE, not merely shrink to nothing.
+	// gl_PointSize = 0.0 does not hide a point: the driver clamps it to
+	// ALIASED_POINT_SIZE_RANGE's minimum, which is 1 on desktop GL, so an
+	// inactive mass still paints one fully opaque white pixel. The
+	// fragment's disc test cannot catch it either — at one pixel
+	// gl_PointCoord is 0.5 dead centre, so dd is 0 and nothing discards.
+	// With one anchor per lattice cell that is a field of white specks
+	// over the whole sea, which is exactly what it looked like.
+	//
+	// Moving the vertex out of clip space is the reliable cull and is safe
+	// for POINTS (a triangle with only some corners moved still rasterises,
+	// stretched toward the moved corner — that is why the bow crest mesh
+	// discards in the fragment instead). Same pattern as the plume shader.
+	// Cull on the DRAWN size, which is radius x emergence gate — see
+	// FROTH.minPixels. Testing the radius alone (frothFrame does that with
+	// cullRadius) misses a full-sized mass that is only fractionally out
+	// of the water, and those were the specks along the crests.
+	float px = r * 2.0 * uPointPx * g;
+	if (px < ${f(FROTH.minPixels)}) {
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		gl_PointSize = 0.0;
+		return;
+	}
+	gl_PointSize = px;
 	gl_Position = projectionMatrix * view;
 }`,
 		fragmentShader: `
@@ -1864,7 +1905,14 @@ void main() {
 	vFade = alive * step(0.0001, r);
 	vec4 view = viewMatrix * vec4(pos, 1.0);
 	vViewZ = -view.z;
-	gl_PointSize = r * 2.0 * uPointPx * vFade;
+	// Same cull as the froth masses — see the note there.
+	float px = r * 2.0 * uPointPx * vFade;
+	if (px < 1.0) {
+		gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+		gl_PointSize = 0.0;
+		return;
+	}
+	gl_PointSize = px;
 	gl_Position = projectionMatrix * view;
 }`,
 		fragmentShader: `
@@ -2719,6 +2767,11 @@ void main() {
 			const cs = sprayCheckStats();
 			perf.checkRun = cs.run;
 			perf.checkSkip = cs.skipped;
+			const sc = sprayCostStats();
+			perf.sEmit = sc.emit;
+			perf.sScan = sc.scan;
+			perf.sTracks = sc.tracks;
+			perf.sParticles = sc.particles;
 		},
 		{ autoStart: false }
 	);

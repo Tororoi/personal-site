@@ -12,5 +12,6 @@ vite.config.ts.timestamp-*
 # Working notes for blog articles; deliberately untracked
 docs/process-log.md
 
-# Perf sampler output (tools/perf-logger.mjs)
-perf-log.jsonl
+# Perf sampler output (tools/perf-logger.mjs). Glob, not one name:
+# runs get rotated to perf-log-<label>.jsonl between A/B measurements.
+perf-log*.jsonl

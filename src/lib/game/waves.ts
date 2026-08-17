@@ -501,7 +501,10 @@ export const waves = generateWaves(activeField)
  * skipped, because 24 components never crest at once, so the bound sat
  * 2m above anything the sea actually does.
  */
-export const maxSurfaceRate = waves.reduce((s, w) => s + Math.abs(w.amp * w.omega), 0)
+export const maxSurfaceRate = waves.reduce(
+  (s, w) => s + Math.abs(w.amp * w.omega),
+  0,
+)
 
 /**
  * Surface height only, without allocating.
@@ -667,6 +670,36 @@ function displace(u: number, v: number, t: number, ampScale: number) {
  * Surface state above world (x, z) at time t.
  * MUST match waveDisplacement() in the GLSL below, term for term.
  */
+/**
+ * sampleSurface into a caller-owned object, allocating nothing.
+ *
+ * For loops that sample thousands of points per step — the loop-splash
+ * scan above all — where the returned object is read immediately and
+ * thrown away. Callers holding two samples at once need two buffers.
+ */
+export function sampleSurfaceInto(
+  out: SurfaceSample,
+  x: number,
+  z: number,
+  t: number,
+  ampScale = 1,
+  iterations = 3,
+): SurfaceSample {
+  let u = x
+  let v = z
+  for (let i = 0; i < iterations; i++) {
+    const d = displace(u, v, t, ampScale)
+    u = x - d.x
+    v = z - d.z
+  }
+  const d = displace(u, v, t, ampScale)
+  out.height = d.y
+  out.swayX = d.x
+  out.swayZ = d.z
+  out.jacobian = d.jxx * d.jzz - d.jxz * d.jxz
+  return out
+}
+
 export function sampleSurface(
   x: number,
   z: number,
