@@ -609,6 +609,65 @@ function blendFields(
   }
 }
 
+/**
+ * LIVE SEA STATE.
+ *
+ * Rebuilds the field in place so a transition can run during play instead
+ * of needing a reload. In place is the whole trick: `waves` keeps its
+ * identity, so every module holding a reference to it — the CPU sampler,
+ * buoyancy, spray — follows without being told, and the GPU only needs its
+ * two uniform arrays re-uploaded.
+ *
+ * Safe only because all three presets now carry 24 components: the shader
+ * bakes `#define WAVE_COUNT` at build, so a changing count would need a
+ * recompile. Asserted rather than assumed.
+ *
+ * NOT everything follows. Values baked into shader source or built once on
+ * the GPU stay put: the FFT detail spectrum, foam's chop-derived
+ * thresholds, the whitecap and current headings, and the froth lattice's
+ * extent. Those still need a reload; what moves here is the sea itself —
+ * heights, wavelengths, headings, chop and speed.
+ */
+/**
+ * A field is only ever used through `activeField`, which gets written to —
+ * so it must never ALIAS a preset. pickPreset returns the preset object
+ * itself, and assigning over that would quietly overwrite a keyframe and
+ * corrupt every later blend. Clone on the way in.
+ */
+function cloneField(f: WaveFieldConfig): WaveFieldConfig {
+  return {
+    ...f,
+    ripples: f.ripples && { ...f.ripples },
+    sky: f.sky && { ...f.sky },
+    detail: f.detail && { ...f.detail },
+    capillary: f.capillary && { ...f.capillary },
+    foam: f.foam && { ...f.foam },
+    bands: f.bands.map((b) => ({ ...b })),
+  }
+}
+
+const fieldListeners: (() => void)[] = []
+/** Register a recompute for anything derived from `waves`. */
+export function onFieldChange(fn: () => void) {
+  fieldListeners.push(fn)
+}
+
+export function applySeaState(state: number, chopOverride: number) {
+  const next = cloneField(state >= 0 ? fieldForSeaState(state) : pickPreset())
+  if (chopOverride >= 0) next.chop = chopOverride
+  Object.assign(activeField, next)
+  const fresh = generateWaves(activeField)
+  if (fresh.length !== waves.length) {
+    throw new Error(
+      `sea state changed the component count (${waves.length} -> ${fresh.length}). ` +
+        `WAVE_COUNT is baked into the shader, so this needs a reload, not a swap.`,
+    )
+  }
+  for (let i = 0; i < waves.length; i++) Object.assign(waves[i], fresh[i])
+  maxSurfaceRate = waves.reduce((sum, w) => sum + Math.abs(w.amp * w.omega), 0)
+  for (const fn of fieldListeners) fn()
+}
+
 /** The sea at a point on the calm -> largeSwell -> storm axis. */
 export function fieldForSeaState(x: number): WaveFieldConfig {
   const c = Math.min(Math.max(x, 0), SEA_SEQUENCE.length - 1)
@@ -666,8 +725,9 @@ export function generateWaves(
 }
 
 /** The preset actually in effect this session (after the ?sea= override). */
-export const activeField: WaveFieldConfig =
-  SEA.seaState >= 0 ? fieldForSeaState(SEA.seaState) : pickPreset()
+export const activeField: WaveFieldConfig = cloneField(
+  SEA.seaState >= 0 ? fieldForSeaState(SEA.seaState) : pickPreset(),
+)
 
 // Test override, applied BEFORE the field is generated: chop sets every
 // wave's Gerstner q below, so it has to land before generateWaves runs.
@@ -694,7 +754,7 @@ export const waves = generateWaves(activeField)
  * skipped, because 24 components never crest at once, so the bound sat
  * 2m above anything the sea actually does.
  */
-export const maxSurfaceRate = waves.reduce(
+export let maxSurfaceRate = waves.reduce(
   (s, w) => s + Math.abs(w.amp * w.omega),
   0,
 )

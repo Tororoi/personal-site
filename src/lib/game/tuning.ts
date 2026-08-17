@@ -1663,9 +1663,10 @@ export const SEA = {
    * sit at one. Presets are calm 0.55, largeSwell 2.25, storm 5, and 5 is
    * the top of the range — the storm is the roughest real sea here.
    *
-   * STAGED, not live: chop sets each wave's Gerstner q at generation, and
-   * the whole field — CPU sampler and GPU uniforms alike — is built from
-   * that once at load. Every step needs an Apply.
+   * LIVE: the field is rebuilt in place and the wave uniforms re-uploaded
+   * the moment this moves. See applySeaState in waves.ts for what does NOT
+   * follow — the FFT detail band, foam's chop thresholds and the whitecap
+   * heading are baked at load and still want a reload.
    */
   chopOverride: -1,
   /**
@@ -1675,10 +1676,23 @@ export const SEA = {
    * Overrides which preset is in effect. chopOverride still applies on
    * top, so the two compose — blend to 0.6 and then push chop separately.
    *
-   * STAGED like chopOverride, and for the same reason: the field is built
-   * once at load.
+   * LIVE, like chopOverride — ramp it from gameplay and the sea builds.
    */
   seaState: -1,
+  /**
+   * Seconds PER UNIT of seaState change. 0 snaps.
+   *
+   * A rate, not a duration: calm to storm is twice the journey of calm to
+   * largeSwell and takes twice as long. A fixed duration made big changes
+   * move fastest, which is backwards — the bigger the change, the more the
+   * wave field has to deform, and the more time it needs to not read as
+   * churn.
+   *
+   * Critically damped, so it eases in AND out and never overshoots. It
+   * chases the knob rather than animating a fixed span, so moving the
+   * target mid-transition bends the curve instead of restarting it.
+   */
+  transitionSecondsPerUnit: 25,
 }
 
 /**
@@ -1738,4 +1752,4 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
  * frame — otherwise the panel would report a change that never landed,
  * which is worse than asking for a reload.
  */
-export const LIVE_GROUPS = new Set(['SPECULAR'])
+export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA'])

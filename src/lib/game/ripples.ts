@@ -23,7 +23,7 @@
  */
 
 import * as THREE from 'three'
-import { activeField } from './waves'
+import { activeField, onFieldChange } from './waves'
 
 export const RIPPLE_RESOLUTION = 768
 /**
@@ -43,13 +43,13 @@ export const RIPPLE_EXTENT = 100
  * without touching the simulation: the raw physics lives in honest meters
  * (a hard splash ring is ~5-15cm, real but invisible at 26px/m).
  */
-const SETTINGS = {
+const RIPPLE_BASE = {
   displayGain: 3.5,
   /** Physical ripple propagation speed, m/s. */
   speed: 1.5,
   damping: 0.9955,
-  ...activeField.ripples,
 }
+let SETTINGS = { ...RIPPLE_BASE, ...activeField.ripples }
 
 /**
  * The wave-equation step constant, DERIVED from the physical speed and the
@@ -58,7 +58,7 @@ const SETTINGS = {
  * P = 2 (c dt / cell)^2, clamped at 0.5 for stability; speeds above ~
  * cell/dt * 0.5 are unreachable at this resolution and get clamped.
  */
-const PROPAGATION = Math.min(
+let PROPAGATION = Math.min(
   2 * ((SETTINGS.speed / 60 / (RIPPLE_EXTENT / RIPPLE_RESOLUTION)) ** 2),
   0.5,
 )
@@ -76,7 +76,19 @@ const pending: Injection[] = []
  * from the preset's damping (time to decay to ~3%).
  */
 const activity: { x: number; z: number; birth: number }[] = []
-const ACTIVITY_TTL = Math.log(0.03) / Math.log(SETTINGS.damping) / 60
+let ACTIVITY_TTL = Math.log(0.03) / Math.log(SETTINGS.damping) / 60
+
+// A live sea-state change swaps the whole ripple character — a storm's
+// rings travel and die differently from a calm's. displayGain reaches the
+// shader as a uniform (below) precisely so it can move without a rebuild.
+onFieldChange(() => {
+  SETTINGS = { ...RIPPLE_BASE, ...activeField.ripples }
+  PROPAGATION = Math.min(
+    2 * ((SETTINGS.speed / 60 / (RIPPLE_EXTENT / RIPPLE_RESOLUTION)) ** 2),
+    0.5,
+  )
+  ACTIVITY_TTL = Math.log(0.03) / Math.log(SETTINGS.damping) / 60
+})
 
 export function activeRegions(t: number): { x: number; z: number; r: number }[] {
   for (let i = activity.length - 1; i >= 0; i--) {
@@ -245,6 +257,10 @@ export class RippleSim {
 
   /** One wave-equation iteration, consuming queued injections. */
   step(renderer: THREE.WebGLRenderer) {
+    // Follow a live sea-state change: propagation and damping are the
+    // ripple's whole character and both move with the preset.
+    this.material.uniforms.uPropagation.value = PROPAGATION
+    this.material.uniforms.uDamping.value = SETTINGS.damping
     const inject = this.material.uniforms.uInject.value as THREE.Vector4[]
     for (let i = 0; i < MAX_INJECT; i++) {
       const p = pending.shift()
@@ -273,16 +289,20 @@ export class RippleSim {
  * displacement — no seethe, no whiteness; rings are rings. Splash boil,
  * when something wants one, is separate machinery (froth.ts).
  */
+/** Display gain in force right now — a uniform, so it can change live. */
+export const rippleDisplayGain = () => SETTINGS.displayGain
+
 export function ripplesGlsl(): string {
   return `
 uniform sampler2D uRippleTex;
 uniform vec2 uRippleCenter;
 uniform float uRippleExtent;
+uniform float uRippleGain;
 
 void applyRipples(inout vec3 p, vec2 worldXZ) {
 	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
 	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return;
-	p.y += texture2D(uRippleTex, ruv).x * ${SETTINGS.displayGain.toFixed(2)};
+	p.y += texture2D(uRippleTex, ruv).x * uRippleGain;
 }
 
 // The DISPLAYED ripple surface's gradient (the sim bakes the physical
@@ -293,7 +313,7 @@ void applyRipples(inout vec3 p, vec2 worldXZ) {
 vec2 rippleShadeGrad(vec2 worldXZ) {
 	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
 	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return vec2(0.0);
-	return texture2D(uRippleTex, ruv).zw * ${SETTINGS.displayGain.toFixed(2)};
+	return texture2D(uRippleTex, ruv).zw * uRippleGain;
 }`
 }
 

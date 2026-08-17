@@ -202,6 +202,7 @@ precision highp float;
 uniform sampler2D uH0;
 uniform float uTime;
 uniform float uPatch;
+uniform float uTimeScale;
 void main() {
 	vec2 px = gl_FragCoord.xy - 0.5;
 	float n = px.x - ${(N / 2).toFixed(1)};
@@ -212,7 +213,7 @@ void main() {
 	vec4 h0 = texture2D(uH0, (px + 0.5) / ${N.toFixed(1)});
 	// timeScale is baked here for the same reason waves.ts bakes it into
 	// each omega: uTime stays real seconds everywhere in the scene.
-	float w = sqrt(${G.toFixed(3)} * klen) * ${(activeField.timeScale ?? 1).toFixed(4)};
+	float w = sqrt(${G.toFixed(3)} * klen) * uTimeScale;
 	float c = cos(w * uTime);
 	float s = sin(w * uTime);
 	// h(k,t) = h0 e^{iwt} + conj(h0(-k)) e^{-iwt}
@@ -338,7 +339,12 @@ export class FftWaveField {
 
     const common = { depthTest: false, depthWrite: false }
     this.matSpectrum = new THREE.ShaderMaterial({
-      uniforms: { uH0: { value: null }, uTime: { value: 0 }, uPatch: { value: 1 } },
+      uniforms: {
+        uH0: { value: null },
+        uTime: { value: 0 },
+        uPatch: { value: 1 },
+        uTimeScale: { value: activeField.timeScale ?? 1 },
+      },
       vertexShader: passVertex,
       fragmentShader: spectrumFragment,
       ...common,
@@ -370,6 +376,32 @@ export class FftWaveField {
     this.mesh.material = mat
     renderer.setRenderTarget(to)
     renderer.render(this.scene, this.camera)
+  }
+
+  /**
+   * Rebuild the spectrum from the CURRENT field — wind heading, wind speed
+   * and the preset's detail band all shape it, and all three move with a
+   * live sea state.
+   *
+   * Not cheap: two 128x128 RGBA float textures regenerated on the CPU,
+   * several milliseconds. Call it on a throttle, not per frame. Safe to
+   * call at any time — the seed is unchanged, so the random phases are
+   * identical and the field deforms rather than reshuffling.
+   */
+  rebuild(minL: number, maxL: number, slope: number) {
+    const crossover = (CASCADES[0] / N) * MIN_TEXELS
+    const rms: number[] = []
+    CASCADES.forEach((patch, i) => {
+      const lo = Math.max(minL, (patch / N) * MIN_TEXELS)
+      const hi = i === 0 ? maxL : Math.min(maxL, crossover)
+      const built = spectrumData(patch, lo, hi, activeField.seed + 7331 + i * 17)
+      rms.push(built.rms)
+      ;(this.h0[i].image.data as Float32Array).set(built.data)
+      this.h0[i].needsUpdate = true
+    })
+    const share = slope / Math.sqrt(CASCADES.length)
+    this.gains = rms.map((r) => (r > 1e-9 ? share / r : 0))
+    this.matSpectrum.uniforms.uTimeScale.value = activeField.timeScale ?? 1
   }
 
   /** One transform per cascade. Call once per frame before the water. */

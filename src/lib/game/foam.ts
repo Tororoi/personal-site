@@ -28,7 +28,7 @@
 import * as THREE from 'three'
 import { ENABLE, FOAM, FROTH } from './tuning'
 import { currentVector } from './current'
-import { activeField, waves, wavesGlsl } from './waves'
+import { activeField, waves, wavesGlsl, onFieldChange } from './waves'
 
 export const FOAM_RESOLUTION = 512
 /**
@@ -53,7 +53,18 @@ export const FOAM_EXTENT = 100
  * interpolate it at module load, and a const declared later is still in
  * its temporal dead zone at that point — it bakes in as NaN.
  */
-export const CONTACT_FOAMINESS = Math.min(
+/** Recompute from the sea's chop; called on a live sea-state change. */
+export function contactFoaminess(chop: number) {
+  return Math.min(
+    Math.max(
+      (chop - FOAM.contactChopStart) / (FOAM.contactChopFull - FOAM.contactChopStart),
+      0,
+    ),
+    1,
+  )
+}
+
+export let CONTACT_FOAMINESS = Math.min(
   Math.max(
     (activeField.chop - FOAM.contactChopStart) /
       (FOAM.contactChopFull - FOAM.contactChopStart),
@@ -264,6 +275,7 @@ uniform float uOverload;  // 0-1 capacity pressure (see massEst)
 uniform float uDiffusion; // per-step neighbor mixing (dt-scaled)
 uniform float uDiffTexel; // diffusion tap distance in uv (see step())
 uniform float uDtScale;   // frame dt / (1/60): wall-clock rate correction
+uniform float uFoaminess; // sea chop -> collar/emission strength, live
 uniform vec2 uShift;      // uv advection this frame (downwind drift)
 uniform vec2 uCenter;
 uniform float uExtent;
@@ -608,7 +620,7 @@ void main() {
 			touch = max(touch, bandB * vk * (1.0 + ${FOAM.contactBowGain.toFixed(3)} * bowB * flowK));
 		}
 		h += touch * ${ENABLE.contactEmit ? FOAM.contactRate.toFixed(5) : '0.0'}
-			* ${CONTACT_FOAMINESS.toFixed(4)} * uDtScale;
+			* uFoaminess * uDtScale;
 	}
 
 	// Deposits below come from landing droplets: discrete splashes, which
@@ -678,6 +690,7 @@ export class FoamField {
         uOverload: { value: 0 },
         uDiffusion: { value: DIFFUSION },
         uDiffTexel: { value: 1 / FOAM_RESOLUTION },
+      uFoaminess: { value: CONTACT_FOAMINESS },
         uDtScale: { value: 1 },
         uShift: { value: new THREE.Vector2(0, 0) },
         uCenter: { value: new THREE.Vector2(0, 0) },
@@ -783,6 +796,8 @@ export class FoamField {
     u.uDiffusion.value = mix
     u.uDiffTexel.value = Math.sqrt(targetMix / mix) / FOAM_RESOLUTION
     u.uDtScale.value = d * 60
+    // Follows a live sea-state change; see the onFieldChange hook below.
+    u.uFoaminess.value = CONTACT_FOAMINESS
     // Foam drifts on BOTH: a fraction of the wind (it is blown across
     // the surface) plus the surface current in full (it floats in the
     // skin of the water, so it goes where the water goes).
@@ -933,3 +948,9 @@ float foamWeb(vec2 worldXZ, float thickness, float jac) {
 		* smoothstep(0.04 * fadeK, 0.09 * fadeK, thickness);
 }`
 }
+
+// Chop drives how foamy an object's waterline is, and chop moves with the
+// sea state, so this can no longer be a load-time constant.
+onFieldChange(() => {
+  CONTACT_FOAMINESS = contactFoaminess(activeField.chop)
+})

@@ -10,11 +10,15 @@
  */
 
 import { CURRENT } from './tuning'
-import { activeField } from './waves'
+import { activeField, onFieldChange } from './waves'
 
 /** The preset's surface-current set; falls back to the wind heading. */
-const setAngle = activeField.surfaceCurrentHeading ?? activeField.windAngle
-const setSpeed = activeField.surfaceCurrentSpeed ?? CURRENT.speed
+let setAngle = activeField.surfaceCurrentHeading ?? activeField.windAngle
+let setSpeed = activeField.surfaceCurrentSpeed ?? CURRENT.speed
+onFieldChange(() => {
+  setAngle = activeField.surfaceCurrentHeading ?? activeField.windAngle
+  setSpeed = activeField.surfaceCurrentSpeed ?? CURRENT.speed
+})
 
 /** Surface current velocity in m/s at wave time t. Spatially uniform:
  * the visible patch of sea is far smaller than any real current eddy. */

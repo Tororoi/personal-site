@@ -32,7 +32,7 @@ import { addFoam } from './foam'
 import { queueMistSplat } from './mistfield'
 import { DROPLET, ENABLE, FROTH, MIST, PROFILE } from './tuning'
 import { injectRipple } from './ripples'
-import { waves, maxSurfaceRate, SIN_TABLE, COS_TABLE, TRIG_SCALE, TRIG_MASK, type SurfaceSample } from './waves'
+import { waves, maxSurfaceRate, SIN_TABLE, COS_TABLE, TRIG_SCALE, TRIG_MASK, type SurfaceSample, onFieldChange } from './waves'
 import { events, MAX_EVENTS, oceanHeight, sampleOcean, windVector, sampleOceanInto } from './whitecaps'
 
 export const MAX_SPRAY = DROPLET.maxCount
@@ -422,10 +422,12 @@ const LOOP_FORWARD_VAR = DROPLET.hopFwdVar
  * and kept its birth height — the crest moved on and left frozen white
  * boulders hanging in the air.)
  */
-const domWave = waves.reduce((a, b) => (b.amp > a.amp ? b : a), waves[0])
+// Derived from the field, so they are recomputed whenever it changes —
+// a live sea-state transition rewrites `waves` in place beneath them.
+let domWave = waves.reduce((a, b) => (b.amp > a.amp ? b : a), waves[0])
 /** Global fallback heading (dominant wave) for degenerate points. */
-const HEAD_X = domWave.dirX
-const HEAD_Z = domWave.dirZ
+let HEAD_X = domWave.dirX
+let HEAD_Z = domWave.dirZ
 
 /**
  * The LOOP'S advance velocity at a rest-space point: each wave's phase
@@ -881,14 +883,22 @@ function smooth01(x: number, e0: number, e1: number) {
 
 /** Phase speed of the dominant band — the reference a loop's own speed
  * is measured against. */
-const DOM_PHASE_SPEED = domWave.omega / domWave.k
+let DOM_PHASE_SPEED = domWave.omega / domWave.k
 
 /** Mean baked froth radius (FROTH.radiusBase + half the jitter): the
  * lattice's per-point hash is a GPU detail, so emission uses the mean. */
 const FROTH_MEAN_R = FROTH.radiusBase + FROTH.radiusVar * 0.5
 
 /** Dominant band amplitude — the froth criterion's normaliser. */
-const domAmp = waves.reduce((a, w) => Math.max(a, w.amp), 0)
+let domAmp = waves.reduce((a, w) => Math.max(a, w.amp), 0)
+
+onFieldChange(() => {
+  domWave = waves.reduce((a, b) => (b.amp > a.amp ? b : a), waves[0])
+  HEAD_X = domWave.dirX
+  HEAD_Z = domWave.dirZ
+  DOM_PHASE_SPEED = domWave.omega / domWave.k
+  domAmp = waves.reduce((a, w) => Math.max(a, w.amp), 0)
+})
 
 let coverScanClock = 0
 

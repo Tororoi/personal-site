@@ -26,8 +26,7 @@ import {
   sampleSurface,
   sampleSurfaceInto,
   surfaceHeight,
-  type SurfaceSample,
-} from './waves'
+  type SurfaceSample, onFieldChange } from './waves'
 
 export const MAX_EVENTS = 8
 
@@ -59,8 +58,15 @@ export const events: WhitecapEvent[] = Array.from(
 
 // ---------- Wind ----------
 
-const windAngle = activeField.windAngle
-const windSpeed = activeField.windSpeed ?? 5
+// Recomputed on a live sea-state change: the wind turns and freshens with
+// the sea, and a captured heading would leave spray and foam drifting the
+// way the weather used to blow.
+let windAngle = activeField.windAngle
+let windSpeed = activeField.windSpeed ?? 5
+onFieldChange(() => {
+  windAngle = activeField.windAngle
+  windSpeed = activeField.windSpeed ?? 5
+})
 
 /** Slow multi-sine breathing on the BASE wind, around 1. Deterministic
  * in waveTime. (Gusts are a separate component — see windGust.) */

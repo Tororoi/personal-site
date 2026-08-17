@@ -5,12 +5,13 @@
 	import { onDestroy } from 'svelte';
 	import {
 		activeField,
-		causticsGlsl,
 		objectWaveGlsl,
 		objectWaveSlopeGlsl,
-		significantAmplitude,
 		waves,
-		wavesGlsl
+		wavesGlsl,
+		applySeaState,
+		fieldForSeaState,
+		generateWaves
 	} from './waves';
 	import {
 		events,
@@ -23,7 +24,7 @@
 		windVector
 	} from './whitecaps';
 	import { fftSlopeGlsl, makeFftDetail } from './fftwaves';
-	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock } from './ripples';
+	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock, rippleDisplayGain } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
 	import {
 		emitImpactSpray,
@@ -61,8 +62,8 @@
 		OBJWAVE,
 		PROFILE,
 		SPECULAR,
-		PLUME
-	} from './tuning';
+		PLUME,
+		SEA } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
@@ -100,8 +101,16 @@
 	// uncovers ground behind it by ~1.6x its height at our camera
 	// elevation — the old flat 4m margin let storm seas reveal unrendered
 	// corners.
-	const SWAY_BOUND = waves.reduce((sum, w) => sum + w.q * w.amp, 0);
-	const EDGE_MARGIN = 2 + SWAY_BOUND + 3.2 * significantAmplitude;
+	// Sized for the ROUGHEST sea, not the one loaded. Geometry extent is
+	// baked into buffers at build, so a live sea-state change cannot resize
+	// it — and a margin cut for calm would let a storm reveal unrendered
+	// corners the moment the dial moved. Over-covering costs some
+	// off-screen quads on calm; under-covering is a visible hole.
+	const worstField = fieldForSeaState(2);
+	const worstWaves = generateWaves(worstField);
+	const SWAY_BOUND = worstWaves.reduce((sum, w) => sum + w.q * w.amp, 0);
+	const EDGE_MARGIN =
+		2 + SWAY_BOUND + 3.2 * Math.sqrt(worstWaves.reduce((sum, w) => sum + w.amp * w.amp, 0));
 	function buildWaterGeometry() {
 		const size =
 			2 *
@@ -223,6 +232,9 @@
 		uRippleTex: { value: null as THREE.Texture | null },
 		uRippleCenter: { value: new THREE.Vector2(0, 0) },
 		uRippleExtent: { value: RIPPLE_EXTENT },
+		// Display gain for the ripple field. A uniform rather than a baked
+		// literal so a live sea-state change can swap the ripple character.
+		uRippleGain: { value: rippleDisplayGain() },
 		// Detail-wave slope cascades (fftwaves.ts). Static textures once the
 		// field exists, but they are render targets, so they are pointed at
 		// after the first step rather than at construction.
@@ -258,6 +270,15 @@
 		// Every SPECULAR value the shader needs, refreshed each frame — that
 		// is what lets the panel tune them without a reload. Baked literals
 		// would be marginally cheaper and would cost an Apply per nudge.
+		// Wind heading for the anisotropic lobe. A uniform, not a literal:
+		// a live sea-state change turns the wind, and a baked cos/sin would
+		// leave the glitter stretched along a direction the sea abandoned.
+		// Object-waterline foaminess, from the sea's chop. A uniform so it
+		// follows a live sea-state change like the foam sim's copy does.
+		uFoaminess: { value: CONTACT_FOAMINESS },
+		uWindDir: {
+			value: new THREE.Vector2(Math.cos(activeField.windAngle), Math.sin(activeField.windAngle))
+		},
 		uSpecSharpCore: { value: 1 },
 		uSpecSharpWash: { value: 1 },
 		uSpecGain: { value: 1 },
@@ -468,10 +489,94 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 		waterUniforms.uCamPos.value.fromArray(perspPos);
 	}
 
+	/**
+	 * LIVE SEA STATE. Watches the two SEA knobs and rebuilds the field when
+	 * either moves, then re-uploads everything the GPU holds a copy of.
+	 * applySeaState rewrites `waves` in place, so the CPU sampler, buoyancy
+	 * and spray need nothing — only these mirrors do.
+	 */
+	// The state actually in the water, which chases SEA.seaState rather than
+	// tracking it. Critically damped (the SmoothDamp formulation), so it
+	// eases in and out, never overshoots, and stays stable at any frame
+	// time — a plain lerp-by-dt would be frame-rate dependent and an
+	// exponential would only ease out.
+	let seaEased = SEA.seaState;
+	let seaVel = 0;
+	let seaApplied = '';
+	// Distance this transition has to cover, captured when the target moves.
+	// The damper's time constant scales with it, so the pace stays even
+	// whether the journey is 0.1 or the full calm-to-storm 2.
+	let seaTargetSeen = SEA.seaState;
+	let seaSpan = 0;
+	function syncSeaState(dt: number) {
+		const target = SEA.seaState;
+		if (target !== seaTargetSeen) {
+			seaTargetSeen = target;
+			seaSpan = Math.abs(target - seaEased);
+		}
+		const tau = SEA.transitionSecondsPerUnit * Math.max(seaSpan, 0.02);
+		if (target < 0 || seaEased < 0 || tau <= 0) {
+			// Preset mode has nothing to interpolate along; snap.
+			seaEased = target;
+			seaVel = 0;
+		} else if (Math.abs(target - seaEased) > 1e-4 || Math.abs(seaVel) > 1e-4) {
+			const omega = 2 / tau;
+			const x = omega * Math.min(dt, 0.1);
+			const decay = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+			const change = seaEased - target;
+			const temp = (seaVel + omega * change) * Math.min(dt, 0.1);
+			seaVel = (seaVel - omega * temp) * decay;
+			seaEased = target + (change + temp) * decay;
+		} else {
+			seaEased = target;
+			seaVel = 0;
+		}
+		const key = `${seaEased.toFixed(4)},${SEA.chopOverride}`;
+		if (key === seaApplied) return;
+		seaApplied = key;
+		applySeaState(seaEased, SEA.chopOverride);
+		const wa = waterUniforms.uWaveA.value;
+		const wb = waterUniforms.uWaveB.value;
+		for (let i = 0; i < waves.length; i++) {
+			wa[i].set(waves[i].dirX, waves[i].dirZ, waves[i].k, waves[i].omega);
+			wb[i].set(waves[i].amp, waves[i].q, waves[i].phase);
+		}
+		const dom = waves.reduce((a, b) => Math.max(a, b.amp), 0);
+		frothMaterial.uniforms.uDomAmp.value = dom;
+		waterUniforms.uWindDir.value.set(
+			Math.cos(activeField.windAngle),
+			Math.sin(activeField.windAngle)
+		);
+		waterUniforms.uFoaminess.value = CONTACT_FOAMINESS;
+		waterUniforms.uRippleGain.value = rippleDisplayGain();
+		// The FFT spectrum is CPU work — two 128^2 float textures — so it is
+		// marked stale here and rebuilt on a throttle rather than inline.
+		fftStale = true;
+		waterUniforms.uSkyZenith.value.set(activeField.sky?.zenith ?? '#a8c8d8');
+		waterUniforms.uSkyHorizon.value.set(activeField.sky?.horizon ?? '#d5e3ea');
+	}
+
 	/** GLSL-style smoothstep that also accepts e0 > e1 (a falling ramp). */
 	function smooth01(x: number, e0: number, e1: number) {
 		const u = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
 		return u * u * (3 - 2 * u);
+	}
+
+	// FFT spectrum rebuild, throttled. Regenerating it costs several
+	// milliseconds, far too much per frame, but the band it carries is
+	// sub-metre texture — stepping it a couple of times a second during a
+	// transition is well below what the eye can follow.
+	let fftStale = false;
+	let fftStaleClock = 0;
+	const FFT_REBUILD_INTERVAL = 0.4;
+	function syncFftSpectrum(dt: number) {
+		if (!fftDetail || !fftStale) return;
+		fftStaleClock += dt;
+		if (fftStaleClock < FFT_REBUILD_INTERVAL) return;
+		fftStaleClock = 0;
+		fftStale = false;
+		const d = activeField.detail ?? {};
+		fftDetail.rebuild(d.minLambda ?? 0.35, d.maxLambda ?? 3.5, d.slope ?? 0.05);
 	}
 
 	// The FFT detail-wave cascades that own uFftA/uFftB. Unlike the other
@@ -540,6 +645,8 @@ uniform vec3 uSunColor;
 uniform float uSunI;
 uniform vec3 uViewDir;
 uniform vec3 uCamPos;
+uniform vec2 uWindDir;
+uniform float uFoaminess;
 uniform float uSpecSharpCore;
 uniform float uSpecSharpWash;
 uniform float uSpecGain;
@@ -669,7 +776,7 @@ float contactFoam(vec3 P) {
 	// and gave the edge one wavelength and one amplitude everywhere.
 	float wob = foamNoise(P.xz * ${f(1 / CONTACT.wobbleScale)}) * 0.6
 		+ foamNoise(P.xz * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
-	float w = ${f(CONTACT.width * CONTACT_FOAMINESS)}
+	float w = ${f(CONTACT.width)} * uFoaminess
 		* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
 	float m = 0.0;
 	// SPHERE. Two cases, because height must never be a hard gate: BESIDE
@@ -861,8 +968,8 @@ void main() {
 	// slope it has.
 	vec2 dS = vec2(slope.x + specH.x / max(specH.y, 0.001),
 		slope.y + specH.z / max(specH.y, 0.001));
-	float dA = dot(dS, vec2(${f(Math.cos(activeField.windAngle))}, ${f(Math.sin(activeField.windAngle))}));
-	float dC = dS.x * ${f(Math.sin(activeField.windAngle))} - dS.y * ${f(Math.cos(activeField.windAngle))};
+	float dA = dot(dS, uWindDir);
+	float dC = dS.x * uWindDir.y - dS.y * uWindDir.x;
 	float qA = dA * dA;
 	float qC = dC * dC;
 	// Dense core inside a slacker, dimmer wash. The wash accepts facets the
@@ -1742,6 +1849,7 @@ void main() {
 	const bowCrestPlaceGlsl = `
 uniform float uTime;
 uniform float uAmp;
+uniform float uFoaminess;
 uniform vec2 uFlowDir;
 const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
 const float SPHERE_R = 5.0;
@@ -1771,7 +1879,7 @@ void bowCrestPlace(
 		vec2 anchorXZ = SPHERE_C.xz + n * ringW;
 		float wob = foamNoise(anchorXZ * ${f(1 / CONTACT.wobbleScale)}) * 0.6
 			+ foamNoise(anchorXZ * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
-		collarW = ${f(CONTACT.width * CONTACT_FOAMINESS)}
+		collarW = ${f(CONTACT.width)} * uFoaminess
 			* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
 		target = SPHERE_C.xz + n * (ringW + collarW * ${f(BOWCREST.standoffFrac)});
 		// Damped and clamped: the plain iteration only converges where the
@@ -1846,7 +1954,10 @@ void main() {
 			uSunColor: waterUniforms.uSunColor,
 			uSunI: waterUniforms.uSunI,
 			uSunDir: waterUniforms.uSunDir,
-			uSunDiffusion: waterUniforms.uSunDiffusion
+			uSunDiffusion: waterUniforms.uSunDiffusion,
+			// Shared with the water so the crest's collar and the painted
+			// collar cannot disagree about how foamy the sea is.
+			uFoaminess: waterUniforms.uFoaminess
 	};
 
 	const bowCrestMaterial = new THREE.ShaderMaterial({
@@ -2247,7 +2358,8 @@ void main() {
 			uColor: { value: new THREE.Color('#e9f3fb') },
 			uRippleTex: waterUniforms.uRippleTex,
 			uRippleCenter: waterUniforms.uRippleCenter,
-			uRippleExtent: waterUniforms.uRippleExtent
+			uRippleExtent: waterUniforms.uRippleExtent,
+			uRippleGain: waterUniforms.uRippleGain
 		},
 		transparent: true,
 		depthWrite: false,
@@ -2575,6 +2687,9 @@ void main() {
 			perf.cpuWhitecaps = tWhitecaps;
 			perf.cpuSpray = tSpray;
 			perf.cpuCurrent = tCurrent;
+
+			syncSeaState(delta);
+			syncFftSpectrum(delta);
 
 			const env = computeEnv(game.time / ENV.daySeconds);
 
