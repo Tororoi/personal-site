@@ -701,8 +701,11 @@ export const SPECULAR = {
    * not. And on genuinely flat water there will be no highlight at any
    * setting; chop is what supplies the angles.
    */
-  sharpClear: 3000,
-  sharpOvercast: 300,
+  sharpClear: 4000,
+  // Equal to sharpClear, and gainOvercast equals gainClear, so cloud
+  // cover no longer changes the highlight at all. That is a choice, not
+  // an oversight: split them again to get the soft overcast sheen back.
+  sharpOvercast: 4000,
   /**
    * Peak brightness, as a multiple of the sun's colour. Above 1 on
    * purpose — a specular highlight is meant to clip to white — but it
@@ -716,8 +719,8 @@ export const SPECULAR = {
    * size, and the reason it read as a blob rather than a glint. Raise
    * `sharp` alongside `gain`, or the highlight grows as it brightens.
    */
-  gainClear: 16,
-  gainOvercast: 0.35,
+  gainClear: 5,
+  gainOvercast: 5,
   /**
    * How much the surface's Fresnel dims the highlight, 0-1. 0 adds it at
    * full strength whatever the angle, 1 obeys Fresnel exactly. Partial,
@@ -726,48 +729,64 @@ export const SPECULAR = {
    */
   fresnelMix: 1.0,
   /**
-   * Which view geometry the highlight uses. true = rays converging on a
-   * virtual eye; false = the camera's true orthographic direction. The
-   * rest of the water is unaffected either way, so this is a clean A/B.
+   * SEA-STATE BLEND. Everything named *Storm below is the value at a
+   * storm's chop; the plain name is the value on calm water, and the sea's
+   * own `chop` cross-fades between them.
    *
-   * On, because orthographic cannot produce a glitter PATH at all: with
-   * one shared view ray a slope qualifies everywhere or nowhere, so the
-   * highlight comes out as slivers scattered over whichever faces happen
-   * to hit the angle, all equally bright regardless of distance. The
-   * path in a photograph exists because perspective gives neighbouring
-   * points different view rays, and this is the cheapest way to buy that
-   * back without changing the projection.
+   * A calm sea mirrors: a tiny slope spread, so the sun's image survives
+   * as a hard point and wants a very tight lobe. A storm shatters it
+   * across thousands of steep facets, and the same lobe there picks out
+   * almost nothing — it needs to be slack enough to catch the spread the
+   * water actually has. One setting cannot do both, which is why these
+   * are paired rather than compromised.
+   *
+   * The endpoints are the presets' own chop values, so largeSwell needs no
+   * third set of its own. To actually MAKE the sea rougher and see these
+   * cross-fade, use SEA.chopOverride — nothing in this group changes the
+   * water.
    */
+  // Named as statements, not as chop levers: "use the calm values AT chop
+  // 0.55, the storm values AT chop 5". They are the ends of the blend, not
+  // a way to change how rough the sea is — that is SEA.chopOverride.
+  calmAtChop: 0.55,
+  stormAtChop: 5.0,
   /**
-   * ENVELOPE MODE — the recommended one. Keeps the true orthographic
-   * mirror test for WHETHER the sun reflects and off which facets, and
-   * multiplies it by a smooth spatial envelope for WHERE on screen the
-   * glitter sits.
+   * Curve on the chop blend: t = ((chop - calmAtChop) / (stormAtChop - calmAtChop)) ^ this.
    *
-   * The virtual-eye mode below feeds the fake eye into the mirror test
-   * itself, which is why it invents highlights at hours the sun could not
-   * possibly reflect: it widens the range of facet slopes that qualify.
-   * The envelope cannot do that — it peaks at 1 by construction, so it
-   * only ever subtracts. Timing stays exactly the orthographic answer
-   * while the streak's length and position become free parameters.
-   *
-   * Takes precedence over virtualEye. Both are ignored under a real
-   * perspective camera, which needs no fakery.
+   * Below 1 it rushes toward the storm values, which is what a sea state
+   * actually does — largeSwell at chop 2.25 is only 38% of the way along
+   * the numeric range but it breaks and scatters far more like a storm
+   * than like a mirror. 0.216 is solved to put it at roughly twice the
+   * storm values; 1.0 gives the plain linear ramp back.
    */
+  chopCurve: 0.216,
+  sharpClearStorm: 100,
+  sharpOvercastStorm: 100,
+  sharpPeakStorm: 200,
+  cameraEyeDistanceStorm: 140,
   /**
-   * CAMERA EYE — treat the camera's own world position as a single point
-   * the specular rays converge on. Everything else stays orthographic.
+   * SHARPNESS SPIKE — a brief tightening of the core lobe as the sun
+   * crosses a chosen moment, so the glitter snaps from a shimmer to a hard
+   * point and back.
    *
-   * The plainest possible answer to "an ortho view has no eye position":
-   * give it the one it actually has. No tuned distance, no envelope, no
-   * altitude ramp on the shape — the reflection lands where a viewer at
-   * the camera would see it, and its focus follows from how far away that
-   * is (56.7m here) rather than from a knob.
+   * Applied to sharpClear before it blends with sharpOvercast, so splitting
+   * those two later keeps the spike on the clear-sky term where it belongs.
    *
-   * Takes precedence over `envelope` and `virtualEye`. The core/halo split
-   * still applies, so there is a dense centre inside a slacker wash.
+   * Keyed on day PHASE rather than sun altitude, unlike the low-sun ramp
+   * below. That is a deliberate difference: the ramp tracks a physical
+   * cause (a low sun lengthens the reflection), while this is a staged
+   * moment. The cost is that the four phases are tied to the current sun
+   * path — change sunPathAngleDeg or sunPathOffsetDeg and the sun reaches
+   * this point at a different time, so they need re-finding.
    */
-  cameraEye: true,
+  sharpPeak: 8000,
+  /** Rise: sharpClear -> sharpPeak across these two phases. */
+  spikeInStart: 0.69,
+  spikeInEnd: 0.704,
+  /** Fall: back down to sharpClear across these two. Between spikeInEnd
+   * and spikeOutStart it holds at the peak. */
+  spikeOutStart: 0.705,
+  spikeOutEnd: 0.72,
   /**
    * How far away the simulated viewpoint sits, metres, when cameraEye is
    * on. 57 is where the isometric camera actually is.
@@ -781,45 +800,26 @@ export const SPECULAR = {
    * Nearer keeps the reflection in frame for longer at a low sun; further
    * spreads it wider and loses it sooner.
    */
-  cameraEyeDistance: 57,
-  envelope: true,
+  cameraEyeDistance: 700,
   /**
-   * Distance of the notional viewer used for the envelope, metres.
-   * Controls how long the streak is and how fast it falls off: near
-   * gives a short compact patch, far stretches it toward covering the
-   * view. It cannot affect WHEN the glitter appears, unlike eyeDistance.
-   */
-  envDistance: 40,
-  /**
-   * Envelope width, as slope VARIANCE in radians squared.
+   * Height of the simulated viewpoint, as a multiple of the height the
+   * view axis would give it (0.53 x distance, i.e. the camera's own 32
+   * degree elevation).
    *
-   * The falloff is exp(-(1 - h.y) / envWidth) where h is the facet normal
-   * a viewer would need at this point, and 1 - h.y is approximately
-   * tilt^2 / 2 — so this is the Cox-Munk sun-glitter model, and envWidth
-   * is the mean square surface slope. 0.02 is an RMS slope near 8 degrees,
-   * a moderate breeze. Rougher seas spread the glitter wider; this could
-   * be driven from windSpeed rather than tuned.
+   * Split from distance because the two do different jobs and were welded
+   * together. Distance sets how hard the rays fan, so it controls FOCUS.
+   * Height sets where the reflection lands — the centre sits at
+   * height / tan(sunAltitude) away — so it controls how fast the highlight
+   * FLEES as the sun drops, and therefore how long the window lasts.
+   * Below 1 the viewpoint stoops toward the water: tighter tail, longer
+   * window. Above 1 it rises and the reflection runs off sooner.
    */
-  envWidth: 0.01,
-  /**
-   * HALO — a second, much broader and softer copy of the same reflection,
-   * added under the core.
-   *
-   * Physically this is the circumsolar aureole: the sun's disc is half a
-   * degree across, but forward scattering by haze smears a far dimmer
-   * glow several degrees around it. On water that reads as a dense
-   * glitter core sitting in a wide, thin shimmer — which is what makes it
-   * look like a point source in a bright sky rather than a decal.
-   *
-   * Multipliers on the core, not absolute values, so the two stay related
-   * when the core is retuned.
-   */
-  haloWidth: 1,
+  cameraEyeHeight: 0.35,
   /** Lobe sharpness relative to the core. Lower = catches slacker facets,
    * so the shimmer reaches further and survives a lower sun. */
   haloSharp: 0.15,
   /** Brightness relative to the core. */
-  haloGain: 0.03,
+  haloGain: 0.2,
   /**
    * ANISOTROPY — ratio of along-wind to cross-wind slope variance.
    *
@@ -832,7 +832,7 @@ export const SPECULAR = {
    * out along one axis — the stretch keeps the streak in view as the
    * specular point slides toward the horizon.
    */
-  anisotropy: 4.0,
+  anisotropy: 3.0,
   /**
    * LOW-SUN BEHAVIOUR. The glitter's window is narrow because the
    * envelope's specular point slides out of view as the sun drops — so
@@ -846,26 +846,12 @@ export const SPECULAR = {
    * Above altHigh the base values apply unchanged; at altLow the *Low
    * values fully apply; between, they cross-fade.
    */
-  altHigh: 26,
+  // 200 is deliberately past any altitude the sun can reach (90 is
+  // straight up), so the cross-fade never completes and the low-sun
+  // values are partly in effect all day, ramping gently rather than
+  // switching in near the horizon. Set it inside 0..90 to get a band.
+  altHigh: 200,
   altLow: 7,
-  /**
-   * Envelope distance at low sun — SMALLER than the base value, which is
-   * the counter-intuitive part.
-   *
-   * The notional eye sits at 0.53 x this height, and the specular point
-   * lands at eyeHeight / tan(sunAltitude) away from it. So as the sun
-   * drops, a HIGH eye hurls the glitter's centre over the horizon:
-   * measured, at distance 40 it passes the edge of the visible water
-   * (~45m) by 15 degrees altitude and is at 86m by 10 degrees. Dropping
-   * the eye keeps the reflection in view — at distance 15 the same
-   * 10-degree sun puts it at 33m, still on screen.
-   *
-   * Raising it instead does make the patch bigger, which reads as an
-   * improvement right up until the patch has left the frame.
-   */
-  envDistanceLow: 14,
-  /** Envelope width at low sun. Wider keeps it alive as the tilt grows. */
-  envWidthLow: 0.025,
   /** Halo brightness at low sun — the wash carries it once the core thins. */
   haloGainLow: 0.2,
   /**
@@ -874,24 +860,6 @@ export const SPECULAR = {
    * would simply blink off when the light handed over to the moon.
    */
   fadeAltDeg: 3,
-  virtualEye: true,
-  /**
-   * VIRTUAL EYE distance, metres, when `virtualEye` is on.
-   *
-   * The camera is orthographic, so every pixel shares one view direction
-   * and a slope either satisfies the mirror condition everywhere or
-   * nowhere — there is no glitter PATH, only slivers on qualifying
-   * faces. A real path exists because perspective gives each point its
-   * own view ray, so a continuum of positions satisfies the condition.
-   *
-   * This puts a virtual eye at that distance along the view axis and
-   * measures the specular against rays converging on it. Deliberately a
-   * cheat, and only the highlight uses it — the sky reflection and
-   * Fresnel keep the true orthographic direction, so nothing else about
-   * the water changes. Smaller values spread the path wider; very large
-   * ones converge back on the orthographic behaviour.
-   */
-  eyeDistance: 42,
 }
 
 /**
@@ -1655,11 +1623,10 @@ export const PROFILE = {
    * density of qualifying facets fall away from the reflection. An
    * orthographic view has NO view-direction variation, so it cannot
    * produce one — it can only light every qualifying facet on screen at
-   * once. SPECULAR.virtualEye fakes the variation, and the fake trades
-   * one artefact for another: near eye gives a tight patch that appears
-   * at every hour, far eye gives correct timing with a patch that grows
-   * to fill the view. This switch shows what the honest version looks
-   * like. It changes the whole game's look, so it is an experiment.
+   * once. The simulated viewpoint (SPECULAR.cameraEyeDistance) supplies
+   * that variation for the isometric camera; this switch shows what the
+   * honest version looks like instead. It changes the whole game's look,
+   * so it is an experiment rather than a setting.
    */
   perspectiveCamera: false,
   /**
@@ -1684,6 +1651,26 @@ export const PROFILE = {
 }
 
 /**
+ * SEA — overrides on the wave field itself (waves.ts), for testing.
+ */
+export const SEA = {
+  /**
+   * Replace the active preset's `chop`. Negative leaves the preset alone.
+   *
+   * For sweeping a continuous band of sea states rather than jumping
+   * between the three presets — the SPECULAR pairs are cross-faded on
+   * chop, and the only way to know the in-between values look right is to
+   * sit at one. Presets are calm 0.55, largeSwell 2.25, storm 5, and 5 is
+   * the top of the range — the storm is the roughest real sea here.
+   *
+   * STAGED, not live: chop sets each wave's Gerstner q at generation, and
+   * the whole field — CPU sampler and GPU uniforms alike — is built from
+   * that once at load. Every step needs an Apply.
+   */
+  chopOverride: -1,
+}
+
+/**
  * REGISTRY for the tuning panel (TuningPanel.svelte).
  *
  * Listed explicitly rather than reflected off the module, so that adding
@@ -1696,6 +1683,7 @@ const GROUPS = {
   ENABLE,
   FFT,
   PROFILE,
+  SEA,
   FROTH,
   PLUME,
   LOOP,
@@ -1728,3 +1716,15 @@ for (const [name, group] of Object.entries(GROUPS)) {
 }
 
 export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
+
+/**
+ * Groups the panel edits LIVE, with no Apply and no reload.
+ *
+ * The default for everything here is STAGED, because these values are
+ * interpolated into shader source as literals and a running material
+ * cannot be re-linked. A group earns its place in this set only once every
+ * one of its knobs reaches the scene through a uniform refreshed each
+ * frame — otherwise the panel would report a change that never landed,
+ * which is worse than asking for a reload.
+ */
+export const LIVE_GROUPS = new Set(['SPECULAR'])

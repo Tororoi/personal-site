@@ -21,7 +21,7 @@
 	has a number box that accepts anything.
 -->
 <script lang="ts">
-	import { ENABLE, TUNING_DEFAULTS, TUNING_GROUPS } from './tuning';
+	import { ENABLE, LIVE_GROUPS, TUNING_DEFAULTS, TUNING_GROUPS } from './tuning';
 	import { CAMERA_AZIMUTH_DEG, computeEnv, effectiveSunAngleDeg, ENV, ENV_DEFAULTS } from './env';
 	import { game } from './state.svelte';
 	import {
@@ -70,6 +70,9 @@
 	// ENV is a plain object, so nothing observes it; bumped on every write
 	// to drive the derived sun-geometry readout below.
 	let envTick = $state(0);
+	// Same trick for the live tuning groups: TUNING_GROUPS is a plain object
+	// the UI cannot observe, so writes bump this to force the rows to reread.
+	let liveTick = $state(0);
 
 	const pendingCount = $derived(
 		Object.values(pending).reduce((n, g) => n + Object.keys(g).length, 0)
@@ -82,8 +85,31 @@
 
 	/** Current effective value: staged edit if there is one, else live. */
 	function valueOf(g: string, k: string): Knob {
+		void liveTick;
 		const p = pending[g]?.[k];
 		return p !== undefined ? p : TUNING_GROUPS[g][k];
+	}
+
+	/**
+	 * Write a knob. Groups in LIVE_GROUPS reach the scene through uniforms
+	 * refreshed every frame, so they are applied and persisted on the spot;
+	 * everything else is baked into shader source and has to queue for the
+	 * reload that Apply performs.
+	 */
+	function setKnob(g: string, k: string, v: Knob) {
+		if (!LIVE_GROUPS.has(g)) {
+			setStaged(g, k, v);
+			return;
+		}
+		TUNING_GROUPS[g][k] = v;
+		liveTick++;
+		const o = loadOverrides();
+		const next = { ...(o[g] ?? {}) };
+		if (v === TUNING_DEFAULTS[g][k]) delete next[k];
+		else next[k] = v;
+		if (Object.keys(next).length) o[g] = next;
+		else delete o[g];
+		saveOverrides(o);
 	}
 	const isModified = (g: string, k: string) => valueOf(g, k) !== TUNING_DEFAULTS[g][k];
 	const isStaged = (g: string, k: string) => pending[g]?.[k] !== undefined;
@@ -141,7 +167,7 @@
 
 	// setStaged already drops the entry when the target equals the live
 	// value, so this stages a change only when there is really one to make.
-	const revert = (g: string, k: string) => setStaged(g, k, TUNING_DEFAULTS[g][k]);
+	const revert = (g: string, k: string) => setKnob(g, k, TUNING_DEFAULTS[g][k]);
 
 	/**
 	 * Slider bounds inferred from the default. A guess, deliberately: with
@@ -160,6 +186,25 @@
 		const max = Math.ceil(mag * 4);
 		return { min: neg ? -max : 0, max, step: max / 500 };
 	}
+
+	/**
+	 * Explicit bounds for tuning knobs whose sensible range the heuristic
+	 * cannot guess from the default. Keyed "GROUP.knob".
+	 */
+	const TUNING_RANGE: Record<string, { min: number; max: number; step: number }> = {
+		// Defaults to -1 (meaning "leave the preset alone"), so the heuristic
+		// would infer -1..1 — useless for a value spanning the presets' 0.55
+		// to 5. Capped AT 5 rather than past it: the storm preset is the top
+		// of the real range, and letting the slider run beyond it only buys
+		// unreachable sea states at the cost of resolution across the real ones.
+		'SEA.chopOverride': { min: -1, max: 5, step: 0.05 },
+		// Chop thresholds, so they need the chop range — not the 0..1 the
+		// heuristic infers from a default under 1.
+		'SPECULAR.calmAtChop': { min: 0, max: 5, step: 0.05 },
+		'SPECULAR.stormAtChop': { min: 0, max: 5, step: 0.05 },
+		// Exponent: above 1 is the opposite curve, so leave room for it.
+		'SPECULAR.chopCurve': { min: 0.05, max: 2, step: 0.01 }
+	};
 
 	/** Explicit bounds for the handful of env knobs, which have real units. */
 	const ENV_RANGE: Record<string, { min: number; max: number; step: number }> = {
@@ -394,9 +439,10 @@
 						<span>vertical at phase</span>
 						<span>{sunGeom.alignAt === null ? 'never' : sunGeom.alignAt.toFixed(3)}</span>
 					</div>
-					{#if envVals.alignGlint}
-						<div><span>solved angle</span><span>{sunGeom.angle.toFixed(1)}&deg;</span></div>
-					{/if}
+					<div class:good={!!envVals.alignGlint}>
+						<span>path angle</span>
+						<span>{sunGeom.angle.toFixed(1)}&deg;{envVals.alignGlint ? ' (solved)' : ''}</span>
+					</div>
 				</div>
 
 				<label class="bool">
@@ -412,14 +458,19 @@
 
 				{#each ENV_KNOBS as k (k)}
 					{@const r = ENV_RANGE[k]}
-					<div class="knob">
+					<!-- alignGlint SOLVES the sun's angle, so that knob stops being
+					     read. Showing it as a live control that silently does
+					     nothing is worse than not showing it at all. -->
+					{@const solved = k === 'sunPathAngleDeg' && !!envVals.alignGlint}
+					<div class="knob" class:solved>
 						<div class="head">
-							<span class="name" class:mod={envVals[k] !== ENV_DEFAULTS[k]}>{k}</span>
+							<span class="name" class:mod={!solved && envVals[k] !== ENV_DEFAULTS[k]}>{k}</span>
 							<input
 								class="num"
 								type="number"
 								step={r.step}
-								value={show(envVals[k] as number)}
+								disabled={solved}
+								value={solved ? show(sunGeom.angle) : show(envVals[k] as number)}
 								onchange={(e) => setEnv(k, +e.currentTarget.value)}
 							/>
 						</div>
@@ -428,10 +479,13 @@
 							min={r.min}
 							max={r.max}
 							step={r.step}
-							value={envVals[k] as number}
+							disabled={solved}
+							value={solved ? sunGeom.angle : (envVals[k] as number)}
 							oninput={(e) => setEnv(k, +e.currentTarget.value)}
 						/>
-						<p class="help">{ENV_HELP[k]}</p>
+						<p class="help">
+							{solved ? 'solved by alignGlint — turn it off to set this' : ENV_HELP[k]}
+						</p>
 					</div>
 				{/each}
 			</section>
@@ -448,6 +502,7 @@
 								<span class="caret">{search.trim() || open.has(g) ? '▾' : '▸'}</span>
 								{g}
 								<span class="dim">{hits.length}</span>
+								{#if LIVE_GROUPS.has(g)}<span class="livetag">live</span>{/if}
 								{#if mods}<span class="badge">{mods}</span>{/if}
 							</button>
 						</h3>
@@ -459,13 +514,13 @@
 									<input
 										type="checkbox"
 										checked={v}
-										onchange={(e) => setStaged(g, k, e.currentTarget.checked)}
+										onchange={(e) => setKnob(g, k, e.currentTarget.checked)}
 									/>
 									<span class="name" class:mod={isModified(g, k)}>{k}</span>
 								</label>
 							{:else}
 								{@const def = TUNING_DEFAULTS[g][k] as number}
-								{@const r = rangeFor(def, v)}
+								{@const r = TUNING_RANGE[`${g}.${k}`] ?? rangeFor(def, v)}
 								<div class="knob" class:staged={isStaged(g, k)}>
 									<div class="head">
 										<span class="name" class:mod={isModified(g, k)}>{k}</span>
@@ -479,7 +534,7 @@
 											type="number"
 											step={r.step}
 											value={show(v)}
-											onchange={(e) => setStaged(g, k, +e.currentTarget.value)}
+											onchange={(e) => setKnob(g, k, +e.currentTarget.value)}
 										/>
 									</div>
 									<input
@@ -488,7 +543,7 @@
 										max={Math.max(r.max, v)}
 										step={r.step}
 										value={v}
-										oninput={(e) => setStaged(g, k, +e.currentTarget.value)}
+										oninput={(e) => setKnob(g, k, +e.currentTarget.value)}
 									/>
 								</div>
 							{/if}
@@ -636,6 +691,14 @@
 		color: #d3a34a;
 	}
 
+	.solved .name,
+	.solved .num {
+		color: #5f7a90;
+	}
+	.solved .help {
+		color: #d3a34a;
+	}
+
 	.help {
 		margin: 1px 0 0;
 		color: #5f7a90;
@@ -683,6 +746,11 @@
 	.caret {
 		color: #55708a;
 	}
+	.livetag {
+		color: #8fd4b4;
+		font-weight: 400;
+	}
+
 	.badge {
 		margin-left: auto;
 		padding: 0 5px;

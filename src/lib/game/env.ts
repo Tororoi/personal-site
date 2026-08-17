@@ -19,24 +19,24 @@ import { applyOverrides, type Knob } from './tuningstore';
  */
 const ENV_BASE = {
 	/**
-	 * Real seconds per in-game day. 240 is long enough to read as a cycle,
-	 * short enough to watch dawn, noon, dusk and night in one sitting.
+	 * Real seconds per in-game day. Long enough to read as a cycle, short
+	 * enough to watch dawn, noon, dusk and night in one sitting.
 	 */
-	daySeconds: 240,
+	daySeconds: 120,
 	/**
 	 * ANGLE — which way the arc runs, in degrees: the compass bearing the
 	 * sun rises from. 0 = +X, increasing toward +Z (clockwise from above),
 	 * the same convention as windAngle. Spinning this turns the whole path
 	 * about the vertical axis; it does not change its shape.
 	 *
-	 * 45 lays the path along the camera's own axis. The camera sits at
-	 * (34, 30, 34), azimuth 45 degrees, so the sun rises behind it and sets
-	 * at azimuth 225 — directly opposite, in the middle of the view. That
-	 * is the arrangement that makes a specular highlight plainest: at dusk
-	 * the sun is straight ahead and its reflection comes back along the
-	 * line of sight.
+	 * 45 would lay the path along the camera's own axis (the camera sits at
+	 * (34, 30, 34), azimuth 45), which pins the sun's azimuth to 225 at dusk
+	 * and stands the glitter dead vertical. 80 is off that on purpose: it
+	 * lights objects from the side rather than straight down the view, and
+	 * the offset below sweeps the azimuth across the camera during the
+	 * afternoon instead, which is where the glitter now happens.
 	 */
-	sunPathAngleDeg: 45,
+	sunPathAngleDeg: 81,
 	/**
 	 * OFFSET — how far the arc is pushed off centre, in degrees.
 	 *
@@ -54,16 +54,21 @@ const ENV_BASE = {
 	 * and the sun/moon handover are untouched — only the height and the
 	 * lean of the arc between them change.
 	 */
-	sunPathOffsetDeg: 0,
+	sunPathOffsetDeg: 35,
 	/** The moon's own angle. 50 keeps its circle crossing the sun's rather
 	 * than sitting on top of it. */
-	moonPathAngleDeg: 50,
+	moonPathAngleDeg: 69,
 	/** The moon's own offset, read exactly like the sun's. */
-	moonPathOffsetDeg: 0,
+	moonPathOffsetDeg: -3,
 	/**
 	 * AUTO-AIM THE GLITTER. When on, sunPathAngleDeg is ignored and solved
 	 * for instead, so the sun crosses the camera's view axis — and the
-	 * glitter path stands vertical on screen — at sunGlintPhase.
+	 * glitter path stands vertical on screen — at glintPhase.
+	 *
+	 * Two consequences that read as bugs if you forget this is on:
+	 * sunPathAngleDeg does nothing at all, and sunPathOffsetDeg moves the
+	 * arc's lean AND the angle, because the solve depends on it. The panel
+	 * greys the angle out and labels it while this is set.
 	 *
 	 * Why this rather than a rule that keeps it vertical all day: it cannot
 	 * be done. The sun's azimuth is angle + atan2(sin off, cos off cos t),
@@ -282,11 +287,12 @@ export function computeEnv(phase: number): Env {
 	// The moon rides the same clock half a turn later, so it is up
 	// exactly when the sun is down.
 	const bodyTheta = usingSun ? theta : theta + Math.PI;
-	const sunAngle = effectiveSunAngleDeg();
-	// The moon keeps its own angle as a DELTA off the sun's, so an
-	// auto-aimed sun does not leave the two arcs in unrelated places.
-	const angle =
-		(usingSun ? sunAngle : sunAngle + (ENV.moonPathAngleDeg - ENV.sunPathAngleDeg)) * DEG;
+	// Each body reads its OWN angle. The moon briefly tracked the sun as a
+	// delta, so that auto-aiming the sun carried it along — but that made
+	// sunPathAngleDeg, which alignGlint is supposed to ignore entirely, into
+	// a secret moon control, and routed sunPathOffsetDeg into the moon's
+	// bearing through the solve. A knob documented as inert must be inert.
+	const angle = (usingSun ? effectiveSunAngleDeg() : ENV.moonPathAngleDeg) * DEG;
 	const offset = (usingSun ? ENV.sunPathOffsetDeg : ENV.moonPathOffsetDeg) * DEG;
 
 	// The path is built from three perpendicular directions: `u`, the
