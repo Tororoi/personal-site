@@ -738,6 +738,142 @@ export const SPECULAR = {
    * points different view rays, and this is the cheapest way to buy that
    * back without changing the projection.
    */
+  /**
+   * ENVELOPE MODE — the recommended one. Keeps the true orthographic
+   * mirror test for WHETHER the sun reflects and off which facets, and
+   * multiplies it by a smooth spatial envelope for WHERE on screen the
+   * glitter sits.
+   *
+   * The virtual-eye mode below feeds the fake eye into the mirror test
+   * itself, which is why it invents highlights at hours the sun could not
+   * possibly reflect: it widens the range of facet slopes that qualify.
+   * The envelope cannot do that — it peaks at 1 by construction, so it
+   * only ever subtracts. Timing stays exactly the orthographic answer
+   * while the streak's length and position become free parameters.
+   *
+   * Takes precedence over virtualEye. Both are ignored under a real
+   * perspective camera, which needs no fakery.
+   */
+  /**
+   * CAMERA EYE — treat the camera's own world position as a single point
+   * the specular rays converge on. Everything else stays orthographic.
+   *
+   * The plainest possible answer to "an ortho view has no eye position":
+   * give it the one it actually has. No tuned distance, no envelope, no
+   * altitude ramp on the shape — the reflection lands where a viewer at
+   * the camera would see it, and its focus follows from how far away that
+   * is (56.7m here) rather than from a knob.
+   *
+   * Takes precedence over `envelope` and `virtualEye`. The core/halo split
+   * still applies, so there is a dense centre inside a slacker wash.
+   */
+  cameraEye: true,
+  /**
+   * How far away the simulated viewpoint sits, metres, when cameraEye is
+   * on. 57 is where the isometric camera actually is.
+   *
+   * An orthographic projection does not care about camera distance — only
+   * direction and frustum — so nothing else in the scene moves when this
+   * changes. But the specular is the one calculation that DOES converge on
+   * a point, so distance is exactly what sets how tight the highlight is
+   * and how far it travels as the sun drops: the centre lands at roughly
+   * (0.53 x this) / tan(sunAltitude) from the viewpoint's ground position.
+   * Nearer keeps the reflection in frame for longer at a low sun; further
+   * spreads it wider and loses it sooner.
+   */
+  cameraEyeDistance: 57,
+  envelope: true,
+  /**
+   * Distance of the notional viewer used for the envelope, metres.
+   * Controls how long the streak is and how fast it falls off: near
+   * gives a short compact patch, far stretches it toward covering the
+   * view. It cannot affect WHEN the glitter appears, unlike eyeDistance.
+   */
+  envDistance: 40,
+  /**
+   * Envelope width, as slope VARIANCE in radians squared.
+   *
+   * The falloff is exp(-(1 - h.y) / envWidth) where h is the facet normal
+   * a viewer would need at this point, and 1 - h.y is approximately
+   * tilt^2 / 2 — so this is the Cox-Munk sun-glitter model, and envWidth
+   * is the mean square surface slope. 0.02 is an RMS slope near 8 degrees,
+   * a moderate breeze. Rougher seas spread the glitter wider; this could
+   * be driven from windSpeed rather than tuned.
+   */
+  envWidth: 0.01,
+  /**
+   * HALO — a second, much broader and softer copy of the same reflection,
+   * added under the core.
+   *
+   * Physically this is the circumsolar aureole: the sun's disc is half a
+   * degree across, but forward scattering by haze smears a far dimmer
+   * glow several degrees around it. On water that reads as a dense
+   * glitter core sitting in a wide, thin shimmer — which is what makes it
+   * look like a point source in a bright sky rather than a decal.
+   *
+   * Multipliers on the core, not absolute values, so the two stay related
+   * when the core is retuned.
+   */
+  haloWidth: 1,
+  /** Lobe sharpness relative to the core. Lower = catches slacker facets,
+   * so the shimmer reaches further and survives a lower sun. */
+  haloSharp: 0.15,
+  /** Brightness relative to the core. */
+  haloGain: 0.03,
+  /**
+   * ANISOTROPY — ratio of along-wind to cross-wind slope variance.
+   *
+   * Cox & Munk measured this off sun-glitter photographs in 1954: the sea
+   * tilts further along the wind than across it, so the glitter is an
+   * ellipse stretched downwind, not a disc. 1.0 is isotropic and reduces
+   * this exactly to the plain Gaussian; 2 is a moderate breeze.
+   *
+   * It also earns its keep at low sun, where the required facet tilt runs
+   * out along one axis — the stretch keeps the streak in view as the
+   * specular point slides toward the horizon.
+   */
+  anisotropy: 4.0,
+  /**
+   * LOW-SUN BEHAVIOUR. The glitter's window is narrow because the
+   * envelope's specular point slides out of view as the sun drops — so
+   * the envelope opens up to follow it.
+   *
+   * Keyed on sun ALTITUDE, not day phase: altitude is what actually
+   * causes it (a real glitter path lengthens toward the horizon for the
+   * same reason), and phase numbers would silently become wrong the
+   * moment the sun path's angle or offset changed.
+   *
+   * Above altHigh the base values apply unchanged; at altLow the *Low
+   * values fully apply; between, they cross-fade.
+   */
+  altHigh: 26,
+  altLow: 7,
+  /**
+   * Envelope distance at low sun — SMALLER than the base value, which is
+   * the counter-intuitive part.
+   *
+   * The notional eye sits at 0.53 x this height, and the specular point
+   * lands at eyeHeight / tan(sunAltitude) away from it. So as the sun
+   * drops, a HIGH eye hurls the glitter's centre over the horizon:
+   * measured, at distance 40 it passes the edge of the visible water
+   * (~45m) by 15 degrees altitude and is at 86m by 10 degrees. Dropping
+   * the eye keeps the reflection in view — at distance 15 the same
+   * 10-degree sun puts it at 33m, still on screen.
+   *
+   * Raising it instead does make the patch bigger, which reads as an
+   * improvement right up until the patch has left the frame.
+   */
+  envDistanceLow: 14,
+  /** Envelope width at low sun. Wider keeps it alive as the tilt grows. */
+  envWidthLow: 0.025,
+  /** Halo brightness at low sun — the wash carries it once the core thins. */
+  haloGainLow: 0.2,
+  /**
+   * Sun altitude below which the whole specular fades out, degrees. The
+   * sun reddens and dims into the horizon haze; without this the glitter
+   * would simply blink off when the light handed over to the moon.
+   */
+  fadeAltDeg: 3,
   virtualEye: true,
   /**
    * VIRTUAL EYE distance, metres, when `virtualEye` is on.
@@ -1510,6 +1646,30 @@ export const PROFILE = {
    */
   hideFroth: false,
   hideSpray: false,
+  /**
+   * Swap the isometric orthographic camera for a real PERSPECTIVE one.
+   *
+   * The point is the sun glitter. A glitter path is a perspective effect:
+   * it exists because the view direction varies across the scene, which
+   * varies the surface slope needed to mirror the sun, which makes the
+   * density of qualifying facets fall away from the reflection. An
+   * orthographic view has NO view-direction variation, so it cannot
+   * produce one — it can only light every qualifying facet on screen at
+   * once. SPECULAR.virtualEye fakes the variation, and the fake trades
+   * one artefact for another: near eye gives a tight patch that appears
+   * at every hour, far eye gives correct timing with a patch that grows
+   * to fill the view. This switch shows what the honest version looks
+   * like. It changes the whole game's look, so it is an experiment.
+   */
+  perspectiveCamera: false,
+  /**
+   * Camera distance in metres when perspectiveCamera is on. The field of
+   * view is derived from it so the framing at the water plane stays put,
+   * which makes this a clean "how much perspective" dial: small is a wide
+   * lens up close, large converges on the orthographic look. 57 matches
+   * where the isometric camera already sits.
+   */
+  perspectiveDistance: 57,
   /**
    * Skip the per-droplet landing check entirely. Droplets stop dying on
    * contact and fly through the water, so this is unusable for play — it

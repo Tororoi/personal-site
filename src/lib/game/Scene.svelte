@@ -247,6 +247,23 @@
 		uSunI: { value: 1.2 },
 		// Constant for the ortho camera: unit vector from scene toward camera.
 		uViewDir: { value: new THREE.Vector3(34, 30, 34).normalize() },
+		// True camera position, for the perspective experiment. Under the
+		// isometric camera nothing reads it — every pixel shares uViewDir.
+		// The viewpoint the specular converges on. Under the isometric camera
+		// that is a SIMULATION — ortho has no meaningful eye distance — so it
+		// is placed along the view axis at SPECULAR.cameraEyeDistance. Under
+		// a real perspective camera it is overwritten with the true position.
+		uCamPos: {
+			value: new THREE.Vector3(34, 30, 34).normalize().multiplyScalar(SPECULAR.cameraEyeDistance)
+		},
+		// Specular envelope, driven per frame from sun altitude (see the
+		// altHigh/altLow block in SPECULAR). Baked literals cannot animate.
+		uSpecEnvDist: { value: SPECULAR.envDistance },
+		// (core along, core across, halo along, halo across) slope variances
+		uSpecVar: { value: new THREE.Vector4(1, 1, 1, 1) },
+		uSpecHaloGain: { value: SPECULAR.haloGain },
+		/** Horizon fade, 0 below fadeAltDeg. */
+		uSpecFade: { value: 1 },
 		// Underwater raytrace (pool-style view refraction): the water
 		// fragment draws the submerged scene itself, so it needs the same
 		// receiver-lighting inputs as the sphere and backdrop materials.
@@ -401,6 +418,51 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	let foamAccum = 0;
 	let foamEven = false;
 
+	// PERSPECTIVE EXPERIMENT. Sit the camera on the same axis the isometric
+	// one uses, at PROFILE.perspectiveDistance, and derive the field of
+	// view so the framing at the water plane is unchanged. That makes the
+	// distance a pure "how much perspective" dial rather than a zoom: near
+	// is a wide lens close in, far converges on the orthographic look.
+	/**
+	 * FOG DEPTH BIAS, metres.
+	 *
+	 * vViewZ is distance from the CAMERA, so moving the camera back fogs the
+	 * whole scene even though nothing in it has moved — measured, the
+	 * perspective experiment at 150m put a storm sea 56% into fog against
+	 * 11% at the isometric distance, which is why it went dark. Subtracting
+	 * the camera's own distance makes fog measure depth into the scene
+	 * instead. Zero at the current isometric camera, so the look is
+	 * unchanged; it only stops the fog reacting to where the lens is.
+	 */
+	const BASE_CAM_DIST = Math.hypot(34, 30, 34);
+	const fogZBias =
+		(PROFILE.perspectiveCamera ? PROFILE.perspectiveDistance : BASE_CAM_DIST) - BASE_CAM_DIST;
+	/** Fog term for a shader that has vViewZ in scope. */
+	const fogGlsl = (out: string) =>
+		`float ${out} = clamp(1.0 - exp(-uFogDensity * uFogDensity` +
+		` * max(vViewZ - ${f(fogZBias)}, 0.0) * max(vViewZ - ${f(fogZBias)}, 0.0)), 0.0, 1.0);`;
+
+	const perspDir = new THREE.Vector3(34, 30, 34).normalize();
+	const perspPos = perspDir.clone().multiplyScalar(PROFILE.perspectiveDistance).toArray() as [
+		number,
+		number,
+		number
+	];
+	const perspFov =
+		(2 *
+			Math.atan(window.innerHeight / zoom / 2 / PROFILE.perspectiveDistance) *
+			180) /
+		Math.PI;
+	if (PROFILE.perspectiveCamera) {
+		waterUniforms.uCamPos.value.fromArray(perspPos);
+	}
+
+	/** GLSL-style smoothstep that also accepts e0 > e1 (a falling ramp). */
+	function smooth01(x: number, e0: number, e1: number) {
+		const u = Math.min(Math.max((x - e0) / (e1 - e0), 0), 1);
+		return u * u * (3 - 2 * u);
+	}
+
 	// The FFT detail-wave cascades that own uFftA/uFftB. Unlike the other
 	// sims this one has no state to carry frame to frame — each step is a
 	// fresh transform of the same spectrum evolved to the current time — so
@@ -439,6 +501,60 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	// The wireframe fragment is the tuning instrument; the solid fragment
 	// is the first step toward the real look: translucent water whose
 	// opacity falls off with depth, faceted shading so geometry reads.
+	/**
+	 * How the specular gets its reflection direction, and whether it is
+	 * shaped. Exactly one applies; both fakes are inert under a real
+	 * perspective camera, where `reflectedRay` is already per-pixel truth.
+	 */
+	/**
+	 * How the specular gets its reflection direction, and how it is shaped.
+	 * Exactly one branch applies; both fakes are inert under a real
+	 * perspective camera, where `reflectedRay` is already per-pixel truth.
+	 *
+	 * Envelope mode emits TWO shapes — a tight core and a broad halo — so
+	 * the common code below can sum a dense glitter and the dim aureole
+	 * around it. The other modes emit a halo of zero, which drops the
+	 * second term entirely rather than double-counting the core.
+	 */
+	const specularModeGlsl = PROFILE.perspectiveCamera
+		? `vec3 reflectedSpec = reflectedRay;
+	float specEnv = 1.0;
+	float specHalo = 1.0;`
+		: SPECULAR.cameraEye
+			? // Rays converge on the camera's real position. uCamPos already
+				// holds it under the isometric camera, so there is nothing to
+				// tune: the focus of the highlight is set by the camera being
+				// 56.7m out, which is a fact rather than a parameter. The halo
+				// stays on, so the dense core keeps its slacker surround.
+				`vec3 reflectedSpec = reflect(-normalize(uCamPos - vWorld), normal);
+	float specEnv = 1.0;
+	float specHalo = 1.0;`
+		: SPECULAR.envelope
+			? // The mirror test stays the honest orthographic one, so timing is
+				// untouched. The envelope is the facet slope a notional viewer
+				// would need here, run through an anisotropic Gaussian — the
+				// Cox-Munk glitter model, whose axes are along and across the
+				// wind. It peaks at 1 at the specular point and only falls off,
+				// so it can shape but never brighten.
+				`vec3 envEye = normalize(uViewDir * uSpecEnvDist - vWorld);
+	vec3 envH = normalize(envEye + normalize(uSunDir));
+	vec2 envTilt = vec2(envH.x, envH.z) / max(envH.y, 0.001);
+	float envAlong = dot(envTilt, vec2(${f(Math.cos(activeField.windAngle))}, ${f(Math.sin(activeField.windAngle))}));
+	float envCross = envTilt.x * ${f(Math.sin(activeField.windAngle))} - envTilt.y * ${f(Math.cos(activeField.windAngle))};
+	float envQa = envAlong * envAlong;
+	float envQc = envCross * envCross;
+	vec3 reflectedSpec = reflectedRay;
+	float specEnv = exp(-0.5 * (envQa / uSpecVar.x + envQc / uSpecVar.y));
+	float specHalo = exp(-0.5 * (envQa / uSpecVar.z + envQc / uSpecVar.w));`
+			: SPECULAR.virtualEye
+				? `vec3 eyeP = uViewDir * ${f(SPECULAR.eyeDistance)};
+	vec3 reflectedSpec = reflect(-normalize(eyeP - vWorld), normal);
+	float specEnv = 1.0;
+	float specHalo = 0.0;`
+				: `vec3 reflectedSpec = reflectedRay;
+	float specEnv = 1.0;
+	float specHalo = 0.0;`;
+
 	const solidFragment = `
 uniform vec3 uFogColor;
 uniform float uFogDensity;
@@ -451,6 +567,11 @@ uniform vec3 uSunDir;
 uniform vec3 uSunColor;
 uniform float uSunI;
 uniform vec3 uViewDir;
+uniform vec3 uCamPos;
+uniform float uSpecEnvDist;
+uniform vec4 uSpecVar;
+uniform float uSpecHaloGain;
+uniform float uSpecFade;
 uniform vec3 uLightColor;
 uniform float uLightI;
 uniform sampler2D uCausticMap;
@@ -655,6 +776,12 @@ void main() {
 		${ENABLE.fftDetail ? '+ detailSlope(vWorld.xz, uTime)' : ''}
 		${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
 	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
+	// THE view direction for this pixel. Under the isometric camera it is
+	// one constant for the whole screen — which is exactly why that camera
+	// cannot produce a glitter path. Under a real perspective camera it
+	// varies per pixel, and everything downstream (refraction, Fresnel,
+	// specular) becomes honest with no further special-casing.
+	vec3 viewDir = ${PROFILE.perspectiveCamera ? 'normalize(uCamPos - vWorld)' : 'uViewDir'};
 
 
 	// Pool-style view refraction: the underwater scene is drawn BY the
@@ -664,7 +791,7 @@ void main() {
 	// and shatters with every wave and ripple, while the dry crown
 	// (rasterized normally above the surface) stays put, pencil-in-water
 	// style.
-	vec3 eye = -uViewDir;
+	vec3 eye = -viewDir;
 	${PROFILE.skipRefraction ? `vec3 transmitted = uFloorColor * (0.1 + 0.32 * uLightI);` : `
 	vec3 refr = refract(eye, normal, 0.7519);
 	vec3 oc = vWorld - SPHERE_C;
@@ -711,7 +838,7 @@ void main() {
 	// is what makes water read as a mirror at low angles.
 	vec3 reflectedRay = reflect(eye, normal);
 	${PROFILE.skipReflection ? `float fresnel = 0.25;
-	vec3 col = transmitted;` : `float facing = clamp(dot(normal, uViewDir), 0.0, 1.0);
+	vec3 col = transmitted;` : `float facing = clamp(dot(normal, viewDir), 0.0, 1.0);
 	float fresnel = mix(0.25, 1.0, pow(1.0 - facing, 3.0));
 	vec3 skyCol = mix(uSkyHorizon, uSkyZenith, clamp(reflectedRay.y, 0.0, 1.0));
 	vec3 col = mix(transmitted, skyCol, fresnel);`}
@@ -742,16 +869,17 @@ void main() {
 	${
 		PROFILE.skipSpecular
 			? ''
-			: `${
-					SPECULAR.virtualEye
-						? `vec3 eyeP = uViewDir * ${f(SPECULAR.eyeDistance)};
-	vec3 reflectedSpec = reflect(-normalize(eyeP - vWorld), normal);`
-						: `vec3 reflectedSpec = reflectedRay;`
-				}
+			: `${specularModeGlsl}
 	float sunAlign = max(dot(reflectedSpec, normalize(uSunDir)), 0.0);
 	float specSharp = mix(${f(SPECULAR.sharpClear)}, ${f(SPECULAR.sharpOvercast)}, uSunDiffusion);
 	float specGain = mix(${f(SPECULAR.gainClear)}, ${f(SPECULAR.gainOvercast)}, uSunDiffusion);
-	col += uSunColor * (uSunI * specGain * pow(sunAlign, specSharp)
+	// Dense core plus a slack, dim, wider lobe. The halo uses a LOWER
+	// exponent as well as a broader envelope, so it catches facets the
+	// core rejects — which is what keeps a shimmer alive as the sun drops
+	// and the required tilt runs past what the core will accept.
+	float specCore = pow(sunAlign, specSharp) * specEnv;
+	float specWash = pow(sunAlign, specSharp * ${f(SPECULAR.haloSharp)}) * specHalo;
+	col += uSunColor * (uSunI * specGain * uSpecFade * (specCore + uSpecHaloGain * specWash)
 		* mix(1.0, fresnel, ${f(SPECULAR.fresnelMix)}));`
 	}
 
@@ -841,7 +969,7 @@ void main() {
 	}`
 	}
 
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	${fogGlsl('fog')}
 	col = mix(col, uFogColor, fog);
 
 	gl_FragColor = vec4(col, 1.0);
@@ -1039,8 +1167,8 @@ void main() {
 	col = mix(col, uFoamColor, foam);
 
 	// Distance fade into the page background, doubling as moire control.
-	float fog = 1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ);
-	col = mix(col, uFogColor, clamp(fog, 0.0, 1.0));
+	${fogGlsl('fog')}
+	col = mix(col, uFogColor, fog);
 
 	gl_FragColor = vec4(col, 1.0);
 }`
@@ -1184,7 +1312,7 @@ void main() {
 
 	vec3 col = mix(dry, wet, submerged);
 
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	${fogGlsl('fog')}
 	col = mix(col, uFogColor, fog);
 	gl_FragColor = vec4(col, 1.0);
 }`
@@ -1296,7 +1424,7 @@ void main() {
 	// too — passing 0 here skipped the directional term entirely and
 	// left droplets a few percent brighter than the foam they came from.
 	vec3 lit = whitewaterLight(uColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	${fogGlsl('fog')}
 	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
 }`
 	});
@@ -1548,7 +1676,7 @@ void main() {
 	vec3 sn = vNrm.y < 0.0 ? -vNrm : vNrm;
 	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
 	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	${fogGlsl('fog')}
 	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
 }`
 	});
@@ -1768,7 +1896,7 @@ void main() {
 	vec3 sn = vNrm.y < 0.0 ? -vNrm : vNrm;
 	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
 	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	${fogGlsl('fog')}
 	gl_FragColor = vec4(mix(lit, uFogColor, fog), a);
 }`,
 		transparent: true,
@@ -1934,7 +2062,7 @@ void main() {
 	vec3 sn = vNrm.y < 0.0 ? -vNrm : vNrm;
 	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
 	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	${fogGlsl('fog')}
 	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
 }`
 	});
@@ -2079,7 +2207,7 @@ void main() {
 	// Speed drives amplitude and tattering (fast water throws more).
 	vGale = length(vel);
 }`,
-		fragmentShader: plumeFragmentGlsl()
+		fragmentShader: plumeFragmentGlsl(undefined, undefined, undefined, fogZBias)
 	});
 	// Query the driver's point-size ceiling once.
 	const maxPointSize = (() => {
@@ -2170,7 +2298,7 @@ void main() {
 	// Fade at the field's border so the domain edge never shows.
 	vec2 e = min(uv, 1.0 - uv);
 	a *= smoothstep(0.0, 0.04, min(e.x, e.y));
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	${fogGlsl('fog')}
 	gl_FragColor = vec4(mix(mistCol, uFogColor, fog * 0.75), a * 0.88);
 }`
 	});
@@ -2556,6 +2684,25 @@ void main() {
 			mistMaterial.uniforms.uMistTex.value = mistField.texture;
 
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
+			// SPECULAR ENVELOPE, from sun altitude. As the sun drops, its
+			// specular point slides out of view and the required facet tilt
+			// grows past what the core lobe accepts — which is what made the
+			// glitter's window so short. Widening the envelope and leaning on
+			// the halo follows the reflection out instead of losing it, the
+			// same way a real glitter path lengthens toward the horizon.
+			{
+				const sunAlt = Math.asin(Math.max(Math.min(env.lightDir[1], 1), -1)) * (180 / Math.PI);
+				const t = smooth01(sunAlt, SPECULAR.altHigh, SPECULAR.altLow);
+				const dist = SPECULAR.envDistance + (SPECULAR.envDistanceLow - SPECULAR.envDistance) * t;
+				const w = SPECULAR.envWidth + (SPECULAR.envWidthLow - SPECULAR.envWidth) * t;
+				const hw = w * SPECULAR.haloWidth;
+				const a2 = SPECULAR.anisotropy;
+				waterUniforms.uSpecEnvDist.value = dist;
+				waterUniforms.uSpecVar.value.set(w * a2, w / a2, hw * a2, hw / a2);
+				waterUniforms.uSpecHaloGain.value =
+					SPECULAR.haloGain + (SPECULAR.haloGainLow - SPECULAR.haloGain) * t;
+				waterUniforms.uSpecFade.value = smooth01(sunAlt, 0, SPECULAR.fadeAltDeg);
+			}
 			// Sub-light point on the sphere's surface: the sun's dot while
 			// the sun is up, the moon's while it is not.
 			const isDay = Math.sin((game.time / ENV.daySeconds - 0.25) * Math.PI * 2) > 0;
@@ -2812,14 +2959,25 @@ void main() {
 	});
 </script>
 
-<T.OrthographicCamera
-	makeDefault
-	position={[34, 30, 34]}
-	{zoom}
-	near={1}
-	far={400}
-	oncreate={(cam) => cam.lookAt(0, 0, 0)}
-/>
+{#if PROFILE.perspectiveCamera}
+	<T.PerspectiveCamera
+		makeDefault
+		position={perspPos}
+		fov={perspFov}
+		near={1}
+		far={PROFILE.perspectiveDistance * 3 + 400}
+		oncreate={(cam) => cam.lookAt(0, 0, 0)}
+	/>
+{:else}
+	<T.OrthographicCamera
+		makeDefault
+		position={[34, 30, 34]}
+		{zoom}
+		near={1}
+		far={400}
+		oncreate={(cam) => cam.lookAt(0, 0, 0)}
+	/>
+{/if}
 
 <T.DirectionalLight bind:ref={sun} position={[40, 60, 20]} intensity={env0.lightIntensity * 2} />
 <T.AmbientLight bind:ref={ambient} intensity={env0.ambientIntensity * 1.6} />

@@ -8,13 +8,11 @@ import { ENV } from './env';
  */
 export const game = $state({
 	/**
-	 * Seconds into the 24-minute day. Starts mid-afternoon with the sun 45
-	 * degrees above the horizon in the south-west (phase 0.604 on the env
-	 * sun arc): crosswise to the isometric camera's view axis, so
-	 * receivers show classic lit/shadow modeling. Phase 0.396 is the
-	 * mirrored morning pose.
+	 * Seconds into the 24-minute day. 0.63 is mid-afternoon, where the sun
+	 * glitter peaks for the current sun-path settings — the effect worth
+	 * opening on. Phase 0.396 is the mirrored morning pose.
 	 */
-	time: ENV.daySeconds * 0.604,
+	time: ENV.daySeconds * 0.63,
 	running: true
 });
 

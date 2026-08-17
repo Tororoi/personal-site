@@ -31,6 +31,10 @@ export function plumeFragmentGlsl(
    * place of the baked constants, so its sliders take effect without a
    * rebuild. The game passes nothing and keeps the constants. */
   live: { reachRadii?: string; clipFrac?: string } = {},
+  /** Metres to subtract from vViewZ before fogging, so fog measures depth
+   * into the scene rather than distance from the lens. See fogZBias in
+   * Scene.svelte. */
+  fogZBias = 0,
 ): string {
   const REACH = live.reachRadii ?? f(PLUME.reachRadii)
   const CLIP = live.clipFrac ?? f(PLUME.clipFrac)
@@ -145,7 +149,8 @@ void main() {
 	// sky/sun COLOUR with no directional relief — airborne droplets are
 	// lit from every side anyway.
 	vec3 lit = whitewaterLight(uColor, vec3(0.0, 1.0, 0.0), 0.0);
-	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
+	float fogZ = max(vViewZ - ${fogZBias.toFixed(4)}, 0.0);
+	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * fogZ * fogZ), 0.0, 1.0);
 	gl_FragColor = vec4(mix(lit, uFogColor, fog), a);
 }`
 }

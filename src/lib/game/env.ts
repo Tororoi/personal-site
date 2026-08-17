@@ -60,9 +60,38 @@ const ENV_BASE = {
 	moonPathAngleDeg: 50,
 	/** The moon's own offset, read exactly like the sun's. */
 	moonPathOffsetDeg: 0,
+	/**
+	 * AUTO-AIM THE GLITTER. When on, sunPathAngleDeg is ignored and solved
+	 * for instead, so the sun crosses the camera's view axis — and the
+	 * glitter path stands vertical on screen — at sunGlintPhase.
+	 *
+	 * Why this rather than a rule that keeps it vertical all day: it cannot
+	 * be done. The sun's azimuth is angle + atan2(sin off, cos off cos t),
+	 * so it is constant only when the offset is zero — and a zero offset
+	 * forces the arc through the zenith and pins the azimuth to the angle
+	 * itself, which is what puts the glitter off-screen once the angle is
+	 * chosen for how it lights objects rather than where it reflects.
+	 * Tilt the arc and the azimuth must sweep. What you CAN choose is
+	 * WHEN the sweep crosses the camera, which is what this does.
+	 */
+	alignGlint: false,
+	/**
+	 * Day phase at which to stand the glitter vertical, when alignGlint is
+	 * on. 0.66 is mid-afternoon, where the sun is low enough for a long
+	 * reflection but still well clear of the horizon.
+	 */
+	glintPhase: 0.66,
 	/** Hold the clock where it is, so a phase can be studied still. */
 	freezeTime: false
 };
+
+/**
+ * Azimuth the camera looks along, degrees. The camera sits at (34, 30, 34)
+ * facing the origin, so it looks toward 225 — and a glitter path lying on
+ * that bearing (or its opposite, 45) is the one that reads as vertical on
+ * screen rather than running off at an angle.
+ */
+export const CAMERA_AZIMUTH_DEG = 225;
 
 /** As written in this file, before any saved override. */
 export const ENV_DEFAULTS: Record<string, Knob> = { ...ENV_BASE };
@@ -212,6 +241,22 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 
 const DEG = Math.PI / 180;
 
+/**
+ * The sun's path angle actually in force: the knob, or the value solved to
+ * put the glitter on the camera axis at ENV.glintPhase.
+ *
+ * Inverts azimuth(t) = angle + atan2(sin off, cos off * cos t) for `angle`
+ * at the chosen phase. Exported because the tuning panel reports the
+ * derived value — a knob that is silently ignored is worse than no knob.
+ */
+export function effectiveSunAngleDeg(): number {
+	if (!ENV.alignGlint) return ENV.sunPathAngleDeg;
+	const off = ENV.sunPathOffsetDeg * DEG;
+	const theta = (ENV.glintPhase - 0.25) * Math.PI * 2;
+	const swing = Math.atan2(Math.sin(off), Math.cos(off) * Math.cos(theta)) / DEG;
+	return CAMERA_AZIMUTH_DEG - swing;
+}
+
 export function computeEnv(phase: number): Env {
 	const p = ((phase % 1) + 1) % 1;
 
@@ -237,7 +282,11 @@ export function computeEnv(phase: number): Env {
 	// The moon rides the same clock half a turn later, so it is up
 	// exactly when the sun is down.
 	const bodyTheta = usingSun ? theta : theta + Math.PI;
-	const angle = (usingSun ? ENV.sunPathAngleDeg : ENV.moonPathAngleDeg) * DEG;
+	const sunAngle = effectiveSunAngleDeg();
+	// The moon keeps its own angle as a DELTA off the sun's, so an
+	// auto-aimed sun does not leave the two arcs in unrelated places.
+	const angle =
+		(usingSun ? sunAngle : sunAngle + (ENV.moonPathAngleDeg - ENV.sunPathAngleDeg)) * DEG;
 	const offset = (usingSun ? ENV.sunPathOffsetDeg : ENV.moonPathOffsetDeg) * DEG;
 
 	// The path is built from three perpendicular directions: `u`, the

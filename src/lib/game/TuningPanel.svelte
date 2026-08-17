@@ -22,7 +22,7 @@
 -->
 <script lang="ts">
 	import { ENABLE, TUNING_DEFAULTS, TUNING_GROUPS } from './tuning';
-	import { ENV, ENV_DEFAULTS } from './env';
+	import { CAMERA_AZIMUTH_DEG, computeEnv, effectiveSunAngleDeg, ENV, ENV_DEFAULTS } from './env';
 	import { game } from './state.svelte';
 	import {
 		clearOverrides,
@@ -67,6 +67,9 @@
 	// Mirror of ENV, because ENV itself is a plain object the UI cannot
 	// observe. Writes go to both.
 	let envVals = $state<Record<string, Knob>>({ ...ENV });
+	// ENV is a plain object, so nothing observes it; bumped on every write
+	// to drive the derived sun-geometry readout below.
+	let envTick = $state(0);
 
 	const pendingCount = $derived(
 		Object.values(pending).reduce((n, g) => n + Object.keys(g).length, 0)
@@ -100,6 +103,7 @@
 
 	function setEnv(k: string, v: Knob) {
 		envVals[k] = v;
+		envTick++;
 		(ENV as unknown as Record<string, Knob>)[k] = v;
 		const o = loadOverrides();
 		const next = { ...(o.ENV ?? {}) };
@@ -162,6 +166,7 @@
 		daySeconds: { min: 10, max: 1200, step: 5 },
 		// Offsets stop well short of 90, where the circle would collapse to
 		// a point at the pole and the arc would have no rise or set at all.
+		glintPhase: { min: 0.26, max: 0.74, step: 0.005 },
 		sunPathAngleDeg: { min: 0, max: 360, step: 1 },
 		sunPathOffsetDeg: { min: -75, max: 75, step: 1 },
 		moonPathAngleDeg: { min: 0, max: 360, step: 1 },
@@ -174,9 +179,46 @@
 		sunPathOffsetDeg: 'degrees the midday sun falls short of overhead — leans the arc',
 		moonPathAngleDeg: 'same, for the moon',
 		moonPathOffsetDeg: 'same, for the moon',
+		glintPhase: 'when the glitter stands vertical (alignGlint on)',
 		daySeconds: 'real seconds per full day'
 	};
+	// Everything the sun-path knobs imply, so the geometry is readable
+	// instead of something you find by dragging. The glitter path lies on
+	// the sun's azimuth and only reads as vertical when that matches the
+	// camera axis, so the deviation is the number that matters.
+	const D = 180 / Math.PI;
+	const norm360 = (a: number) => ((a % 360) + 360) % 360;
+	const sunGeom = $derived.by(() => {
+		// envTick makes this recompute when a knob moves; ENV is a plain object.
+		void envTick;
+		const angle = effectiveSunAngleDeg();
+		const off = ENV.sunPathOffsetDeg;
+		const theta = (phase - 0.25) * Math.PI * 2;
+		const swing = Math.atan2(
+			Math.sin(off / D),
+			Math.cos(off / D) * Math.cos(theta)
+		) * D;
+		const az = norm360(angle + swing);
+		let dev = Math.abs(az - CAMERA_AZIMUTH_DEG);
+		dev = Math.min(dev, 360 - dev, Math.abs(az - 45), 360 - Math.abs(az - 45));
+		const up = computeEnv(phase).lightDir[1] > 0;
+		// Phase where the sweep crosses the camera axis, if it ever does.
+		const c = Math.tan(off / D) / Math.tan((CAMERA_AZIMUTH_DEG - angle) / D);
+		const alignAt = Math.abs(c) <= 1 ? 0.25 + Math.acos(c) / (Math.PI * 2) : null;
+		return {
+			angle,
+			rise: norm360(angle + off),
+			set: norm360(angle + 180 - off),
+			peak: 90 - Math.abs(off),
+			az,
+			dev,
+			up,
+			alignAt
+		};
+	});
+
 	const ENV_KNOBS = [
+		'glintPhase',
 		'sunPathAngleDeg',
 		'sunPathOffsetDeg',
 		'moonPathAngleDeg',
@@ -328,6 +370,33 @@
 						onpointerdown={grabPhase}
 						oninput={(e) => setPhase(+e.currentTarget.value)}
 					/>
+				</div>
+
+				<label class="bool">
+					<input
+						type="checkbox"
+						checked={!!envVals.alignGlint}
+						onchange={(e) => setEnv('alignGlint', e.currentTarget.checked)}
+					/>
+					<span class="name" class:mod={envVals.alignGlint !== ENV_DEFAULTS.alignGlint}
+						>alignGlint</span
+					>
+				</label>
+
+				<div class="geom">
+					<div><span>sun azimuth</span><span>{sunGeom.az.toFixed(0)}&deg;</span></div>
+					<div class:good={sunGeom.dev < 8} class:bad={sunGeom.dev > 25}>
+						<span>off camera axis</span><span>{sunGeom.dev.toFixed(0)}&deg;{sunGeom.up ? '' : ' (sun down)'}</span>
+					</div>
+					<div><span>rises / sets</span><span>{sunGeom.rise.toFixed(0)}&deg; / {sunGeom.set.toFixed(0)}&deg;</span></div>
+					<div><span>peak altitude</span><span>{sunGeom.peak.toFixed(0)}&deg;</span></div>
+					<div class:bad={sunGeom.alignAt === null}>
+						<span>vertical at phase</span>
+						<span>{sunGeom.alignAt === null ? 'never' : sunGeom.alignAt.toFixed(3)}</span>
+					</div>
+					{#if envVals.alignGlint}
+						<div><span>solved angle</span><span>{sunGeom.angle.toFixed(1)}&deg;</span></div>
+					{/if}
 				</div>
 
 				<label class="bool">
@@ -544,6 +613,27 @@
 		margin: 0;
 		color: #7f9ab0;
 		line-height: 1.35;
+	}
+
+	.geom {
+		margin: 2px 0 4px;
+		padding: 4px 6px;
+		background: #0d151d;
+		border: 1px solid #1c2833;
+		border-radius: 3px;
+		font-variant-numeric: tabular-nums;
+	}
+	.geom div {
+		display: flex;
+		justify-content: space-between;
+		gap: 8px;
+		color: #7f9ab0;
+	}
+	.geom .good {
+		color: #8fd4b4;
+	}
+	.geom .bad {
+		color: #d3a34a;
 	}
 
 	.help {
