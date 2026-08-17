@@ -10,10 +10,64 @@
  * module produces.
  */
 
-/** 24 real minutes per in-game day. */
-// A full day in 240s: long enough to read as a cycle, short enough to
-// watch dawn, noon, dusk and night in one sitting while tuning light.
-export const DAY_SECONDS = 240;
+import { applyOverrides, type Knob } from './tuningstore';
+
+/**
+ * The environment knobs the tuning panel drives LIVE — no reload, unlike
+ * everything in tuning.ts. They can be live precisely because nothing
+ * bakes them: computeEnv() reads all of them on every call, once a frame.
+ */
+const ENV_BASE = {
+	/**
+	 * Real seconds per in-game day. 240 is long enough to read as a cycle,
+	 * short enough to watch dawn, noon, dusk and night in one sitting.
+	 */
+	daySeconds: 240,
+	/**
+	 * ANGLE — which way the arc runs, in degrees: the compass bearing the
+	 * sun rises from. 0 = +X, increasing toward +Z (clockwise from above),
+	 * the same convention as windAngle. Spinning this turns the whole path
+	 * about the vertical axis; it does not change its shape.
+	 *
+	 * 45 lays the path along the camera's own axis. The camera sits at
+	 * (34, 30, 34), azimuth 45 degrees, so the sun rises behind it and sets
+	 * at azimuth 225 — directly opposite, in the middle of the view. That
+	 * is the arrangement that makes a specular highlight plainest: at dusk
+	 * the sun is straight ahead and its reflection comes back along the
+	 * line of sight.
+	 */
+	sunPathAngleDeg: 45,
+	/**
+	 * OFFSET — how far the arc is pushed off centre, in degrees.
+	 *
+	 * At 0 the path is a great circle: it cuts through the middle of the
+	 * sphere and passes straight overhead at midday, which is only what
+	 * the sun really does on the equator. Winding this up slides the whole
+	 * circle sideways off the sphere's centre, so it becomes a smaller
+	 * circle leaning to one side and the sun tracks across at an angle
+	 * instead of climbing to the top — the everywhere-else case, and how a
+	 * season or a latitude reads. The number IS the miss distance: 30
+	 * means the highest the sun gets is 30 degrees short of straight up.
+	 * Sign picks the side it leans to.
+	 *
+	 * Sunrise and sunset stay put no matter what this is, so day length
+	 * and the sun/moon handover are untouched — only the height and the
+	 * lean of the arc between them change.
+	 */
+	sunPathOffsetDeg: 0,
+	/** The moon's own angle. 50 keeps its circle crossing the sun's rather
+	 * than sitting on top of it. */
+	moonPathAngleDeg: 50,
+	/** The moon's own offset, read exactly like the sun's. */
+	moonPathOffsetDeg: 0,
+	/** Hold the clock where it is, so a phase can be studied still. */
+	freezeTime: false
+};
+
+/** As written in this file, before any saved override. */
+export const ENV_DEFAULTS: Record<string, Knob> = { ...ENV_BASE };
+
+export const ENV = applyOverrides('ENV', ENV_BASE);
 
 export type RGB = [number, number, number];
 
@@ -156,21 +210,7 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
 	return t * t * (3 - 2 * t);
 }
 
-/**
- * Headings of the sun's and moon's orbital planes, radians, measured
- * like windAngle (0 = +X, increasing toward +Z = clockwise seen from
- * above). The moon's plane is 5 degrees further round again, so the two
- * circles cross rather than coincide.
- *
- * PI/4 puts the plane on the camera's own axis. The camera sits at
- * (34, 30, 34), azimuth 45 degrees, so a body on this heading rises
- * behind it and sets at azimuth 225 — directly opposite, in the middle
- * of the view. That is the arrangement that makes a specular highlight
- * plainest: at dusk the sun is straight ahead and its reflection comes
- * back along the line of sight.
- */
-const SUN_PATH_HEADING = Math.PI / 4;
-const MOON_PATH_HEADING = SUN_PATH_HEADING + (5 * Math.PI) / 180;
+const DEG = Math.PI / 180;
 
 export function computeEnv(phase: number): Env {
 	const p = ((phase % 1) + 1) % 1;
@@ -197,12 +237,30 @@ export function computeEnv(phase: number): Env {
 	// The moon rides the same clock half a turn later, so it is up
 	// exactly when the sun is down.
 	const bodyTheta = usingSun ? theta : theta + Math.PI;
-	const heading = usingSun ? SUN_PATH_HEADING : MOON_PATH_HEADING;
-	const hx = Math.cos(heading);
-	const hz = Math.sin(heading);
+	const angle = (usingSun ? ENV.sunPathAngleDeg : ENV.moonPathAngleDeg) * DEG;
+	const offset = (usingSun ? ENV.sunPathOffsetDeg : ENV.moonPathOffsetDeg) * DEG;
+
+	// The path is built from three perpendicular directions: `u`, the
+	// horizontal bearing the body rises from; world up; and `n`, the
+	// horizontal direction square to both, which is the axis the circle
+	// slides along when it comes off centre.
+	const ux = Math.cos(angle);
+	const uz = Math.sin(angle);
+	const nx = -uz;
+	const nz = ux;
 	const ct = Math.cos(bodyTheta);
 	const st = Math.sin(bodyTheta);
-	const lightDir: RGB = [hx * ct, st, hz * ct];
+
+	// With offset 0 this is u*cos + up*sin: a great circle through the
+	// zenith. Offset shifts the circle sin(offset) of the way along n and
+	// shrinks its radius to cos(offset), which is what keeps every point
+	// on the unit sphere — the circle stays ON the sphere, just no longer
+	// centred on it. Peak altitude falls to 90 - offset degrees, while the
+	// horizon crossings stay at bodyTheta 0 and PI, because the vertical
+	// component is cos(offset)*sin(bodyTheta) and n is horizontal.
+	const shift = Math.sin(offset);
+	const ring = Math.cos(offset);
+	const lightDir: RGB = [nx * shift + ux * ct * ring, st * ring, nz * shift + uz * ct * ring];
 
 	// Dim through the handover so the light never pops between sun and moon.
 	const horizonFade = smoothstep(0.02, 0.14, Math.abs(sunAltitude));

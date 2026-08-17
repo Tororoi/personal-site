@@ -21,7 +21,7 @@
  */
 
 import { ENABLE, WIND } from './tuning'
-import { activeField, sampleSurface, type SurfaceSample } from './waves'
+import { activeField, sampleSurface, surfaceHeight, type SurfaceSample } from './waves'
 
 export const MAX_EVENTS = 8
 
@@ -166,6 +166,21 @@ export function eventSurface(
 }
 
 /** Full ocean surface: ambient field plus event crumble. Floaters use THIS. */
+/**
+ * Ocean height at a point, allocation-free. The twin of sampleOcean for
+ * callers that only need the height — see surfaceHeight() for why.
+ */
+export function oceanHeight(
+  x: number,
+  z: number,
+  t: number,
+  ampScale = 1,
+  iterations = 3,
+): number {
+  const h = surfaceHeight(x, z, t, ampScale, iterations)
+  return h + eventSurface(x, z, t, h)
+}
+
 export function sampleOcean(
   x: number,
   z: number,

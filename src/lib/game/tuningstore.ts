@@ -1,0 +1,96 @@
+/**
+ * Persistence for the in-page tuning panel (TuningPanel.svelte).
+ *
+ * WHY LOCALSTORAGE AND A RELOAD, rather than live-patching the running
+ * scene: most of these values are baked into GLSL as literals, and not
+ * only at component construction — foam.ts, ripples.ts, caustics.ts and
+ * mistfield.ts assemble their shader strings at MODULE scope, which runs
+ * once per page load. Remounting the canvas would rebuild the water
+ * material against fresh values while those module-level shaders kept
+ * the old ones, so half the change would land and half would not. That
+ * failure is silent and looks exactly like the effect not working, which
+ * is the worst possible thing to hand someone who is tuning.
+ *
+ * A reload sidesteps the whole class of problem: every module body reruns
+ * and every literal is re-baked. The scene is deterministic from its seed,
+ * so it comes back the same apart from the change under test.
+ *
+ * Overrides are applied by each config module at ITS OWN module scope, so
+ * importers only ever observe patched values — ESM guarantees a module
+ * body completes before any importer's does.
+ */
+
+export type Knob = number | boolean;
+export type Overrides = Record<string, Record<string, Knob>>;
+
+const KEY = 'game-tuning-overrides';
+
+export function loadOverrides(): Overrides {
+	if (typeof localStorage === 'undefined') return {};
+	try {
+		const raw = localStorage.getItem(KEY);
+		const parsed = raw ? JSON.parse(raw) : null;
+		return parsed && typeof parsed === 'object' ? (parsed as Overrides) : {};
+	} catch {
+		// Corrupt JSON, or storage blocked (private mode, embedded webview).
+		// Tuning is a dev affordance; never let it stop the game booting.
+		return {};
+	}
+}
+
+export function saveOverrides(o: Overrides) {
+	if (typeof localStorage === 'undefined') return;
+	try {
+		localStorage.setItem(KEY, JSON.stringify(o));
+	} catch {
+		/* quota or blocked storage */
+	}
+}
+
+export function clearOverrides() {
+	if (typeof localStorage === 'undefined') return;
+	try {
+		localStorage.removeItem(KEY);
+	} catch {
+		/* blocked storage */
+	}
+}
+
+/**
+ * Read once at module load so every group sees the same snapshot, and so
+ * a panel that saves mid-session cannot half-apply to modules that have
+ * not been evaluated yet.
+ */
+const SAVED = loadOverrides();
+
+// MIGRATION — the env path knobs were reworked from (sun heading, moon
+// delta) to an angle and an offset per body. `moonPathOffsetDeg` came
+// through that rename with its NAME intact and its MEANING changed, which
+// is the one case applyOverrides cannot detect: it type-checks and lands
+// silently as a wrong value. The dropped `sunPathHeadingDeg` identifies a
+// set written before the rework, so those are discarded outright.
+if (SAVED.ENV && 'sunPathHeadingDeg' in SAVED.ENV) {
+	delete SAVED.ENV;
+	saveOverrides(SAVED);
+}
+
+/**
+ * Patch one config group in place from the saved set, and hand it back so
+ * it can be used as an initialiser.
+ *
+ * Unknown and type-mismatched keys are skipped rather than trusted: the
+ * store outlives the code, so a knob that was renamed or changed type
+ * since the override was written must not resurrect itself as a stray
+ * property or a string where a number is expected.
+ */
+export function applyOverrides<T extends Record<string, Knob>>(group: string, target: T): T {
+	const saved = SAVED[group];
+	if (!saved) return target;
+	const t = target as Record<string, Knob>;
+	for (const [k, v] of Object.entries(saved)) {
+		if (!(k in t)) continue;
+		if (typeof t[k] !== typeof v) continue;
+		t[k] = v;
+	}
+	return target;
+}

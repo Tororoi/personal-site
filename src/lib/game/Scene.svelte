@@ -6,7 +6,6 @@
 	import {
 		activeField,
 		causticsGlsl,
-		detailSlopeGlsl,
 		objectWaveGlsl,
 		objectWaveSlopeGlsl,
 		significantAmplitude,
@@ -32,12 +31,14 @@
 		setScanExtent,
 		setViewQuad,
 		sprayParticles,
+		sprayCheckStats,
 		updateSpray
 	} from './spray';
 	import { currentVector } from './current';
 	import { MistField, MIST_EXTENT } from './mistfield';
 	import {
 		addFoam,
+		foamMass,
 		CONTACT_FOAMINESS,
 		foamFlow,
 		FoamField,
@@ -50,20 +51,22 @@
 		DROPLET,
 		ENABLE,
 		f,
+		FFT,
 		FOAM,
 		FROTH,
 		LOOP,
 		BOWCREST,
 		MIST,
 		OBJWAVE,
+		PROFILE,
 		SPECULAR,
 		PLUME
 	} from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
-	import { computeEnv, DAY_SECONDS } from './env';
-	import { game } from './state.svelte';
+	import { computeEnv, ENV } from './env';
+	import { game, perf } from './state.svelte';
 
 	let { active = true }: { active?: boolean } = $props();
 
@@ -78,7 +81,7 @@
 	// sun in the south-east, 0.5 noon, 0.604 = 45 deg sun in the
 	// south-west [crosswise side light, the default], 0.75 sunset).
 	const todParam = urlParams.get('tod');
-	if (todParam !== null) game.time = DAY_SECONDS * parseFloat(todParam);
+	if (todParam !== null) game.time = ENV.daySeconds * parseFloat(todParam);
 	const zoom = mobile ? 18 : 26;
 
 	// ---------- Water ----------
@@ -134,7 +137,7 @@
 	}
 	window.addEventListener('resize', onWindowResize);
 
-	const env0 = computeEnv(game.time / DAY_SECONDS);
+	const env0 = computeEnv(game.time / ENV.daySeconds);
 
 	// Sun diffusion from the sea preset's cloud deck (waves.ts sky), 0
 	// clear .. 1 heavy overcast. Feeds three effects of the SAME cause:
@@ -402,6 +405,9 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	// fresh transform of the same spectrum evolved to the current time — so
 	// it can be skipped or restarted freely.
 	const fftDetail = ENABLE.fftDetail ? makeFftDetail() : null;
+	// Frame counter for FFT.stepEvery. Each step is self-contained, so a
+	// skipped frame just leaves the last slope texture in place.
+	let fftFrame = 0;
 
 	// Forward-splat caustic map (pool-style differential area) over the
 	// full wave surface, blurred by the preset's sun diffusion.
@@ -483,7 +489,7 @@ ${whitewaterLightGlsl()}
 ${foamGlsl()}
 ${ripplesGlsl()}
 ${wavesGlsl()}
-${ENABLE.fftDetail ? fftSlopeGlsl() : detailSlopeGlsl()}
+${ENABLE.fftDetail ? fftSlopeGlsl() : ''}
 ${ENABLE.objectWave ? objWaveGlsl : ''}
 ${ENABLE.objectWave ? objectWaveSlopeGlsl() : ''}
 
@@ -644,7 +650,8 @@ void main() {
 	// the surface for lighting without a single extra vertex — and the
 	// specular lives on exactly that, since a glint appears only where
 	// the normal reaches the mirror angle.
-	vec2 slope = vSlope + rippleShadeGrad(vWorld.xz) + detailSlope(vWorld.xz, uTime)
+	vec2 slope = vSlope + ${PROFILE.skipRipple ? 'vec2(0.0)' : 'rippleShadeGrad(vWorld.xz)'}
+		${ENABLE.fftDetail ? '+ detailSlope(vWorld.xz, uTime)' : ''}
 		${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
 	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
 
@@ -657,6 +664,7 @@ void main() {
 	// (rasterized normally above the surface) stays put, pencil-in-water
 	// style.
 	vec3 eye = -uViewDir;
+	${PROFILE.skipRefraction ? `vec3 transmitted = uFloorColor * (0.1 + 0.32 * uLightI);` : `
 	vec3 refr = refract(eye, normal, 0.7519);
 	vec3 oc = vWorld - SPHERE_C;
 	float b = dot(oc, refr);
@@ -690,7 +698,7 @@ void main() {
 		// Same flat shading as the backdrop mesh, which this raytrace has
 		// effectively replaced under the water.
 		transmitted = uFloorColor * (0.1 + 0.32 * uLightI);
-	}
+	}`}
 	// The tint the old translucent layer contributed by alpha blending,
 	// now composed in-shader; uAlphaBase is still the clarity knob.
 	transmitted = mix(transmitted, uWaterColor, uAlphaBase);
@@ -700,11 +708,12 @@ void main() {
 	// living IN the sky — instead of a single flat sky color. His fresnel
 	// too: a substantial base reflectivity rising to 1 at grazing, which
 	// is what makes water read as a mirror at low angles.
-	float facing = clamp(dot(normal, uViewDir), 0.0, 1.0);
-	float fresnel = mix(0.25, 1.0, pow(1.0 - facing, 3.0));
 	vec3 reflectedRay = reflect(eye, normal);
+	${PROFILE.skipReflection ? `float fresnel = 0.25;
+	vec3 col = transmitted;` : `float facing = clamp(dot(normal, uViewDir), 0.0, 1.0);
+	float fresnel = mix(0.25, 1.0, pow(1.0 - facing, 3.0));
 	vec3 skyCol = mix(uSkyHorizon, uSkyZenith, clamp(reflectedRay.y, 0.0, 1.0));
-	vec3 col = mix(transmitted, skyCol, fresnel);
+	vec3 col = mix(transmitted, skyCol, fresnel);`}
 
 	// SUN SPECULAR — the sun's mirror image, added on top of the Fresnel
 	// blend rather than mixed into the reflected sky.
@@ -730,16 +739,20 @@ void main() {
 	// virtual eye supplies exactly that and nothing else; the sky
 	// reflection and Fresnel keep the true direction either way.
 	${
-		SPECULAR.virtualEye
-			? `vec3 eyeP = uViewDir * ${f(SPECULAR.eyeDistance)};
+		PROFILE.skipSpecular
+			? ''
+			: `${
+					SPECULAR.virtualEye
+						? `vec3 eyeP = uViewDir * ${f(SPECULAR.eyeDistance)};
 	vec3 reflectedSpec = reflect(-normalize(eyeP - vWorld), normal);`
-			: `vec3 reflectedSpec = reflectedRay;`
-	}
+						: `vec3 reflectedSpec = reflectedRay;`
+				}
 	float sunAlign = max(dot(reflectedSpec, normalize(uSunDir)), 0.0);
 	float specSharp = mix(${f(SPECULAR.sharpClear)}, ${f(SPECULAR.sharpOvercast)}, uSunDiffusion);
 	float specGain = mix(${f(SPECULAR.gainClear)}, ${f(SPECULAR.gainOvercast)}, uSunDiffusion);
 	col += uSunColor * (uSunI * specGain * pow(sunAlign, specSharp)
-		* mix(1.0, fresnel, ${f(SPECULAR.fresnelMix)}));
+		* mix(1.0, fresnel, ${f(SPECULAR.fresnelMix)}));`
+	}
 
 	// Whiteness: the active boil (churn/ripple seethe) plus PERSISTENT
 	// foam residue (foam.ts) — patches left behind by the strongest
@@ -772,7 +785,7 @@ void main() {
 	// frame by frame from a re-jittering scan. gl_FrontFacing is the
 	// same fact, exact, stable and with no state at all behind it.
 	// EXACT: the inverted sheet itself, straight off the rasteriser.
-	float backface = ${ENABLE.loopWhite ? `(gl_FrontFacing ? 0.0 : 1.0) * ${f(LOOP.backfaceWhite)}` : '0.0'};
+	${PROFILE.skipLoopWhite ? '' : `float backface = ${ENABLE.loopWhite ? `(gl_FrontFacing ? 0.0 : 1.0) * ${f(LOOP.backfaceWhite)}` : '0.0'};
 	// RECONSTRUCTED: the Jacobian and overhang ramps. Refined per pixel
 	// only where the vertex estimate lands mid-ramp — a whole extra wave
 	// pass is not worth paying on water that is plainly one or the other.
@@ -786,7 +799,7 @@ void main() {
 			: '0.0'
 	};
 	ramps *= (1.0 - thin) * ${f(LOOP.rampWhite)};
-	float loopWhite = max(backface, ramps);
+	float loopWhite = max(backface, ramps);`}
 	// The two foams stay separate SUBSTANCES — the collar never enters
 	// the field, so it cannot drift, diffuse, decay or be governed by the
 	// field's mass budget — but they share one SKELETON. Feeding the
@@ -796,7 +809,7 @@ void main() {
 	// character, instead of simply dimming. Taking the max rather than
 	// summing also means one web where they overlap, not two drawn over
 	// each other.
-	float fieldT = ${ENABLE.foamField ? 'foamThicknessAt(vRest)' : '0.0'};
+	${PROFILE.skipFoam ? '' : `float fieldT = ${ENABLE.foamField ? 'foamThicknessAt(vRest)' : '0.0'};
 	// The pinned collar, ON TOP of whatever the field holds. Objects also
 	// EMIT into the field (foam.ts) and that foam arrives through fieldT,
 	// already drifting and dying like the rest — the two are meant to be
@@ -815,12 +828,16 @@ void main() {
 	float foamAmt = foamWeb(vRest, max(fieldT, contactT), vJacobian);
 	vec3 foamN = normalize(vec3(-slope.x, 1.0, -slope.y));
 	vec3 foamLit = whitewaterLight(uFoamColor, foamN, ${f(1 - FOAM.shapeFloor)});
-	vec3 flatLit = whitewaterLight(uFoamColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
-	col = mix(col, foamLit, foamAmt);
+	col = mix(col, foamLit, foamAmt);`}
+	${
+		PROFILE.skipLoopWhite
+			? ''
+			: `vec3 flatLit = whitewaterLight(uFoamColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
 	${
 		LOOP.debugThin
 			? 'col = mix(col, mix(flatLit, vec3(0.95, 0.15, 0.1), thin), max(backface, vPinchWhite));'
 			: 'col = mix(col, flatLit, loopWhite);'
+	}`
 	}
 
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * vViewZ * vViewZ), 0.0, 1.0);
@@ -2027,8 +2044,9 @@ void main() {
 	const crestSprayMesh = new THREE.Points(frothGeometry, crestSprayMaterial);
 	crestSprayMesh.frustumCulled = false;
 	crestSprayMesh.renderOrder = 6;
-	crestSprayMesh.visible = ENABLE.crestPlumes;
-	frothMesh.visible = ENABLE.froth;
+	crestSprayMesh.visible = ENABLE.crestPlumes && !PROFILE.hideSpray;
+	frothMesh.visible = ENABLE.froth && !PROFILE.hideFroth;
+	sprayMesh.visible = !PROFILE.hideSpray;
 
 
 
@@ -2205,7 +2223,7 @@ void main() {
 	/** Trace the light's path over the phases where `daytime` holds. The
 	 * sun rules the half where its altitude is positive; the moon takes
 	 * the other half. */
-	function lightPath(daytime: boolean, mat: THREE.LineBasicMaterial) {
+	function lightPathPoints(daytime: boolean) {
 		const pts: THREE.Vector3[] = [];
 		const R = SPHERE_CR + 0.06;
 		const STEPS = 160;
@@ -2223,12 +2241,33 @@ void main() {
 				)
 			);
 		}
-		const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), mat);
+		return pts;
+	}
+	function lightPath(daytime: boolean, mat: THREE.LineBasicMaterial) {
+		const line = new THREE.Line(
+			new THREE.BufferGeometry().setFromPoints(lightPathPoints(daytime)),
+			mat
+		);
 		line.renderOrder = 11;
 		return line;
 	}
 	const sunPath = lightPath(true, sunPathMat);
 	const moonPath = lightPath(false, moonPathMat);
+
+	// The two arcs are the only way to SEE what the path knobs do, so they
+	// have to follow them. The knobs are live (nothing bakes them), but the
+	// geometry was traced once at build, so it is re-traced whenever any of
+	// the four changes — compared as a string rather than watched, since
+	// ENV is a plain object no one is subscribed to.
+	let pathSig = '';
+	function refreshLightPaths() {
+		const sig = `${ENV.sunPathAngleDeg},${ENV.sunPathOffsetDeg},${ENV.moonPathAngleDeg},${ENV.moonPathOffsetDeg}`;
+		if (sig === pathSig) return;
+		pathSig = sig;
+		sunPath.geometry.setFromPoints(lightPathPoints(true));
+		moonPath.geometry.setFromPoints(lightPathPoints(false));
+	}
+	refreshLightPaths();
 	function depositContactFoam(t: number) {
 		for (const b of buoys) {
 			const s = sampleOcean(b.x, b.z, t, 1, 1);
@@ -2306,20 +2345,53 @@ void main() {
 	const frozen = freezeParam !== null;
 	if (frozen) waveTime = Number(freezeParam) || 12;
 
+	// GPU pass profiler (ENABLE.gpuProfile). renderer.info cannot see the
+	// offscreen sims — three resets it at the head of every render() — so
+	// the only way to price them from inside the page is to serialise with
+	// finish() and time the wall clock. That distorts the total, which is
+	// why it is behind a flag rather than always on.
+	const profGl = ENABLE.gpuProfile ? renderer.getContext() : null;
+	let profT = 0;
+	function profReset() {
+		if (!profGl) return;
+		profGl.finish();
+		profT = performance.now();
+	}
+	function lap(key: 'gpuRipple' | 'gpuFft' | 'gpuCaustic' | 'gpuFoam') {
+		if (!profGl) return;
+		profGl.finish();
+		const now = performance.now();
+		perf[key] = now - profT;
+		profT = now;
+	}
+
 	const task = useTask(
 		(delta) => {
+			const cpuT0 = performance.now();
+			let steps = 0;
+			// Accumulated ACROSS steps, so these show the true per-frame cost
+			// including the catch-up multiplier rather than one step's worth.
+			let tWhitecaps = 0;
+			let tSpray = 0;
+			let tCurrent = 0;
+			let mark = 0;
 			accumulator = Math.min(accumulator + delta, 0.25);
 			while (accumulator >= STEP) {
 				accumulator -= STEP;
+				steps++;
 				if (!frozen) waveTime += STEP;
-				game.time = (game.time + STEP) % DAY_SECONDS;
+				if (!ENV.freezeTime) game.time = (game.time + STEP) % ENV.daySeconds;
 				// Whitecap events and ballistic spray advance on the fixed
 				// step too (spray after whitecaps: it reads the freshly
 				// scanned break events).
 				setRippleClock(waveTime);
+				mark = performance.now();
 				updateWhitecaps(STEP, waveTime);
+				tWhitecaps += -mark + (mark = performance.now());
 				updateSpray(STEP, waveTime);
+				tSpray += -mark + (mark = performance.now());
 				advanceCurrent(STEP, waveTime);
+				tCurrent += performance.now() - mark;
 				contactFoamClock += STEP;
 				if (contactFoamClock >= CONTACT_FOAM_INTERVAL) {
 					contactFoamClock = 0;
@@ -2327,7 +2399,22 @@ void main() {
 				}
 			}
 
-			const env = computeEnv(game.time / DAY_SECONDS);
+			const stepEnd = performance.now();
+			perf.cpuWhitecaps = tWhitecaps;
+			perf.cpuSpray = tSpray;
+			perf.cpuCurrent = tCurrent;
+
+			const env = computeEnv(game.time / ENV.daySeconds);
+
+			// Read BEFORE this frame's offscreen sims run: three resets
+			// renderer.info at the head of every render() call, including
+			// render-target ones, so at the top of the task it still holds
+			// the previous frame's MAIN-scene totals. Reading it after the
+			// sims would report whichever 128x128 pass happened to run last.
+			perf.calls = renderer.info.render.calls;
+			perf.tris = renderer.info.render.triangles;
+			perf.w = renderer.domElement.width;
+			perf.h = renderer.domElement.height;
 
 			crestSprayMaterial.uniforms.uViewH.value =
 				renderer.domElement.height || window.innerHeight;
@@ -2367,29 +2454,36 @@ void main() {
 			}
 			// One wave-equation iteration, then point the water shader at the
 			// freshly written side of the ping-pong pair.
-			rippleSim.step(renderer);
+			profReset();
+			if (!PROFILE.skipRippleSim) rippleSim.step(renderer);
+			lap('gpuRipple');
 			waterUniforms.uRippleTex.value = rippleSim.texture;
-			if (fftDetail) {
+			if (fftDetail && fftFrame++ % FFT.stepEvery === 0) {
 				fftDetail.step(renderer, waveTime);
 				const [a, b] = fftDetail.textures;
 				waterUniforms.uFftA.value = a;
 				waterUniforms.uFftB.value = b;
 			}
+			lap('gpuFft');
 			backdropUniforms.uRippleCTex.value = rippleSim.texture;
-			causticMap.step(renderer, rippleSim.texture, waterUniforms.uSunDir.value, waveTime);
+			if (!PROFILE.skipCausticSim) {
+				causticMap.step(renderer, rippleSim.texture, waterUniforms.uSunDir.value, waveTime);
+			}
+			lap('gpuCaustic');
 			backdropUniforms.uCausticMap.value = causticMap.texture;
 			// One foam-field update per TWO frames (decay + diffusion +
 			// drift + queued deposits), then point the water shader at the
 			// fresh side.
 			foamAccum += Math.min(delta, 0.1);
 			foamEven = !foamEven;
-			if (foamEven) {
+			if (foamEven && !PROFILE.skipFoamSim) {
 				foamField.step(renderer, windSteady.x, windSteady.z, waveTime, foamAccum);
 				foamAccum = 0;
 				waterUniforms.uFoamTex.value = foamField.texture;
 				waterUniforms.uFoamFlow.value.set(foamFlow.x, foamFlow.z);
 				waterUniforms.uFoamWebTex.value = foamField.webTexture;
 			}
+			lap('gpuFoam');
 			// Wind projected to screen: NDC offset for a 1m downwind drift.
 			{
 				const wcam = camera.current;
@@ -2416,7 +2510,7 @@ void main() {
 			waterUniforms.uSunDir.value.set(env.lightDir[0], env.lightDir[1], env.lightDir[2]);
 			// Sub-light point on the sphere's surface: the sun's dot while
 			// the sun is up, the moon's while it is not.
-			const isDay = Math.sin((game.time / DAY_SECONDS - 0.25) * Math.PI * 2) > 0;
+			const isDay = Math.sin((game.time / ENV.daySeconds - 0.25) * Math.PI * 2) > 0;
 			const activeDot = isDay ? sunDot : moonDot;
 			activeDot.position.set(
 				SPHERE_CX + env.lightDir[0] * (SPHERE_CR + 0.06),
@@ -2425,6 +2519,7 @@ void main() {
 			);
 			sunDot.visible = isDay;
 			moonDot.visible = !isDay;
+			refreshLightPaths();
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
 			waterUniforms.uSunI.value = env.lightIntensity;
 			backdropUniforms.uFloorColor.value.setRGB(
@@ -2583,12 +2678,14 @@ void main() {
 
 			// Mirror the spray pool into the point cloud: birth ease-in and
 			// death ease-out on the size, velocity for the streak.
+			let liveSpray = 0;
 			for (let i = 0; i < MAX_SPRAY; i++) {
 				const p = sprayParticles[i];
 				if (p.size === 0 || waveTime < p.birth) {
 					spraySizes[i] = 0;
 					continue;
 				}
+				liveSpray++;
 				const grow = Math.min((waveTime - p.birth) / DROPLET.growTime, 1);
 				const shrink =
 					p.dying >= 0 ? Math.max(1 - (waveTime - p.dying) / DROPLET.dieTime, 0) : 1;
@@ -2604,6 +2701,24 @@ void main() {
 			spraySizeAttr.needsUpdate = true;
 			sprayVelAttr.needsUpdate = true;
 
+			// CPU time actually spent in here, and how many fixed steps it
+			// took. Together with the frame time these split the two cases
+			// that look identical from fps: if taskMs is most of the frame
+			// the sim is the cost, and if it is a rounding error the frame
+			// is going on fragment shading instead.
+			//
+			// `steps` matters on its own because the catch-up loop is a
+			// multiplier: at 50ms frames it runs the whole sim three times
+			// per rendered frame, so anything expensive in here is paid
+			// three times over.
+			perf.taskMs = performance.now() - cpuT0;
+			perf.steps = steps;
+			perf.foam = foamMass();
+			perf.spray = liveSpray;
+			perf.cpuRest = performance.now() - stepEnd;
+			const cs = sprayCheckStats();
+			perf.checkRun = cs.run;
+			perf.checkSkip = cs.skipped;
 		},
 		{ autoStart: false }
 	);
@@ -2656,12 +2771,16 @@ void main() {
 <T.DirectionalLight bind:ref={sun} position={[40, 60, 20]} intensity={env0.lightIntensity * 2} />
 <T.AmbientLight bind:ref={ambient} intensity={env0.ambientIntensity * 1.6} />
 
-<T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
+{#if !PROFILE.hideObjects}
+	<T.Mesh geometry={sphereGeometry} material={sphereMaterial} position={[3, -6, 2]} />
+{/if}
 
-<T is={sunPath} />
-<T is={moonPath} />
-<T is={sunDot} />
-<T is={moonDot} />
+{#if !PROFILE.hideObjects}
+	<T is={sunPath} />
+	<T is={moonPath} />
+	<T is={sunDot} />
+	<T is={moonDot} />
+{/if}
 
 <T is={sprayMesh} />
 
@@ -2672,9 +2791,11 @@ void main() {
 <T is={crestSprayMesh} />
 
 <T is={mistMesh} />
-<T.Mesh geometry={waterGeometry} material={waterMaterial} />
+{#if !PROFILE.hideWater}
+	<T.Mesh geometry={waterGeometry} material={waterMaterial} />
+{/if}
 
-{#each buoys as buoy, i (i)}
+{#each PROFILE.hideObjects ? [] : buoys as buoy, i (i)}
 	<T.Mesh
 		bind:ref={buoyMeshes[i]}
 		position={[buoy.x, 0, buoy.z]}

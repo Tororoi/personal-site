@@ -30,10 +30,10 @@
 
 import { addFoam } from './foam'
 import { queueMistSplat } from './mistfield'
-import { DROPLET, ENABLE, FROTH, MIST } from './tuning'
+import { DROPLET, ENABLE, FROTH, MIST, PROFILE } from './tuning'
 import { injectRipple } from './ripples'
-import { waves } from './waves'
-import { events, MAX_EVENTS, sampleOcean, windVector } from './whitecaps'
+import { waves, maxSurfaceRate, SIN_TABLE, COS_TABLE, TRIG_SCALE, TRIG_MASK } from './waves'
+import { events, MAX_EVENTS, oceanHeight, sampleOcean, windVector } from './whitecaps'
 
 export const MAX_SPRAY = DROPLET.maxCount
 
@@ -506,6 +506,15 @@ function orbital(u: number, v: number, t: number) {
  * small relative offset IS the particle's world position: it cannot
  * fall behind the loop no matter how the frame accelerates.
  */
+/**
+ * Result of loopFrame, reused. loopFrame is called once per loop droplet
+ * per step — thousands of times a frame — and returning a fresh object
+ * from it was allocating at exactly the rate that produced multi-second
+ * GC pauses in the landing check. Every call site consumes the fields
+ * immediately; do not hold one across a second call.
+ */
+const frameScratch = { vx: 0, vz: 0, swayX: 0, swayZ: 0, h: 0 }
+
 function loopFrame(u: number, v: number, t: number) {
   let vx = 0
   let vz = 0
@@ -515,11 +524,21 @@ function loopFrame(u: number, v: number, t: number) {
   let h = 0
   for (const w of waves) {
     const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
-    const sway = w.q * w.amp * Math.cos(theta)
+    // Table lookup (see waves.ts), and ONE sin per wave: the height and
+    // the pinch term are the same angle, and this used to call Math.sin
+    // twice for it on top of a Math.cos.
+    const f = theta * TRIG_SCALE
+    const i0 = Math.floor(f)
+    const fr = f - i0
+    const ia = i0 & TRIG_MASK
+    const ib = (i0 + 1) & TRIG_MASK
+    const sn = SIN_TABLE[ia] + (SIN_TABLE[ib] - SIN_TABLE[ia]) * fr
+    const cs = COS_TABLE[ia] + (COS_TABLE[ib] - COS_TABLE[ia]) * fr
+    const sway = w.q * w.amp * cs
     swayX += w.dirX * sway
     swayZ += w.dirZ * sway
-    h += w.amp * Math.sin(theta)
-    const pinch = w.q * w.amp * w.k * Math.sin(theta)
+    h += w.amp * sn
+    const pinch = w.q * w.amp * w.k * sn
     if (pinch <= 0) continue
     const contrib = pinch * pinch
     const c = w.omega / w.k
@@ -527,11 +546,18 @@ function loopFrame(u: number, v: number, t: number) {
     vz += w.dirZ * c * contrib
     wsum += contrib
   }
+  frameScratch.swayX = swayX
+  frameScratch.swayZ = swayZ
+  frameScratch.h = h
   if (wsum < 0.001) {
     const c = domWave.omega / domWave.k
-    return { vx: HEAD_X * c, vz: HEAD_Z * c, swayX, swayZ, h }
+    frameScratch.vx = HEAD_X * c
+    frameScratch.vz = HEAD_Z * c
+  } else {
+    frameScratch.vx = vx / wsum
+    frameScratch.vz = vz / wsum
   }
-  return { vx: vx / wsum, vz: vz / wsum, swayX, swayZ, h }
+  return frameScratch
 }
 
 export type SprayParticle = {
@@ -564,6 +590,15 @@ export type SprayParticle = {
   /** Horizontal hop velocity RELATIVE to the loop frame. */
   rvx: number
   rvz: number
+  /**
+   * Where and when this droplet last sampled the surface, and what it
+   * found. Lets the next check be skipped while the droplet is still
+   * provably clear of the water — see DROPLET.checkSlopeBound.
+   */
+  chH: number
+  chT: number
+  chX: number
+  chZ: number
 }
 
 export const sprayParticles: SprayParticle[] = Array.from(
@@ -577,6 +612,10 @@ export const sprayParticles: SprayParticle[] = Array.from(
     vz: 0,
     birth: -10,
     size: 0,
+    chH: Infinity,
+    chT: -1e9,
+    chX: 0,
+    chZ: 0,
     impact: false,
     loop: false,
     crown: 0,
@@ -654,6 +693,8 @@ function launch(
   p.loop = false
   p.crown = 0
   p.dying = -1
+  p.chH = Infinity
+  p.chT = -1e9
 }
 
 /**
@@ -698,6 +739,8 @@ function launchLoop(
   p.loop = true
   p.crown = crown
   p.dying = -1
+  p.chH = Infinity
+  p.chT = -1e9
 }
 
 /**
@@ -1347,6 +1390,19 @@ function emitSpume(dt: number) {
 // droplet moves ~5cm between checks — the extra latency is invisible).
 let checkParity = 0
 
+// Landing-check accounting, so the height early-out can be shown to pay
+// for itself rather than assumed to. The bound it uses is the straight
+// amplitude sum, which is loose — components rarely align — so the skip
+// rate depends entirely on how high droplets actually fly.
+let checksRun = 0
+let checksSkipped = 0
+export function sprayCheckStats() {
+  const r = { run: checksRun, skipped: checksSkipped }
+  checksRun = 0
+  checksSkipped = 0
+  return r
+}
+
 // One entry per event slot: which birth we've already burst for.
 const burstFor = new Float64Array(MAX_EVENTS).fill(-1)
 
@@ -1469,13 +1525,37 @@ export function updateSpray(dt: number, t: number) {
     // flicker). A genuinely buried droplet is occluded by the opaque
     // water meanwhile; the test resumes once the flight matures.
     if (p.loop && t - p.birth < DROPLET.submergeGrace) continue
-    const s = sampleOcean(p.x, p.z, t, 1, 1)
+    // Skip the sample while this droplet is still provably clear of the
+    // water, extrapolating from where it last looked: the sea can have
+    // risen at most maxSurfaceRate * elapsed since then, and moving
+    // sideways can have carried the droplet over water at most
+    // checkSlopeBound higher per metre travelled. LOCAL, unlike the global
+    // amplitude-sum bound this replaced — a droplet 4m over a trough is
+    // skippable here, where before it had to clear every crest at once.
+    if (PROFILE.skipLandingCheck) continue
+    const gap = t - p.chT
+    const dxc = p.x - p.chX
+    const dzc = p.z - p.chZ
+    const reach =
+      p.chH +
+      maxSurfaceRate * gap +
+      DROPLET.checkSlopeBound * Math.sqrt(dxc * dxc + dzc * dzc)
+    if (gap < DROPLET.checkMaxGap && p.y - p.size > reach) {
+      checksSkipped++
+      continue
+    }
+    checksRun++
+    const height = oceanHeight(p.x, p.z, t, 1, 1)
+    p.chH = height
+    p.chT = t
+    p.chX = p.x
+    p.chZ = p.z
     // CONTACT, not submersion: the droplet's underside reaching the water
     // is the moment of impact — that is when it breaks up, rings the
     // surface and leaves foam. Waiting for the centre to pass fully
     // under delayed every splash by the time it took to sink its own
     // radius, which at these sizes is a visible beat.
-    if (p.y - p.size < s.height) {
+    if (p.y - p.size < height) {
       if (t - p.birth < 0.1) culledYoung++
       // Gate sized so trough-buried ghosts (dead in < 0.05s) still hand
       // nothing back, while the low skimmers' short real flights do.

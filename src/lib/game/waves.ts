@@ -131,10 +131,10 @@ export type WaveFieldConfig = {
    * waves give a coarse, blobby glint however it is tuned.
    */
   detail?: {
-    count?: number
+    /** Shortest and longest wavelength the FFT cascades carry, metres. */
     minLambda?: number
     maxLambda?: number
-    /** Wave slope (amp * k); sets how hard these tilt the normal. */
+    /** RMS surface slope of the band; sets how hard these tilt the normal. */
     slope?: number
   }
   /**
@@ -208,7 +208,7 @@ export const SEA_PRESETS = {
     // Big weather brewing: a light overcast gray, sun well scattered.
     sky: { zenith: '#c3cbd1', horizon: '#e9edf0', diffusion: 0.4 },
     // Wind chop riding the swell: plenty of fine tilt.
-    detail: { count: 18, minLambda: 0.4, maxLambda: 4, slope: 0.055 },
+    detail: { minLambda: 0.4, maxLambda: 4, slope: 0.055 },
     foam: { pinchJStart: 0.3 },
     bands: [
       // Primary swell: the long rolling system on the wind heading.
@@ -283,7 +283,7 @@ export const SEA_PRESETS = {
     sky: { zenith: '#2e6fb2', horizon: '#a9cfe8', diffusion: 0.05 },
     // Glassy, but never mirror-flat: a fine cat's-paw texture is what
     // gives a calm sea its glitter under a clear sun.
-    detail: { count: 16, minLambda: 0.3, maxLambda: 5.4, slope: 0.01 },
+    detail: { minLambda: 0.3, maxLambda: 5.4, slope: 0.01 },
     bands: [
       // One long, low swell rolling through.
       {
@@ -357,7 +357,7 @@ export const SEA_PRESETS = {
     // a ghost of the caustic web survives it.
     sky: { zenith: '#6b737a', horizon: '#98a0a7', diffusion: 0.7 },
     // Torn-up surface: short, steep, every which way.
-    detail: { count: 10, minLambda: 0.35, maxLambda: 3, slope: 0.055 },
+    detail: { minLambda: 0.35, maxLambda: 3, slope: 0.055 },
     // Storm J dips below 0.65 nearly everywhere; only genuinely breaking
     // water (J < 0.3) may generate foam or the sea saturates white.
     foam: { pinchJStart: 0.1 },
@@ -489,10 +489,53 @@ export const waves = generateWaves(activeField)
  * Typical crest height (RMS sum): use for normalizing height-based color.
  * The straight sum overstates it badly since components rarely align.
  */
+/**
+ * Fastest the surface can rise anywhere, metres per second: the sum of
+ * each component's peak vertical speed (amp * omega), reached only if
+ * every one crested together.
+ *
+ * Used to extrapolate a stale surface sample forward in time — knowing
+ * how far the water can possibly have come up since a droplet last
+ * looked. The GLOBAL height bound this replaced (the straight amplitude
+ * sum) was measured doing nothing at all: 90,609 landing checks, 0
+ * skipped, because 24 components never crest at once, so the bound sat
+ * 2m above anything the sea actually does.
+ */
+export const maxSurfaceRate = waves.reduce((s, w) => s + Math.abs(w.amp * w.omega), 0)
+
+/**
+ * Surface height only, without allocating.
+ *
+ * sampleSurface returns a fresh object and sampleOcean spreads it into
+ * another; at a few thousand droplets a frame that is tens of thousands of
+ * short-lived objects, which showed up as multi-second GC pauses. Callers
+ * that need the full sample still get it — this is for the hot paths that
+ * only ever read .height.
+ */
+export function surfaceHeight(
+  x: number,
+  z: number,
+  t: number,
+  ampScale = 1,
+  iterations = 3,
+): number {
+  let u = x
+  let v = z
+  for (let i = 0; i < iterations; i++) {
+    // displace() writes into a module scratch, so this loop allocates
+    // nothing. Do not hold the returned object across a second call.
+    const d = displace(u, v, t, ampScale)
+    u = x - d.x
+    v = z - d.z
+  }
+  return displace(u, v, t, ampScale).y
+}
+
 export const significantAmplitude = Math.sqrt(
   waves.reduce((s, w) => s + w.amp * w.amp, 0),
 )
 
+/** Caustic-only capillary band; see the `capillary` config doc above. */
 const CAPILLARY_DEFAULTS = {
   count: 5,
   // True pool scale: curvature A*k^2 ~ 2 gives a focal depth ~1.5m, so
@@ -500,97 +543,6 @@ const CAPILLARY_DEFAULTS = {
   minLambda: 0.25,
   maxLambda: 0.8,
   slope: 0.022,
-}
-
-/** Caustic-only capillary band; see the `capillary` config doc above. */
-const DETAIL_DEFAULTS = {
-  /**
-   * Number of components, and the knob that decides whether the set
-   * reads as waves or as a pattern. A handful of sinusoids beat against
-   * each other visibly however they are jittered — the repeat only goes
-   * away as the count rises. Each is a single cos per pixel, so the
-   * ceiling is high and the mid-teens are cheap.
-   */
-  count: 16,
-  minLambda: 0.35,
-  maxLambda: 3.5,
-  slope: 0.05,
-  /** Max heading offset from the wind, radians. Near-isotropic by
-   * default: short waves are far less organised than swell, and an
-   * aligned set reads as corduroy. */
-  spread: 2.8,
-}
-
-/**
- * Small surface waves, generated like a band but never meshed: they
- * exist only as a per-pixel slope on the shading normal.
- */
-const detailWaves = (() => {
-  const cfg = { ...DETAIL_DEFAULTS, ...(activeField.detail ?? {}) }
-  const rand = mulberry32(activeField.seed + 907)
-  const out: {
-    dirX: number
-    dirZ: number
-    k: number
-    omega: number
-    amp: number
-    phase: number
-  }[] = []
-  for (let i = 0; i < cfg.count; i++) {
-    // Full jitter within each octave slot, not a nudge around an even
-    // spacing: evenly spaced wavelengths beat against each other on a
-    // regular lattice, which is half of why a small set looks patterned.
-    const f = (i + rand()) / cfg.count
-    const lambda = cfg.minLambda * Math.pow(cfg.maxLambda / cfg.minLambda, f)
-    const k = (2 * Math.PI) / lambda
-    const angle = activeField.windAngle + (rand() - 0.5) * 2 * cfg.spread
-    out.push({
-      dirX: Math.cos(angle),
-      dirZ: Math.sin(angle),
-      k,
-      omega:
-        Math.sqrt(G * k) *
-        (activeField.timeScale ?? 1) *
-        // Detune each wave off exact dispersion. On physical omega the
-        // whole set shares one beat period and the pattern visibly
-        // cycles; detuned, it never quite repeats.
-        (0.75 + rand() * 0.5),
-      amp: ((cfg.slope * lambda) / (2 * Math.PI)) * (0.55 + rand() * 0.9),
-      phase: rand() * Math.PI * 2,
-    })
-  }
-  return out
-})()
-
-/**
- * The detail waves' contribution to the SHADING normal: d(height)/dx and
- * d(height)/dz, baked as literals since they are static per preset.
- * Added onto the interpolated analytic slope in the water fragment,
- * exactly as ripples are.
- */
-export function detailSlopeGlsl(): string {
-  const f = (n: number) => n.toFixed(6)
-  const lines = detailWaves
-    .map(
-      (w) =>
-        `	d += vec2(${f(w.dirX)}, ${f(w.dirZ)}) * (${f(w.amp * w.k)} * cos(` +
-        `(p.x * ${f(w.dirX)} + p.y * ${f(w.dirZ)}) * ${f(w.k)} - ${f(w.omega)} * t + ${f(w.phase)}));`,
-    )
-    .join(String.fromCharCode(10))
-  // NO DOMAIN WARP. It was tried and removed: at any amplitude strong
-  // enough to disguise the lattice, the warp's OWN wavelength becomes
-  // the dominant feature and the fine waves read as smeared bands
-  // following it. Warping trades a small regular pattern for a large
-  // one, which is the wrong trade when the large one is this legible.
-  //
-  // The only honest cure for a sinusoid sum looking like a sinusoid sum
-  // is more components — each is one cos per pixel, so it is affordable.
-  return `
-vec2 detailSlope(vec2 p, float t) {
-	vec2 d = vec2(0.0);
-${lines}
-	return d;
-}`
 }
 
 const capillaries = (() => {
@@ -639,6 +591,40 @@ export type SurfaceSample = {
   jacobian: number
 }
 
+/**
+ * SIN/COS TABLE for the CPU wave sum.
+ *
+ * displace() is the hot path behind every CPU surface query — buoyancy,
+ * the whitecap scan, and above all the per-droplet landing check, which
+ * measured as the single largest cost in a storm frame. It calls Math.sin
+ * and Math.cos once each per wave, and those are slow enough in V8 to be
+ * the bulk of the work at 24 components.
+ *
+ * A 4096-entry table with linear interpolation is 2.5x faster end to end
+ * and wrong by 0.002mm at worst — nine orders of magnitude below anything
+ * that matters here, and far below the centimetre grade the 1-iteration
+ * sampler already accepts.
+ *
+ * Index arithmetic uses int32 masking, so it stays exact while
+ * |theta| * 652 < 2^31 — about a day of continuous wave time. Past that
+ * the index would wrap wrongly; nothing in this game runs that long, and
+ * the alternative (a modulo per wave per call) costs most of the win.
+ */
+// Exported so the other CPU wave sums (spray.ts's loopFrame, the hottest
+// loop in the game) can use the same table inline, without paying a
+// function call per wave.
+export const TRIG_BITS = 12
+export const TRIG_N = 1 << TRIG_BITS
+export const TRIG_MASK = TRIG_N - 1
+export const SIN_TABLE = new Float64Array(TRIG_N)
+export const COS_TABLE = new Float64Array(TRIG_N)
+for (let i = 0; i < TRIG_N; i++) {
+  const a = (i / TRIG_N) * Math.PI * 2
+  SIN_TABLE[i] = Math.sin(a)
+  COS_TABLE[i] = Math.cos(a)
+}
+export const TRIG_SCALE = TRIG_N / (Math.PI * 2)
+
 const scratch = { x: 0, y: 0, z: 0, jxx: 1, jzz: 1, jxz: 0 }
 
 function displace(u: number, v: number, t: number, ampScale: number) {
@@ -651,8 +637,14 @@ function displace(u: number, v: number, t: number, ampScale: number) {
   for (const w of waves) {
     const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
     const amp = w.amp * ampScale
-    const c = Math.cos(theta)
-    const s = Math.sin(theta)
+    // Table lookup with one lerp; see SIN_TABLE above.
+    const f = theta * TRIG_SCALE
+    const i0 = Math.floor(f)
+    const fr = f - i0
+    const ia = i0 & TRIG_MASK
+    const ib = (i0 + 1) & TRIG_MASK
+    const c = COS_TABLE[ia] + (COS_TABLE[ib] - COS_TABLE[ia]) * fr
+    const s = SIN_TABLE[ia] + (SIN_TABLE[ib] - SIN_TABLE[ia]) * fr
     dx += w.q * amp * w.dirX * c
     dz += w.q * amp * w.dirZ * c
     dy += amp * s

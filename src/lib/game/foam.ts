@@ -109,6 +109,14 @@ const DECAY_TAU_OLD = FOAM.decayOld
 const OVERLOAD_START = FOAM.overloadStart
 const OVERLOAD_FULL = FOAM.overloadFull
 let massEst = 0
+
+/**
+ * Current foam capacity estimate. Exposed because foam's frame cost tracks
+ * how much of the screen it covers, and "seems slower when there's more
+ * foam" is not something that can be acted on — pairing ms/Mpx with a
+ * number makes it a measurement.
+ */
+export const foamMass = () => massEst
 /** Accumulated wind+current carry in metres, so the web pattern can be
  *  advected to match the thickness field. Read by the water shader. */
 export const foamFlow = { x: 0, z: 0 }

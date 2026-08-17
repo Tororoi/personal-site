@@ -12,6 +12,8 @@
  * water's look AND its physics — lives here.
  */
 
+import { applyOverrides, type Knob } from './tuningstore'
+
 /** GLSL literal helper: GLSL needs `1.0`, JS prints `1`. */
 export const f = (n: number, digits = 4) => n.toFixed(digits)
 
@@ -21,6 +23,12 @@ export const f = (n: number, digits = 4) => n.toFixed(digits)
  * apply); CPU-side ones take effect immediately.
  */
 export const ENABLE = {
+  /**
+   * The in-page tuning panel. Deliberately NOT editable from inside the
+   * panel: switching it off there would remove the only way to switch it
+   * back on. Toggle it here, or press ` in the page.
+   */
+  tuningUI: true,
   /** White ribbon on the folding mesh itself. */
   loopWhite: false,
   /** Pull of the pinch zone toward the sprite plane. */
@@ -69,17 +77,45 @@ export const ENABLE = {
   /** Mesh crest riding the water at an object's nose (BOWCREST). */
   bowCrest: false,
   /**
-   * Detail waves from a GPU inverse FFT of a random-phase Phillips
-   * spectrum (fftwaves.ts) instead of the baked sinusoid sum in waves.ts.
-   * Both read the same `detail` block per preset, so `slope` means the
-   * same thing either way and the two are directly comparable. Off gives
-   * the old sum back, which is the point of keeping the flag.
+   * Fine surface texture: a GPU inverse FFT of a random-phase Phillips
+   * spectrum (fftwaves.ts), banded by each preset's `detail` block.
+   *
+   * This is the ONLY detail-wave path — the sinusoid sum it replaced is
+   * gone, not kept as a fallback, because a dozen jittered cosines read
+   * as a beating pattern no matter how they are tuned and there was no
+   * setting worth switching back to. Off means no detail waves at all:
+   * the term leaves the shader and the transform stops running.
    */
   fftDetail: true,
   /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
    * study replaced them with loop-driven emission. */
   whitecapEvents: false,
-} as const
+  /**
+   * GPU PASS PROFILER. Inserts a gl.finish() around each offscreen sim so
+   * its real cost can be timed, and reports the split in the overlay.
+   *
+   * Read the breakdown, NOT the fps, while this is on: finish() serialises
+   * the GPU against the CPU, so the total gets worse by construction. The
+   * per-pass numbers are what is trustworthy, and their ratios are what
+   * matter. Turn it off before judging any change.
+   *
+   * This exists because renderer.info cannot see these passes at all —
+   * three resets it at the head of every render() call, so the overlay's
+   * draw-call and triangle counts describe only the final scene render
+   * and say nothing about the four render-target sims that precede it.
+   */
+  gpuProfile: false,
+  /**
+   * Stream perf samples to tools/perf-logger.mjs, four times a second.
+   *
+   * For loads that VARY — storm foam building and dying — where reading an
+   * overlay by eye cannot capture the correlation between cost and
+   * coverage. Start the sink first:
+   *   node tools/perf-logger.mjs perf-log.jsonl
+   * If it is not running the beacons fail silently and nothing breaks.
+   */
+  perfLog: true,
+}
 
 /**
  * FROTH — the white masses that surface as a crest overturns.
@@ -143,7 +179,7 @@ export const FROTH = {
    * is the only reason froth masses differ in brightness.
    */
   normalTilt: 0,
-} as const
+}
 
 /**
  * CREST PLUMES — vertical spray thrown off each foam sprite. Drawn as a
@@ -265,7 +301,7 @@ export const PLUME = {
   alpha: 1.0,
   /** Fragments below this alpha are discarded. */
   alphaCull: 0.02,
-} as const
+}
 
 /**
  * LOOP WHITENING & STRETCH — the water surface's own response to a
@@ -360,7 +396,7 @@ export const LOOP = {
   /** Near-binary gate: pinches below the sprite criterion stay dark. */
   gateStart: 0.1,
   gateFull: 0.16,
-} as const
+}
 
 /**
  * OBJECT WAVE — a standing Gerstner wave anchored to an object's
@@ -420,7 +456,7 @@ export const OBJWAVE = {
    * keeping some ring in the mix holds that down.
    */
   windward: 0.6,
-} as const
+}
 
 /**
  * BOW CREST — a strip of MESH riding the water at an object's nose.
@@ -555,7 +591,7 @@ export const BOWCREST = {
   /** Tessellation: segments along the arc and around the lip. */
   segArc: 36,
   segLip: 8,
-} as const
+}
 
 /**
  * CONTACT FOAM — the painted collar where the surface meets a solid.
@@ -599,7 +635,7 @@ export const CONTACT = {
   /** Narrowest the collar gets, as a fraction of `width`. Not 0, or the
    * vertical reading becomes a gate again and tears the collar. */
   spreadFloor: 0.25,
-} as const
+}
 
 /**
  * SUN SPECULAR — the sun's own mirror image on the water.
@@ -694,7 +730,7 @@ export const SPECULAR = {
    * ones converge back on the orthographic behaviour.
    */
   eyeDistance: 42,
-} as const
+}
 
 /**
  * WIND — two components. The BASE is the steady breeze: it sets the
@@ -721,7 +757,7 @@ export const WIND = {
   /** Gust strength as a multiple of base wind speed. */
   gustSpeedMin: 1.4,
   gustSpeedVar: 1.6,
-} as const
+}
 
 /**
  * SURFACE CURRENT — the slow bulk drift of the water itself, distinct
@@ -743,7 +779,7 @@ export const CURRENT = {
   meander: 0.35,
   /** Fractional breathing of the drift rate. */
   breath: 0.25,
-} as const
+}
 
 /**
  * SPLASH DROPLETS — the ballistic parcels of water thrown from inside a
@@ -810,6 +846,30 @@ export const DROPLET = {
   /** Loop scan: cadence (s), grid pitch and half-extent (m). */
   scanInterval: 0.1,
   scanStep: 1.6,
+  /**
+   * LANDING-CHECK SKIPPING. The per-droplet ocean sample was 88% of the
+   * frame on storm; these decide how often it can be avoided.
+   *
+   * A droplet remembers the surface height where it last looked, and
+   * skips the sample while it is still provably clear of the water. The
+   * time part of that is exact (waves.maxSurfaceRate bounds how fast the
+   * sea can rise); the SPACE part cannot be, because world-space surface
+   * slope goes infinite at a Gerstner fold and storm folds constantly —
+   * so slopeBound is a conservative stand-in, in metres of rise allowed
+   * per metre the droplet travels.
+   *
+   * Raising it skips fewer checks and is safer; lowering it skips more.
+   * If it is ever too low the failure is bounded and mild: a landing is
+   * noticed a check late, which is the same latency the parity split
+   * already accepts.
+   */
+  checkSlopeBound: 2.0,
+  /**
+   * Longest a droplet may go without a real sample, seconds, whatever
+   * the bound says. The backstop that keeps a bad slopeBound from
+   * letting a droplet fly on underwater.
+   */
+  checkMaxGap: 0.08,
   scanExtent: 40,
   /**
    * Jacobian below which a scan sample is recorded. This must reach at
@@ -953,7 +1013,7 @@ export const DROPLET = {
   /** Buoy deposit radius: floor + per unit droplet size. */
   depositBaseBuoy: 0.13,
   depositPerSizeBuoy: 0.3,
-} as const
+}
 
 /**
  * FOAM FIELD — persistent residue left by droplet landings (foam.ts).
@@ -1263,7 +1323,7 @@ export const FOAM = {
   densEnd: 0.65,
   cellFine: 0.4,
   cellCoarse: 2.2,
-} as const
+}
 
 /**
  * MIST FIELD — the 2D fluid solver (mistfield.ts) and its sources.
@@ -1303,4 +1363,179 @@ export const MIST = {
   brightEnd: 1.1,
   /** Height the overlay plane hovers above the surface, m. */
   hover: 0.3,
-} as const
+}
+
+/**
+ * FFT detail waves (fftwaves.ts). The transform itself is not tunable —
+ * its shape comes from each preset's `detail` block — but how often it
+ * runs is, because that is the whole of its frame cost.
+ */
+export const FFT = {
+  /**
+   * Run the transform every Nth frame. 1 = every frame.
+   *
+   * This is the only knob here that buys frame time, and it buys a lot:
+   * a step is 32 render passes (two cascades x one spectrum + 14
+   * butterfly stages + one resolve). They are tiny — 128x128 each, so
+   * the fill is nothing — but 32 render-target binds and 32 draw calls
+   * per frame is real driver overhead, and it is paid whether or not any
+   * other effect is switched on.
+   *
+   * The field has no frame-to-frame state (each step is a fresh
+   * transform of the same spectrum evolved to the current time), so
+   * skipping steps is safe: the slope texture simply holds its last
+   * contents. The cost is temporal — at 2 the fine sparkle updates at
+   * 30Hz under a 60Hz render.
+   */
+  stepEvery: 1,
+}
+
+/**
+ * FRAGMENT ABLATION — measurement scaffolding for the water shader.
+ *
+ * The water fragment is ~80% of the frame at working resolution, and
+ * renderer.info cannot see inside a shader. Each switch below compiles
+ * one block out of it, so its cost can be read off the fps/Mpx figure the
+ * overlay reports. Everything defaults to false; turning one on makes the
+ * water WRONG on purpose, which is the point.
+ *
+ * Measure in ms per megapixel, not fps: fps depends on window size, and
+ * the whole reason this exists is that the frame scales with area. Take
+ * (1000 / fps) / Mpx before and after, and the difference is that block's
+ * per-pixel cost.
+ */
+export const PROFILE = {
+  /** Underwater raytrace: refract, sphere + 3 buoy intersections, shade. */
+  skipRefraction: false,
+  /** Fresnel blend and the sky-gradient reflection. */
+  skipReflection: false,
+  /** Sun specular (a pow, plus the virtual-eye reflect). */
+  skipSpecular: false,
+  /** Foam thickness lookups, the web pattern and its lighting. */
+  skipFoam: false,
+  /** Per-pixel ripple slope (a texture gradient fetch). */
+  skipRipple: false,
+  /**
+   * Loop white: the backface test, the Jacobian ramps, and the per-pixel
+   * pinchMask refinement they can trigger. pinchMask is a full WAVE_COUNT
+   * loop with a sin and cos per wave, and although it is gated to pixels
+   * whose vertex estimate lands mid-ramp, GPUs branch per warp — one
+   * qualifying pixel makes its whole neighbourhood pay. Also removes the
+   * unconditional whitewaterLight() call that shades the ribbon.
+   */
+  skipLoopWhite: false,
+  /**
+   * Drop the water mesh entirely. Not a block — the whole surface, so the
+   * rest of the scene can be priced on its own. This is the bound: what
+   * is left is what no amount of shader work can recover.
+   */
+  hideWater: false,
+  /**
+   * Drop the sphere, the buoys and the sun/moon debug arcs too. With
+   * hideWater this leaves an empty scene, which is the honest floor: any
+   * cost that survives it belongs to the page, the compositor or the
+   * driver, not to anything drawn here.
+   */
+  hideObjects: false,
+  /**
+   * Renderer-creation flags. Threlte defaults to antialias:true and
+   * alpha:true, and neither is visible to any probe above: they cost
+   * nothing to draw INTO, are paid at present time, and scale with canvas
+   * area — which is the exact signature of the ~24ms that survives an
+   * empty scene.
+   *
+   * antialias:true allocates a multisampled backbuffer, so every frame
+   * clears and resolves 4x the pixels whether or not anything is drawn.
+   * alpha:true makes the canvas translucent, so the browser composites it
+   * against the page with blending instead of treating it as opaque.
+   *
+   * Both change output, so they are measurement switches, not fixes:
+   * turning AA off costs edge quality. Needs a reload, which Apply does.
+   */
+  noAntialias: false,
+  opaqueCanvas: false,
+  /**
+   * Stop each offscreen sim stepping. Their textures go stale, which is
+   * visually wrong and fine for measurement.
+   *
+   * These exist because the gl.finish() profiler priced all four at 0.6ms
+   * total, and that number is not trustworthy: browser WebGL implements
+   * finish() as a flush with a partial sync rather than a true GPU
+   * barrier, so it both under-reports and appears free. Ablation has
+   * agreed with reality every time in this investigation; finish() has
+   * not. Prefer these switches over the gpuProfile readout.
+   *
+   * None of them is a resolution change — the sim either runs at its
+   * normal size or does not run.
+   */
+  skipRippleSim: false,
+  skipCausticSim: false,
+  skipFoamSim: false,
+  /**
+   * Stop DRAWING the sprite clouds while leaving them simulating.
+   *
+   * The point is to separate overdraw from everything else. Turning
+   * ENABLE.froth or ENABLE.splashDroplets off changes how much foam gets
+   * laid down, which changes the thing being measured; these do not touch
+   * the simulation at all, so foam mass stays put and only the fill
+   * disappears. Sprites are alpha-blended quads, so a dense cloud can
+   * shade the same pixel many times over — invisible in both the draw-call
+   * and triangle counts.
+   */
+  hideFroth: false,
+  hideSpray: false,
+  /**
+   * Skip the per-droplet landing check entirely. Droplets stop dying on
+   * contact and fly through the water, so this is unusable for play — it
+   * exists to price the check by ablation.
+   *
+   * Needed because micro-benchmarking the sampler in isolation put it at
+   * ~15% of updateSpray, while updateSpray is ~100% of a storm frame. One
+   * of those is wrong, and ablation is the method that has been right
+   * every time in this investigation.
+   */
+  skipLandingCheck: false,
+}
+
+/**
+ * REGISTRY for the tuning panel (TuningPanel.svelte).
+ *
+ * Listed explicitly rather than reflected off the module, so that adding
+ * a helper export here cannot accidentally turn up as a row of sliders.
+ * Every group is a flat map of numbers and booleans; the panel builds its
+ * controls from that shape alone, which is why there is no per-knob UI
+ * metadata to maintain alongside 260 values.
+ */
+const GROUPS = {
+  ENABLE,
+  FFT,
+  PROFILE,
+  FROTH,
+  PLUME,
+  LOOP,
+  OBJWAVE,
+  BOWCREST,
+  CONTACT,
+  SPECULAR,
+  WIND,
+  CURRENT,
+  DROPLET,
+  FOAM,
+  MIST,
+}
+
+/**
+ * The values as WRITTEN IN THIS FILE, snapshotted before any saved
+ * override lands. This is what "modified" is measured against and what
+ * Reset restores, so the panel keeps telling the truth about which knobs
+ * have been moved even across many sessions of stored overrides.
+ */
+export const TUNING_DEFAULTS: Record<string, Record<string, Knob>> = Object.fromEntries(
+  Object.entries(GROUPS).map(([name, group]) => [name, { ...group }]),
+)
+
+for (const [name, group] of Object.entries(GROUPS)) {
+  applyOverrides(name, group as Record<string, Knob>)
+}
+
+export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
