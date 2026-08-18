@@ -85,9 +85,11 @@ export type WaveFieldConfig = {
    * pass will threshold on: loop = foam, once foam renders.
    *
    * Caveat: far past ~1, the CPU sampler's fixed-point inversion in
-   * sampleSurface() loses its formal convergence guarantee. It behaves well
-   * at largeSwell's 2.25 in practice; if floaters ever jitter on an extreme
-   * preset, raise the iteration count there.
+   * sampleSurface() loses its formal convergence guarantee — and raising
+   * the iteration count makes it WORSE at a fold, not better (each pass is
+   * another chance to hop between the fold's sheets; measured at chop 5).
+   * Floaters should ride sampleSurfaceTracked(), which follows one sheet
+   * across frames.
    */
   chop: number
   /**
@@ -228,6 +230,7 @@ export const SEA_PRESETS = {
       speed: 2.2,
       damping: 0.96,
     },
+    timeScale: 0.7,
     // Big weather brewing: a light overcast gray, sun well scattered.
     sky: { zenith: '#c3cbd1', horizon: '#e9edf0', diffusion: 0.4 },
     // Wind chop riding the swell: plenty of fine tilt.
@@ -744,15 +747,55 @@ export function applySeaState(state: number, chopOverride: number) {
  */
 const UNIFIED_BANDS: WaveBand[] = [
   // 1 PRIMARY SWELL
-  { count: 4, minLambda: 32, maxLambda: 68, heading: 0, spread: 0.4, slope: 0.085, speed: 0.75 },
+  {
+    count: 4,
+    minLambda: 32,
+    maxLambda: 68,
+    heading: 0,
+    spread: 0.4,
+    slope: 0.085,
+    speed: 0.75,
+  },
   // 2 CROSSING SWELL
-  { count: 3, minLambda: 19, maxLambda: 44, heading: 2.1, spread: 1.0, slope: 0.055, speed: 0.75 },
+  {
+    count: 3,
+    minLambda: 19,
+    maxLambda: 44,
+    heading: 2.1,
+    spread: 1.0,
+    slope: 0.055,
+    speed: 0.75,
+  },
   // 3 WIND SEA
-  { count: 6, minLambda: 9, maxLambda: 18, heading: 0.3, spread: 0.9, slope: 0.05, speed: 1.5 },
+  {
+    count: 6,
+    minLambda: 9,
+    maxLambda: 18,
+    heading: 0.3,
+    spread: 0.9,
+    slope: 0.05,
+    speed: 1.5,
+  },
   // 4 SHORT CHOP
-  { count: 5, minLambda: 4.5, maxLambda: 10, heading: -0.45, spread: 1.35, slope: 0.0349, speed: 1.5 },
+  {
+    count: 5,
+    minLambda: 4.5,
+    maxLambda: 10,
+    heading: -0.45,
+    spread: 1.35,
+    slope: 0.0349,
+    speed: 1.5,
+  },
   // 5 RIPPLE
-  { count: 6, minLambda: 2.4, maxLambda: 4.8, heading: 0.8, spread: 1.7, slope: 0.04, speed: 1 },
+  {
+    count: 6,
+    minLambda: 2.4,
+    maxLambda: 4.8,
+    heading: 0.8,
+    spread: 1.7,
+    slope: 0.04,
+    speed: 1,
+  },
 ]
 
 /**
@@ -776,7 +819,7 @@ function energyFactors() {
   if (!unifiedEnergy) {
     const rms = (f: WaveFieldConfig) => {
       let m = 0
-      for (const w of generateWaves(f)) m += ((w.amp * w.k) * (w.amp * w.k)) / 2
+      for (const w of generateWaves(f)) m += (w.amp * w.k * (w.amp * w.k)) / 2
       return Math.sqrt(m)
     }
     const base = rms({ ...SEA_PRESETS.largeSwell, bands: UNIFIED_BANDS })
@@ -801,7 +844,8 @@ export function unifiedField(): WaveFieldConfig {
   const fac = w <= 1 ? Math.pow(E.calm, 1 - w) : Math.pow(E.storm, w - 1)
   // Chop is a budget, not an energy; the presets' values lerp directly.
   const chop = w <= 1 ? 0.55 + (2.25 - 0.55) * w : 2.25 + (5 - 2.25) * (w - 1)
-  const compass = (deg: number) => ((UNIFIED_NORTH_DEG + deg) % 360) * (Math.PI / 180)
+  const compass = (deg: number) =>
+    ((UNIFIED_NORTH_DEG + deg) % 360) * (Math.PI / 180)
   return {
     seed: SEA_PRESETS.largeSwell.seed,
     windAngle: compass(U.windCompassDeg),
@@ -812,11 +856,23 @@ export function unifiedField(): WaveFieldConfig {
     timeScale: U.timeScale,
     ripples: { displayGain: 1.6, speed: 2.2, damping: 0.96 },
     sky: {
-      zenith: lerpHex(SEA_PRESETS.calm.sky.zenith, SEA_PRESETS.storm.sky.zenith, U.weather),
-      horizon: lerpHex(SEA_PRESETS.calm.sky.horizon, SEA_PRESETS.storm.sky.horizon, U.weather),
+      zenith: lerpHex(
+        SEA_PRESETS.calm.sky.zenith,
+        SEA_PRESETS.storm.sky.zenith,
+        U.weather,
+      ),
+      horizon: lerpHex(
+        SEA_PRESETS.calm.sky.horizon,
+        SEA_PRESETS.storm.sky.horizon,
+        U.weather,
+      ),
       diffusion: 0.05 + (0.7 - 0.05) * U.weather,
     },
-    detail: { minLambda: U.detailMin, maxLambda: U.detailMax, slope: U.detailSlope },
+    detail: {
+      minLambda: U.detailMin,
+      maxLambda: U.detailMax,
+      slope: U.detailSlope,
+    },
     bands: UNIFIED_BANDS.map((b) => ({
       ...b,
       minLambda: b.minLambda * U.lambdaScale,
@@ -1219,6 +1275,75 @@ export function sampleSurfaceInto(
     u = x - d.x
     v = z - d.z
   }
+  const d = displace(u, v, t, ampScale)
+  out.height = d.y
+  out.swayX = d.x
+  out.swayZ = d.z
+  out.jacobian = d.jxx * d.jzz - d.jxz * d.jxz
+  return out
+}
+
+/**
+ * Surface height at a REST-space point — a direct forward evaluation, no
+ * inversion at all, so it is smooth in (u, v, t) everywhere including
+ * folds. For gradients and probes anchored to a tracked rest point;
+ * heights at a WORLD point still need sampleSurface.
+ */
+export function restHeight(u: number, v: number, t: number, ampScale = 1): number {
+  return displace(u, v, t, ampScale).y
+}
+
+/**
+ * Rest-point state for sampleSurfaceTracked: one per floating object,
+ * carried across frames.
+ */
+export type TrackedRest = { u: number; v: number }
+
+/**
+ * sampleSurface with MEMORY: the inversion starts from last frame's
+ * solution and is damped, so a floater follows one continuous sheet of
+ * the surface instead of re-choosing every frame.
+ *
+ * Above chop ~1 the surface folds and the rest->world map turns
+ * multi-sheeted. The plain cold-start iteration neither converges nor
+ * picks a sheet consistently there — measured on the storm, its answer
+ * was 0.52m of rest-point error on average, with frame-to-frame height
+ * hops of 0.45m as it wandered between sheets (and MORE iterations make
+ * that worse, not better: each one is another chance to hop). Warm
+ * damped tracking cuts the mean error to 0.007m. The genuine jumps that
+ * remain — a fold passing over the point annihilates the sheet being
+ * ridden — are the caller's to rate-limit, since they are real surface
+ * behaviour, not solver noise.
+ */
+export function sampleSurfaceTracked(
+  out: SurfaceSample,
+  rest: TrackedRest,
+  x: number,
+  z: number,
+  t: number,
+  ampScale = 1,
+): SurfaceSample {
+  let u = rest.u
+  let v = rest.v
+  for (let i = 0; i < 4; i++) {
+    const d = displace(u, v, t, ampScale)
+    u += 0.7 * (x - d.x - u)
+    v += 0.7 * (z - d.z - v)
+  }
+  // If tracking has drifted somewhere hopeless (teleported object, first
+  // frame), fall back to a cold start rather than riding a stale sheet.
+  const dchk = displace(u, v, t, ampScale)
+  if (Math.hypot(u + dchk.x - x, v + dchk.z - z) > 2.5) {
+    u = x
+    v = z
+    for (let i = 0; i < 4; i++) {
+      const d = displace(u, v, t, ampScale)
+      u += 0.7 * (x - d.x - u)
+      v += 0.7 * (z - d.z - v)
+    }
+  }
+  rest.u = u
+  rest.v = v
   const d = displace(u, v, t, ampScale)
   out.height = d.y
   out.swayX = d.x

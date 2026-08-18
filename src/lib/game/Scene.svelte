@@ -25,10 +25,10 @@
 		whitecapsGlsl,
 		windTravel,
 		windBase,
-		windVector
-	} from './whitecaps';
+		windVector,
+		sampleOceanTracked } from './whitecaps';
 	import { fftSlopeGlsl, makeFftDetail } from './fftwaves';
-	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock, rippleDisplayGain } from './ripples';
+	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock, rippleDisplayGain, injectRippleOver } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
 	import {
 		emitImpactSpray,
@@ -73,6 +73,7 @@
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
 	import { computeEnv, ENV } from './env';
+	import { logDiag } from './perflog';
 	import { game, perf } from './state.svelte';
 
 	let { active = true }: { active?: boolean } = $props();
@@ -2453,11 +2454,15 @@ void main() {
 	// vector), wx/wz: tilt velocity, for the bottom-heavy pendulum dynamics.
 	// pw: previous waterline, for the surface's rise rate. lt: time of the
 	// last directional tip splash (throttle).
+	// rest: the tracked rest-space point under this buoy, carried across
+	// frames so the surface sampler follows one sheet (sampleSurfaceTracked).
 	const buoys = [
-		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10 },
-		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10 },
-		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10 }
+		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, rest: { u: 4, v: -3 } },
+		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, rest: { u: -7, v: 5 } },
+		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, rest: { u: 9, v: 8 } }
 	];
+	// Scratch for the tracked sample; consumed within each buoy's block.
+	const buoySurf = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 };
 	let buoyMeshes = $state<(THREE.Mesh | undefined)[]>([]);
 
 	// Disturbance hierarchy: the crest-fall splashdown is THE event; all
@@ -2471,6 +2476,27 @@ void main() {
 	// Cap on vertical velocity carried out of the water, so a violent crest
 	// can toss a buoy, but only modestly.
 	const BUOY_MAX_CARRY = 3.5;
+	/**
+	 * Fastest a buoy may RISE, m/s. Falling is already gravity-limited by
+	 * the airborne branch; rising used to snap straight to the waterline,
+	 * which teleported the buoy upward whenever the sampled surface
+	 * stepped — and at storm chop the folding surface genuinely does step
+	 * (a passing fold ends the sheet the buoy was riding; measured hops of
+	 * 0.45m in one frame read as the vertical jitter). 10 m/s is above any
+	 * rise the sea sustains, so ordinary riding never touches the cap and
+	 * a step becomes a fast, finite bob.
+	 */
+	const BUOY_MAX_RISE = 10;
+	/**
+	 * Waterline rate above which a frame is treated as a SHEET STEP, m/s.
+	 * When a fold ends the sheet the tracked sampler rides, the sampled
+	 * waterline steps; the raw (waterline - pw) / dt rate then reads tens
+	 * of m/s for one frame, and everything keyed on it — bob agitation,
+	 * the splashdown impact — fired a phantom splash out of nowhere. Real
+	 * sustained rise never reaches this, so past it the frame is "no
+	 * data": riseRate zero, no event triggers.
+	 */
+	const BUOY_STEP_RATE = 7;
 
 	// Bottom-heavy pendulum tilt: the ballast is a righting spring toward
 	// the water-slope target, and angular momentum makes the buoy swing past
@@ -2924,14 +2950,29 @@ void main() {
 				// change together or the floats detach from the surface.
 				// sampleOcean includes whitecap crumble: a breaking crest
 				// passing under a float drops it with the collapsing water.
-				const surface = sampleOcean(x, z, waveTime);
+				const surface = sampleOceanTracked(buoySurf, b.rest, x, z, waveTime);
 				const waterline = surface.height + 0.15;
 				// How fast the surface itself is moving vertically, clamped
 				// against first-frame garbage.
+				const rawRate = buoyDt > 0 ? (waterline - b.pw) / buoyDt : 0;
+				if (PROFILE.buoyLog) {
+					logDiag({
+						k: 'buoy',
+						i,
+						y: +b.y.toFixed(4),
+						wl: +waterline.toFixed(4),
+						raw: +rawRate.toFixed(2),
+						vy: +b.vy.toFixed(3),
+						u: +b.rest.u.toFixed(3),
+						v: +b.rest.v.toFixed(3),
+						tx: +b.tx.toFixed(3),
+						tz: +b.tz.toFixed(3),
+						wxz: +Math.hypot(b.wx, b.wz).toFixed(3)
+					});
+				}
+				// Beyond BUOY_STEP_RATE this is a sheet step, not water motion.
 				const riseRate =
-					buoyDt > 0
-						? THREE.MathUtils.clamp((waterline - b.pw) / buoyDt, -6, 6)
-						: 0;
+					Math.abs(rawRate) > BUOY_STEP_RATE ? 0 : THREE.MathUtils.clamp(rawRate, -6, 6);
 				b.pw = waterline;
 
 				const px = x + surface.swayX * 0.4;
@@ -2945,7 +2986,9 @@ void main() {
 					if (buoyDt > 0) {
 						b.vy = Math.min((waterline - b.y) / buoyDt, BUOY_MAX_CARRY);
 					}
-					b.y = waterline;
+					// Rise at a finite rate; snap only downward (the airborne
+					// branch owns real falls). See BUOY_MAX_RISE.
+					b.y = Math.min(waterline, b.y + BUOY_MAX_RISE * buoyDt);
 					// The hull pushing through the water is a continuous
 					// disturbance, but a QUIET one: quadratic in rise rate
 					// so gentle bobbing injects nearly nothing, and capped
@@ -2953,7 +2996,10 @@ void main() {
 					// reserved for actual impacts.
 					const breaking = THREE.MathUtils.clamp((0.4 - surface.jacobian) / 0.8, 0, 1);
 					const agitation = Math.min(riseRate * riseRate * 0.005 + breaking * 0.012, 0.035);
-					if (agitation > 0.004) injectRipple(px, pz, 0.45, agitation);
+					if (agitation > 0.004) {
+						injectRipple(px, pz, 0.45, agitation);
+						if (PROFILE.buoyLog) logDiag({ k: 'bob', i, amp: +agitation.toFixed(4) });
+					}
 				} else {
 					// Off the crest: the surface fell faster than gravity
 					// allows. Fall ballistically until the water catches us.
@@ -2976,7 +3022,11 @@ void main() {
 							// (ballistic spray, spray.ts) whose landings leave
 							// the foam. No froth boil: buoys rely on splash +
 							// foam alone.
-							injectRipple(px, pz, 0.8, 0.12 + amp * 0.35);
+							// Spread over ~75ms: the ring rises instead of
+							// teleporting in — the "sudden awkward ripple".
+							injectRippleOver(px, pz, 0.8, 0.12 + amp * 0.35, 0.075);
+							if (PROFILE.buoyLog)
+								logDiag({ k: 'splash', i, impact: +impact.toFixed(2), amp: +amp.toFixed(3) });
 							if (ENABLE.buoySpray) emitImpactSpray(waveTime, px, pz, 0, 0, amp);
 						}
 						b.y = waterline;
@@ -3000,6 +3050,12 @@ void main() {
 				let targetX = 0;
 				let targetZ = 0;
 				if (!airborne) {
+					// Cold 1-iteration samples, deliberately: they barely
+					// invert, which makes them a heavy low-pass — smoothly
+					// biased near folds, never spiky. A rest-space gradient
+					// around the tracked point was tried and measured WORSE
+					// (its cold-start fallback jumps the anchor at sheet
+					// ends: 14 tilt spikes per 18 buoy-minutes vs 0 here).
 					const gradX =
 						(sampleOcean(x + 0.6, z, waveTime, 1, 1).height -
 							sampleOcean(x - 0.6, z, waveTime, 1, 1).height) /
@@ -3043,7 +3099,8 @@ void main() {
 					const sideX = px + (b.wx / tipSpeed) * TIP_RIM;
 					const sideZ = pz + (b.wz / tipSpeed) * TIP_RIM;
 					const tip = Math.min((tipSpeed - TIP_SPLASH_THRESHOLD) / 3.5, 1);
-					injectRipple(sideX, sideZ, 0.3, 0.04 + tip * 0.08);
+					injectRippleOver(sideX, sideZ, 0.3, 0.04 + tip * 0.08, 0.1);
+					if (PROFILE.buoyLog) logDiag({ k: 'tip', i, tip: +tip.toFixed(3) });
 					// The rim digging in flicks water outward on that side.
 					if (ENABLE.buoySpray)
 						emitImpactSpray(waveTime, sideX, sideZ, b.wx / tipSpeed, b.wz / tipSpeed, tip * 0.5);

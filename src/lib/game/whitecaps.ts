@@ -26,7 +26,10 @@ import {
   sampleSurface,
   sampleSurfaceInto,
   surfaceHeight,
-  type SurfaceSample, onFieldChange } from './waves'
+  type SurfaceSample, onFieldChange,
+  sampleSurfaceTracked,
+  type TrackedRest,
+} from './waves'
 
 export const MAX_EVENTS = 8
 
@@ -203,6 +206,21 @@ export function sampleOceanInto(
   iterations = 3,
 ): SurfaceSample {
   sampleSurfaceInto(out, x, z, t, ampScale, iterations)
+  out.height += eventSurface(x, z, t, out.height)
+  return out
+}
+
+/** The tracked sampler plus the whitecap crumble term — the buoy's view
+ * of the ocean; see sampleSurfaceTracked for why floaters use this. */
+export function sampleOceanTracked(
+  out: SurfaceSample,
+  rest: TrackedRest,
+  x: number,
+  z: number,
+  t: number,
+  ampScale = 1,
+): SurfaceSample {
+  sampleSurfaceTracked(out, rest, x, z, t, ampScale)
   out.height += eventSurface(x, z, t, out.height)
   return out
 }

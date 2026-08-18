@@ -1683,6 +1683,13 @@ export const PROFILE = {
    * every time in this investigation.
    */
   skipLandingCheck: false,
+  /**
+   * Stream per-frame buoy state and every buoy-caused ripple/spray event
+   * to the perf sink (tools/perf-logger.mjs), for hunting the vertical
+   * jitter that offline simulation does not reproduce. Start the sink,
+   * switch this on, play until the jitter shows, note roughly when.
+   */
+  buoyLog: false,
 }
 
 /**

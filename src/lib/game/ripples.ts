@@ -70,6 +70,11 @@ type Injection = { x: number; z: number; radius: number; strength: number }
 const pending: Injection[] = []
 
 /**
+ * Pokes being paid out over multiple sim steps — see injectRippleOver.
+ */
+const spreading: (Injection & { steps: number })[] = []
+
+/**
  * Live disturbance regions, for consumers that only want to work where
  * ripples exist (the caustic splat culls to these). A disturbance's reach
  * is its expanding ring front: speed * age, plus a margin. Lifetime comes
@@ -126,6 +131,27 @@ let rippleClock = 0
 /** Called once per fixed step by the Scene so injections can be dated. */
 export function setRippleClock(t: number) {
   rippleClock = t
+}
+
+/**
+ * A poke paid out over `seconds` instead of landing in one step.
+ *
+ * The wave sim is happy either way — but the EYE is not. A splashdown
+ * deposited as a single full-strength Gaussian materialises ~0.4m of
+ * water beside the buoy in one frame, which reads as the mesh glitching
+ * (a real ring grows over a couple hundred ms). Spreading the same total
+ * energy across a few steps lets the earlier fraction start propagating
+ * while the rest arrives: the ring RISES instead of appearing.
+ */
+export function injectRippleOver(
+  x: number,
+  z: number,
+  radius: number,
+  strength: number,
+  seconds = 0.15,
+) {
+  const steps = Math.max(1, Math.round(seconds * 60))
+  spreading.push({ x, z, radius, strength: strength / steps, steps })
 }
 
 export function injectRipple(
@@ -257,6 +283,12 @@ export class RippleSim {
 
   /** One wave-equation iteration, consuming queued injections. */
   step(renderer: THREE.WebGLRenderer) {
+    // Pay out the time-spread pokes, one slice per step.
+    for (let i = spreading.length - 1; i >= 0; i--) {
+      const sp = spreading[i]
+      pending.push({ x: sp.x, z: sp.z, radius: sp.radius, strength: sp.strength })
+      if (--sp.steps <= 0) spreading.splice(i, 1)
+    }
     // Follow a live sea-state change: propagation and damping are the
     // ripple's whole character and both move with the preset.
     this.material.uniforms.uPropagation.value = PROPAGATION

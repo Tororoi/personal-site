@@ -59,7 +59,7 @@
 	);
 	onMount(() => {
 		if (!showFps) return;
-		if (ENABLE.perfLog) startPerfLog(new Date().toISOString());
+		if (ENABLE.perfLog || PROFILE.buoyLog) startPerfLog(new Date().toISOString());
 		let frames = 0;
 		let worst = 0;
 		let total = 0;

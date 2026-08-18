@@ -19,8 +19,13 @@ import { ENABLE, PROFILE } from './tuning'
 const URL = 'http://127.0.0.1:8787/perf'
 /** How often a sample is taken. */
 const SAMPLE_MS = 250
-/** How often samples are shipped. Batched so the beacon is rare. */
-const FLUSH_MS = 2000
+/**
+ * How often samples are shipped. Short, because sendBeacon silently drops
+ * payloads past ~64KB — the buoy diagnostic at 180 lines/s in 2s batches
+ * lost 87% of its frames that way. Small frequent batches stay far under
+ * the limit, and the chunked flush below is the belt to this suspender.
+ */
+const FLUSH_MS = 300
 
 export type Sample = {
   /** Seconds since logging began. */
@@ -54,12 +59,22 @@ let t0 = 0
 
 function flush() {
   if (!queue.length) return
-  const body = queue.join('\n') + '\n'
+  const lines = queue
   queue = []
-  try {
-    navigator.sendBeacon?.(URL, new Blob([body], { type: 'text/plain' }))
-  } catch {
-    /* sink not running; sampling is a dev aid, never a hard dependency */
+  // Chunked well under sendBeacon's ~64KB ceiling, and with a fetch
+  // fallback when the beacon refuses: a diagnostic that silently drops
+  // seven-eighths of its data is worse than none, because it gets read
+  // as "the values were smooth".
+  for (let i = 0; i < lines.length; i += 150) {
+    const body = lines.slice(i, i + 150).join('\n') + '\n'
+    try {
+      const ok = navigator.sendBeacon?.(URL, new Blob([body], { type: 'text/plain' }))
+      if (!ok) {
+        fetch(URL, { method: 'POST', body, keepalive: true }).catch(() => {})
+      }
+    } catch {
+      /* sink not running; sampling is a dev aid, never a hard dependency */
+    }
   }
 }
 
@@ -86,6 +101,15 @@ export function startPerfLog(label: string) {
   addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flush()
   })
+}
+
+/**
+ * Free-form diagnostic line into the same stream. Distinguished from perf
+ * samples by its `d` tag; same batching, same fire-and-forget beacon.
+ */
+export function logDiag(obj: Record<string, unknown>) {
+  if (!started) return
+  queue.push(JSON.stringify({ d: 1, t: +((performance.now() - t0) / 1000).toFixed(3), ...obj }))
 }
 
 export function recordSample(s: Omit<Sample, 't'>) {
