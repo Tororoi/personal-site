@@ -22,7 +22,7 @@
 -->
 <script lang="ts">
 	import { ENABLE, LIVE_GROUPS, TUNING_DEFAULTS, TUNING_GROUPS } from './tuning';
-	import { CAMERA_AZIMUTH_DEG, computeEnv, effectiveSunAngleDeg, ENV, ENV_DEFAULTS } from './env';
+	import { CAMERA_AZIMUTH_DEG, computeEnv, ENV, ENV_DEFAULTS } from './env';
 	import { seaDrive, seaMetrics, SEA_REFERENCE } from './waves';
 	import { game, perf as perfTick } from './state.svelte';
 	import {
@@ -225,7 +225,6 @@
 		daySeconds: { min: 10, max: 1200, step: 5 },
 		// Offsets stop well short of 90, where the circle would collapse to
 		// a point at the pole and the arc would have no rise or set at all.
-		glintPhase: { min: 0.26, max: 0.74, step: 0.005 },
 		sunPathAngleDeg: { min: 0, max: 360, step: 1 },
 		sunPathOffsetDeg: { min: -75, max: 75, step: 1 },
 		moonPathAngleDeg: { min: 0, max: 360, step: 1 },
@@ -238,7 +237,6 @@
 		sunPathOffsetDeg: 'degrees the midday sun falls short of overhead — leans the arc',
 		moonPathAngleDeg: 'same, for the moon',
 		moonPathOffsetDeg: 'same, for the moon',
-		glintPhase: 'when the glitter stands vertical (alignGlint on)',
 		daySeconds: 'real seconds per full day'
 	};
 	// Everything the sun-path knobs imply, so the geometry is readable
@@ -250,7 +248,7 @@
 	const sunGeom = $derived.by(() => {
 		// envTick makes this recompute when a knob moves; ENV is a plain object.
 		void envTick;
-		const angle = effectiveSunAngleDeg();
+		const angle = ENV.sunPathAngleDeg;
 		const off = ENV.sunPathOffsetDeg;
 		const theta = (phase - 0.25) * Math.PI * 2;
 		const swing = Math.atan2(
@@ -302,7 +300,6 @@
 	});
 
 	const ENV_KNOBS = [
-		'glintPhase',
 		'sunPathAngleDeg',
 		'sunPathOffsetDeg',
 		'moonPathAngleDeg',
@@ -456,17 +453,6 @@
 					/>
 				</div>
 
-				<label class="bool">
-					<input
-						type="checkbox"
-						checked={!!envVals.alignGlint}
-						onchange={(e) => setEnv('alignGlint', e.currentTarget.checked)}
-					/>
-					<span class="name" class:mod={envVals.alignGlint !== ENV_DEFAULTS.alignGlint}
-						>alignGlint</span
-					>
-				</label>
-
 				<div class="geom">
 					<div><span>sun azimuth</span><span>{sunGeom.az.toFixed(0)}&deg;</span></div>
 					<div class:good={sunGeom.dev < 8} class:bad={sunGeom.dev > 25}>
@@ -478,9 +464,9 @@
 						<span>vertical at phase</span>
 						<span>{sunGeom.alignAt === null ? 'never' : sunGeom.alignAt.toFixed(3)}</span>
 					</div>
-					<div class:good={!!envVals.alignGlint}>
+					<div>
 						<span>path angle</span>
-						<span>{sunGeom.angle.toFixed(1)}&deg;{envVals.alignGlint ? ' (solved)' : ''}</span>
+						<span>{sunGeom.angle.toFixed(1)}&deg;</span>
 					</div>
 				</div>
 
@@ -497,19 +483,14 @@
 
 				{#each ENV_KNOBS as k (k)}
 					{@const r = ENV_RANGE[k]}
-					<!-- alignGlint SOLVES the sun's angle, so that knob stops being
-					     read. Showing it as a live control that silently does
-					     nothing is worse than not showing it at all. -->
-					{@const solved = k === 'sunPathAngleDeg' && !!envVals.alignGlint}
-					<div class="knob" class:solved>
+					<div class="knob">
 						<div class="head">
-							<span class="name" class:mod={!solved && envVals[k] !== ENV_DEFAULTS[k]}>{k}</span>
+							<span class="name" class:mod={envVals[k] !== ENV_DEFAULTS[k]}>{k}</span>
 							<input
 								class="num"
 								type="number"
 								step={r.step}
-								disabled={solved}
-								value={solved ? show(sunGeom.angle) : show(envVals[k] as number)}
+								value={show(envVals[k] as number)}
 								onchange={(e) => setEnv(k, +e.currentTarget.value)}
 							/>
 						</div>
@@ -518,13 +499,10 @@
 							min={r.min}
 							max={r.max}
 							step={r.step}
-							disabled={solved}
-							value={solved ? sunGeom.angle : (envVals[k] as number)}
+							value={envVals[k] as number}
 							oninput={(e) => setEnv(k, +e.currentTarget.value)}
 						/>
-						<p class="help">
-							{solved ? 'solved by alignGlint — turn it off to set this' : ENV_HELP[k]}
-						</p>
+						<p class="help">{ENV_HELP[k]}</p>
 					</div>
 				{/each}
 			</section>
@@ -749,14 +727,6 @@
 		color: #55708a;
 	}
 	.geom .bad {
-		color: #d3a34a;
-	}
-
-	.solved .name,
-	.solved .num {
-		color: #5f7a90;
-	}
-	.solved .help {
 		color: #d3a34a;
 	}
 

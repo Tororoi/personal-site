@@ -472,6 +472,23 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 	 * instead. Zero at the current isometric camera, so the look is
 	 * unchanged; it only stops the fog reacting to where the lens is.
 	 */
+	/**
+	 * How far the reflected sky sinks into the fog colour at full night.
+	 *
+	 * The preset sky colours are DAYLIGHT skies, and they used to shine all
+	 * night: the Fresnel reflection kept painting largeSwell's bright
+	 * overcast (#c3cbd1) across the whole surface, so its nights read as
+	 * grey days. (Storm looked fine only because its sky constants are
+	 * already dark.) Pulling the sky toward the env's fog colour by the
+	 * night factor darkens every sea coherently — the same keyframes that
+	 * already darken the water and the fog now take the reflection with
+	 * them.
+	 */
+	const NIGHT_SKY_TO_FOG = 0.85;
+	const skyZenithBase = new THREE.Color(activeField.sky?.zenith ?? '#a8c8d8');
+	const skyHorizonBase = new THREE.Color(activeField.sky?.horizon ?? '#d5e3ea');
+	const skyScratch = new THREE.Color();
+
 	const BASE_CAM_DIST = Math.hypot(34, 30, 34);
 	// The simulated viewpoint the specular converges on. Distance sets the
 	// fan (focus); height, scaled separately, sets how far the reflection
@@ -573,8 +590,8 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 		waterUniforms.uSunDiffusion.value = dif;
 		causticMap.diffusion = dif;
 		waterUniforms.uCausticFlat.value = THREE.MathUtils.smoothstep(dif, 0.35, 1.0);
-		waterUniforms.uSkyZenith.value.set(activeField.sky?.zenith ?? '#a8c8d8');
-		waterUniforms.uSkyHorizon.value.set(activeField.sky?.horizon ?? '#d5e3ea');
+		skyZenithBase.set(activeField.sky?.zenith ?? '#a8c8d8');
+		skyHorizonBase.set(activeField.sky?.horizon ?? '#d5e3ea');
 	}
 
 	/** GLSL-style smoothstep that also accepts e0 > e1 (a falling ramp). */
@@ -2883,9 +2900,16 @@ void main() {
 				// Multiplying the two smoothsteps gives the hold for free —
 				// the first is fully in before the second starts backing it out.
 				const ph = ((game.time / ENV.daySeconds) % 1 + 1) % 1;
+				// The spike windows are positions along the ARC, not times of
+				// day: the moon rides the same clock half a turn later
+				// (computeEnv gives it theta + PI), so at night the day-phase
+				// windows shift by half a day and the moon's glitter snaps at
+				// the same point of its pass as the sun's does.
+				const sunUp = Math.sin((ph - 0.25) * Math.PI * 2) > 0;
+				const bodyPh = sunUp ? ph : (ph + 0.5) % 1;
 				const spike =
-					smooth01(ph, SPECULAR.spikeInStart, SPECULAR.spikeInEnd) *
-					(1 - smooth01(ph, SPECULAR.spikeOutStart, SPECULAR.spikeOutEnd));
+					smooth01(bodyPh, SPECULAR.spikeInStart, SPECULAR.spikeInEnd) *
+					(1 - smooth01(bodyPh, SPECULAR.spikeOutStart, SPECULAR.spikeOutEnd));
 				const base = mixc(SPECULAR.sharpClear, SPECULAR.sharpClearStorm);
 				const peak = mixc(SPECULAR.sharpPeak, SPECULAR.sharpPeakStorm);
 				const clear = base + (peak - base) * spike;
@@ -2920,6 +2944,15 @@ void main() {
 			sunDot.visible = isDay;
 			moonDot.visible = !isDay;
 			refreshLightPaths();
+			// Reflected sky follows the clock: daylight preset colours, sunk
+			// toward the fog as night falls. skyScratch carries the fog tone.
+			skyScratch.setRGB(env.fog[0], env.fog[1], env.fog[2]);
+			waterUniforms.uSkyZenith.value
+				.copy(skyZenithBase)
+				.lerp(skyScratch, env.night * NIGHT_SKY_TO_FOG);
+			waterUniforms.uSkyHorizon.value
+				.copy(skyHorizonBase)
+				.lerp(skyScratch, env.night * NIGHT_SKY_TO_FOG);
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
 			waterUniforms.uSunI.value = env.lightIntensity;
 			backdropUniforms.uFloorColor.value.setRGB(
