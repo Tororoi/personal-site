@@ -2474,9 +2474,9 @@ void main() {
 	// rest: the tracked rest-space point under this buoy, carried across
 	// frames so the surface sampler follows one sheet (sampleSurfaceTracked).
 	const buoys = [
-		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, rest: { u: 4, v: -3 } },
-		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, rest: { u: -7, v: 5 } },
-		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, rest: { u: 9, v: 8 } }
+		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, wet: false, rest: { u: 4, v: -3 } },
+		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, wet: false, rest: { u: -7, v: 5 } },
+		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, wet: false, rest: { u: 9, v: 8 } }
 	];
 	// Scratch for the tracked sample; consumed within each buoy's block.
 	const buoySurf = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 };
@@ -2489,21 +2489,36 @@ void main() {
 	const TIP_SPLASH_COOLDOWN = 0.3; // seconds between tip splashes per buoy
 	const TIP_RIM = 0.38; // meters: splash lands off the rim, not the center
 
-	const BUOY_GRAVITY = 9.8; // m/s^2: the fall-rate clamp
-	// Cap on vertical velocity carried out of the water, so a violent crest
-	// can toss a buoy, but only modestly.
-	const BUOY_MAX_CARRY = 3.5;
+	const BUOY_GRAVITY = 9.8; // m/s^2
 	/**
-	 * Fastest a buoy may RISE, m/s. Falling is already gravity-limited by
-	 * the airborne branch; rising used to snap straight to the waterline,
-	 * which teleported the buoy upward whenever the sampled surface
-	 * stepped — and at storm chop the folding surface genuinely does step
-	 * (a passing fold ends the sheet the buoy was riding; measured hops of
-	 * 0.45m in one frame read as the vertical jitter). 10 m/s is above any
-	 * rise the sea sustains, so ordinary riding never touches the cap and
-	 * a step becomes a fast, finite bob.
+	 * HEAVE MODEL — a spring-damper on submersion, replacing the old
+	 * snap-to-waterline. The buoy now has real vertical dynamics: push it
+	 * under and it bobs back with overshoot; a wave lifts it with lag; a
+	 * splashdown rings. This is the foundation the bobber needs — a strike
+	 * is exactly "it dipped when no wave explains it", which only means
+	 * something once dipping is dynamics rather than assignment.
+	 *
+	 * Two numbers parameterise the whole thing, and both are FEEL, not
+	 * caps: the natural bob period (mass over waterplane area, in disguise)
+	 * and the damping ratio (hull drag). Everything the old caps hacked in
+	 * falls out: teleports can't happen because a waterline step is now
+	 * just a force, upward acceleration is bounded by the spring, and the
+	 * downward pull above equilibrium is clamped at gravity because a hull
+	 * out of the water is simply falling.
 	 */
-	const BUOY_MAX_RISE = 10;
+	const BUOY_BOB_PERIOD = 1.2; // s — natural heave period of the float
+	const BUOY_BOB_ZETA = 0.15; // damping ratio; < 1 so it visibly rings
+	const BUOY_W0 = (2 * Math.PI) / BUOY_BOB_PERIOD;
+	const BUOY_SPRING = BUOY_W0 * BUOY_W0; // accel per metre of submersion
+	const BUOY_DAMP = 2 * BUOY_BOB_ZETA * BUOY_W0;
+	/** Submersion past which extra depth adds no more push (hull volume). */
+	const BUOY_MAX_SUBMERSION = 0.8;
+	/**
+	 * Where water contact ends: the depth at which the spring's pull-down
+	 * exactly equals gravity. Below it the buoy is airborne — undamped,
+	 * falling at g — and the force law is continuous across the boundary.
+	 */
+	const BUOY_CONTACT_DISP = -BUOY_GRAVITY / BUOY_SPRING;
 	/**
 	 * Waterline rate above which a frame is treated as a SHEET STEP, m/s.
 	 * When a fold ends the sheet the tracked sampler rides, the sampled
@@ -3011,60 +3026,56 @@ void main() {
 				const px = x + surface.swayX * 0.4;
 				const pz = z + surface.swayZ * 0.4;
 
-				let airborne = b.y > waterline + 0.001;
-				if (!airborne) {
-					// In the water: buoyancy wins instantly, ride the surface.
-					// Track the surface's climb rate (capped) so leaving a
-					// crest carries believable momentum into the fall.
-					if (buoyDt > 0) {
-						b.vy = Math.min((waterline - b.y) / buoyDt, BUOY_MAX_CARRY);
+				// Heave: submersion relative to the equilibrium ride height.
+				const disp = waterline - b.y;
+				const airborne = disp <= BUOY_CONTACT_DISP;
+				// Buoyancy pushes up with submersion (capped once the hull is
+				// fully under); the pull-down above equilibrium can never
+				// exceed gravity, because a hull out of the water is just a
+				// falling object. Damping is against the WATER, not the air,
+				// so a wave sweeping up under the buoy drags it along.
+				let accel = Math.max(
+					BUOY_SPRING * Math.min(disp, BUOY_MAX_SUBMERSION),
+					-BUOY_GRAVITY
+				);
+				if (!airborne) accel -= BUOY_DAMP * (b.vy - riseRate);
+				// Semi-implicit Euler: velocity first, then position — the
+				// stable order for an oscillator at fixed steps.
+				b.vy += accel * buoyDt;
+				b.y += b.vy * buoyDt;
+
+				if (!airborne && !b.wet) {
+					// Contact begins: splashdown, scaled by the relative
+					// speed of buoy and water. The expanding ring, rebound
+					// column, and interference all come from the wave
+					// equation; the heave spring adds the bob-and-ring.
+					const impact = Math.abs(riseRate - b.vy);
+					if (impact > DROPLET.impactMinSpeed) {
+						const amp = Math.min(
+							(impact - DROPLET.impactMinSpeed) /
+								(DROPLET.impactFullSpeed - DROPLET.impactMinSpeed),
+							1
+						);
+						// Spread over ~75ms: the ring rises instead of
+						// teleporting in — the "sudden awkward ripple".
+						injectRippleOver(px, pz, 0.8, 0.12 + amp * 0.35, 0.075);
+						if (PROFILE.buoyLog)
+							logDiag({ k: 'splash', i, impact: +impact.toFixed(2), amp: +amp.toFixed(3) });
+						if (ENABLE.buoySpray) emitImpactSpray(waveTime, px, pz, 0, 0, amp);
 					}
-					// Rise at a finite rate; snap only downward (the airborne
-					// branch owns real falls). See BUOY_MAX_RISE.
-					b.y = Math.min(waterline, b.y + BUOY_MAX_RISE * buoyDt);
+				}
+				b.wet = !airborne;
+
+				if (!airborne) {
 					// The hull pushing through the water is a continuous
 					// disturbance, but a QUIET one: quadratic in rise rate
 					// so gentle bobbing injects nearly nothing, and capped
-					// far below a splashdown. Displacement only; froth is
-					// reserved for actual impacts.
+					// far below a splashdown.
 					const breaking = THREE.MathUtils.clamp((0.4 - surface.jacobian) / 0.8, 0, 1);
 					const agitation = Math.min(riseRate * riseRate * 0.005 + breaking * 0.012, 0.035);
 					if (agitation > 0.004) {
 						injectRipple(px, pz, 0.45, agitation);
 						if (PROFILE.buoyLog) logDiag({ k: 'bob', i, amp: +agitation.toFixed(4) });
-					}
-				} else {
-					// Off the crest: the surface fell faster than gravity
-					// allows. Fall ballistically until the water catches us.
-					b.vy -= BUOY_GRAVITY * buoyDt;
-					b.y += b.vy * buoyDt;
-					if (b.y <= waterline) {
-						// Splashdown: one hard poke scaled by the relative
-						// speed of buoy and water. The expanding ring, the
-						// rebound column, and any interference with other
-						// ripples all come from the wave equation.
-						const impact = Math.abs(riseRate - b.vy);
-						if (impact > DROPLET.impactMinSpeed) {
-							const amp = Math.min(
-								(impact - DROPLET.impactMinSpeed) /
-									(DROPLET.impactFullSpeed - DROPLET.impactMinSpeed),
-								1
-							);
-							// Two effects: the displacement hat (water pushed
-							// aside, wave equation) and the airborne crown
-							// (ballistic spray, spray.ts) whose landings leave
-							// the foam. No froth boil: buoys rely on splash +
-							// foam alone.
-							// Spread over ~75ms: the ring rises instead of
-							// teleporting in — the "sudden awkward ripple".
-							injectRippleOver(px, pz, 0.8, 0.12 + amp * 0.35, 0.075);
-							if (PROFILE.buoyLog)
-								logDiag({ k: 'splash', i, impact: +impact.toFixed(2), amp: +amp.toFixed(3) });
-							if (ENABLE.buoySpray) emitImpactSpray(waveTime, px, pz, 0, 0, amp);
-						}
-						b.y = waterline;
-						b.vy = 0;
-						airborne = false;
 					}
 				}
 
