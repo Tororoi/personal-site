@@ -890,14 +890,15 @@ let DOM_PHASE_SPEED = domWave.omega / domWave.k
 const FROTH_MEAN_R = FROTH.radiusBase + FROTH.radiusVar * 0.5
 
 /** Dominant band amplitude — the froth criterion's normaliser. */
-let domAmp = waves.reduce((a, w) => Math.max(a, w.amp), 0)
+// The froth reference, matching the GPU twin's uDomAmp — see FROTH.ampRef.
+let domAmp = Math.max(waves.reduce((a, w) => Math.max(a, w.amp), 0), FROTH.ampRef)
 
 onFieldChange(() => {
   domWave = waves.reduce((a, b) => (b.amp > a.amp ? b : a), waves[0])
   HEAD_X = domWave.dirX
   HEAD_Z = domWave.dirZ
   DOM_PHASE_SPEED = domWave.omega / domWave.k
-  domAmp = waves.reduce((a, w) => Math.max(a, w.amp), 0)
+  domAmp = Math.max(waves.reduce((a, w) => Math.max(a, w.amp), 0), FROTH.ampRef)
 })
 
 let coverScanClock = 0
@@ -1218,7 +1219,11 @@ function frothFactor(u: number, v: number, t: number, jNow: number) {
     wsum += sq
   }
   const loopAmp = wsum > 0.0001 ? wAmp / wsum : 0
-  const ampK = Math.min(Math.max(loopAmp / domAmp, FROTH.ampRatioFloor), 1)
+  // CPU twin of the shader's compressed absolute sizing (FROTH.ampCurve).
+  const ampK = Math.min(
+    Math.max(Math.pow(Math.max(loopAmp / domAmp, 0.0001), FROTH.ampCurve), FROTH.ampRatioFloor),
+    1,
+  )
   // Jacobian a beat in the past, for the same release tail the shader has.
   let jxx = 1
   let jzz = 1

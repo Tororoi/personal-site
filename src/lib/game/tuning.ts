@@ -149,6 +149,31 @@ export const FROTH = {
   /** How much of the lagged gate survives (0-1). */
   gateLagWeight: 0.9,
 
+  /**
+   * FLOOR on the froth reference, metres.
+   *
+   * A folding wave's size factor is loopAmp / max(seaDominantAmp, this).
+   * Above the floor the reference is the sea's own biggest wave — the
+   * per-sea normalisation both signed-off looks were tuned under, so
+   * largeSwell and storm render exactly as before. The floor exists for
+   * the seas BELOW it: without one, a calm sea normalises against its
+   * own 4cm ripple and awards it full-size froth, which is the bug that
+   * started all of this.
+   *
+   * A fully fixed reference was tried twice and cannot work: the tuned
+   * looks disagree about what a 0.87m wave deserves (full size on
+   * largeSwell, half on storm), so no single absolute curve reproduces
+   * both. max(dom, floor) is relative where the tuning lives and
+   * absolute where relativity lied.
+   */
+  ampRef: 0.87,
+  /**
+   * Exponent on the amplitude ratio before the clamp; 1 is linear, the
+   * default. Below 1 lifts SMALL ratios hardest — 0.25 sent every
+   * floor-sitting mid wave from 0.3 to ~0.55 and read as a huge global
+   * froth amplification. Kept wired in case a soft knee is ever wanted.
+   */
+  ampCurve: 1.0,
   /** Size ceiling from the folding wave's amplitude ratio. */
   ampRatioFloor: 0.3,
   /** Pinch intensity window: J from `intJStart` down over `intJSpan`. */
@@ -745,21 +770,31 @@ export const SPECULAR = {
    * cross-fade, use SEA.chopOverride — nothing in this group changes the
    * water.
    */
-  // Named as statements, not as chop levers: "use the calm values AT chop
-  // 0.55, the storm values AT chop 5". They are the ends of the blend, not
-  // a way to change how rough the sea is — that is SEA.chopOverride.
-  calmAtChop: 0.55,
-  stormAtChop: 5.0,
   /**
-   * Curve on the chop blend: t = ((chop - calmAtChop) / (stormAtChop - calmAtChop)) ^ this.
+   * WHICH MEASURE OF THE SEA drives the calm/storm blend, as weights over
+   * three normalised metrics (see seaDrive in waves.ts). They need not sum
+   * to 1, and each is normalised against its own calm-to-storm range, so a
+   * weight means the same thing across metrics despite the units differing.
+   *
+   * Slope carries all of it by default, because that is what the specular
+   * physically responds to: the glitter's spread IS the surface slope
+   * distribution, and the lobe is computed in slope space. Chop was the
+   * original driver and is the worst of the three — it is a normalised fold
+   * budget, not a physical property, and it tracks the sea only loosely.
+   */
+  driveSlope: 1,
+  driveAmp: 0,
+  driveChop: 0,
+  /**
+   * Curve on the drive: t = seaDrive(...) ^ this.
    *
    * Below 1 it rushes toward the storm values, which is what a sea state
-   * actually does — largeSwell at chop 2.25 is only 38% of the way along
-   * the numeric range but it breaks and scatters far more like a storm
-   * than like a mirror. 0.216 is solved to put it at roughly twice the
-   * storm values; 1.0 gives the plain linear ramp back.
+   * actually does. 0.3 is solved to keep largeSwell at roughly twice the
+   * storm values, as it was under the old chop driver — but it needed
+   * re-solving, because slope puts largeSwell at 50% of the calm-to-storm
+   * range where chop put it at 38%. 1.0 gives the plain linear ramp.
    */
-  chopCurve: 0.216,
+  driveCurve: 0.3,
   sharpClearStorm: 100,
   sharpOvercastStorm: 100,
   sharpPeakStorm: 200,
@@ -1678,6 +1713,11 @@ export const SEA = {
    *
    * LIVE, like chopOverride — ramp it from gameplay and the sea builds.
    */
+  /**
+   * Use the UNIFIED field instead of the presets. Overrides seaState and
+   * ?sea=; chopOverride still applies on top.
+   */
+  useUnified: false,
   seaState: -1,
   /**
    * Seconds PER UNIT of seaState change. 0 snaps.
@@ -1696,6 +1736,59 @@ export const SEA = {
 }
 
 /**
+ * UNIFIED SEA — the whole ocean on a handful of sliders.
+ *
+ * The band structure (wavelengths, headings, spreads, per-band slope
+ * balance) is FIXED, in UNIFIED_BANDS in waves.ts: interpolating
+ * wavelength or heading churns the surface, because both sit inside the
+ * (position . direction) * k phase term. What a sea state actually varies
+ * is energy and weather, and that is all these knobs drive.
+ *
+ * `waves` is the one calm-to-storm dial: 0 matches the calm preset's
+ * energy, 1 largeSwell's, 2 the storm's — band slopes scale geometrically
+ * through those measured landmarks and chop lerps through the presets'
+ * values, so froth, foam, droplets and the specular all follow through
+ * the systems they already key on.
+ *
+ * `weather` is deliberately separate: cloud cover is not a function of
+ * wave height. It drives sky colour and sun diffusion, which is what the
+ * caustics and the specular's clear/overcast blend already read.
+ *
+ * Compass knobs: 0 north, 90 east, 180 south, 270 west, calibrated so
+ * WEST is where the default sun path sets (world azimuth 226). Bearings
+ * are the direction the wind/current moves TOWARD.
+ */
+export const UNIFIED = {
+  /** 0 calm .. 1 largeSwell .. 2 storm. */
+  waves: 1,
+  /** 0 clear blue .. 1 heavy overcast. */
+  weather: 0.4,
+  /** m/s. Spray advection, gusts, and the FFT detail spectrum's shape. */
+  windSpeed: 9,
+  /** Compass bearing the wind blows toward. 68 = the presets' heading. */
+  windCompassDeg: 68,
+  /** Compass bearing the surface current sets toward. */
+  currentCompassDeg: 68,
+  /** m/s. */
+  currentSpeed: 1.55,
+  /** Global tempo multiplier on every wave's phase speed. */
+  timeScale: 1,
+  /**
+   * Multiplier on every band's wavelength. Moves SIZE without touching
+   * STEEPNESS — a component's slope is amp * k and the wavelength cancels
+   * — so this is the knob that separates the two, and the one exception
+   * to "wavelengths are fixed": a uniform stretch keeps every phase
+   * relationship, so it does not churn the way per-band edits do.
+   */
+  lambdaScale: 1,
+  /** FFT surface-detail band: the SIZE of the fine texture, metres... */
+  detailMin: 0.4,
+  detailMax: 4,
+  /** ...and its strength, as RMS slope. */
+  detailSlope: 0.055,
+}
+
+/**
  * REGISTRY for the tuning panel (TuningPanel.svelte).
  *
  * Listed explicitly rather than reflected off the module, so that adding
@@ -1709,6 +1802,7 @@ const GROUPS = {
   FFT,
   PROFILE,
   SEA,
+  UNIFIED,
   FROTH,
   PLUME,
   LOOP,
@@ -1752,4 +1846,4 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
  * frame — otherwise the panel would report a change that never landed,
  * which is worse than asking for a reload.
  */
-export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA'])
+export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA', 'UNIFIED'])

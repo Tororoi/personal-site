@@ -23,7 +23,8 @@
 <script lang="ts">
 	import { ENABLE, LIVE_GROUPS, TUNING_DEFAULTS, TUNING_GROUPS } from './tuning';
 	import { CAMERA_AZIMUTH_DEG, computeEnv, effectiveSunAngleDeg, ENV, ENV_DEFAULTS } from './env';
-	import { game } from './state.svelte';
+	import { seaDrive, seaMetrics, SEA_REFERENCE } from './waves';
+	import { game, perf as perfTick } from './state.svelte';
 	import {
 		clearOverrides,
 		loadOverrides,
@@ -199,12 +200,24 @@
 		// unreachable sea states at the cost of resolution across the real ones.
 		'SEA.chopOverride': { min: -1, max: 5, step: 0.05 },
 		'SEA.seaState': { min: -1, max: 2, step: 0.01 },
+		'UNIFIED.waves': { min: 0, max: 2, step: 0.01 },
+		'UNIFIED.weather': { min: 0, max: 1, step: 0.01 },
+		'UNIFIED.windSpeed': { min: 0, max: 45, step: 0.5 },
+		'UNIFIED.windCompassDeg': { min: 0, max: 360, step: 1 },
+		'UNIFIED.currentCompassDeg': { min: 0, max: 360, step: 1 },
+		'UNIFIED.currentSpeed': { min: 0, max: 4, step: 0.05 },
+		'UNIFIED.timeScale': { min: 0.2, max: 2, step: 0.01 },
+		'UNIFIED.lambdaScale': { min: 0.2, max: 4, step: 0.01 },
+		'UNIFIED.detailMin': { min: 0.1, max: 2, step: 0.01 },
+		'UNIFIED.detailMax': { min: 0.5, max: 8, step: 0.05 },
+		'UNIFIED.detailSlope': { min: 0, max: 0.15, step: 0.001 },
 		// Chop thresholds, so they need the chop range — not the 0..1 the
 		// heuristic infers from a default under 1.
-		'SPECULAR.calmAtChop': { min: 0, max: 5, step: 0.05 },
-		'SPECULAR.stormAtChop': { min: 0, max: 5, step: 0.05 },
 		// Exponent: above 1 is the opposite curve, so leave room for it.
-		'SPECULAR.chopCurve': { min: 0.05, max: 2, step: 0.01 }
+		'SPECULAR.driveCurve': { min: 0.05, max: 2, step: 0.01 },
+		'SPECULAR.driveSlope': { min: 0, max: 1, step: 0.01 },
+		'SPECULAR.driveAmp': { min: 0, max: 1, step: 0.01 },
+		'SPECULAR.driveChop': { min: 0, max: 1, step: 0.01 }
 	};
 
 	/** Explicit bounds for the handful of env knobs, which have real units. */
@@ -260,6 +273,31 @@
 			dev,
 			up,
 			alignAt
+		};
+	});
+
+	// What the water actually measures, as opposed to the config that
+	// produced it. seaMetrics is a plain object rewritten on each field
+	// rebuild, so `perf` is borrowed purely as a per-frame reactive tick.
+	const sea = $derived.by(() => {
+		void perfTick.calls;
+		const R = SEA_REFERENCE;
+		const pct = (v: number, a: number, b: number) =>
+			b === a ? 0 : Math.min(Math.max((v - a) / (b - a), 0), 1);
+		return {
+			sigAmp: seaMetrics.sigAmp,
+			rmsSlope: seaMetrics.rmsSlope,
+			chop: seaMetrics.chop,
+			domLambda: seaMetrics.domLambda,
+			wind: seaMetrics.windSpeed,
+			nSlope: pct(seaMetrics.rmsSlope, R.calm.rmsSlope, R.storm.rmsSlope),
+			nAmp: pct(seaMetrics.sigAmp, R.calm.sigAmp, R.storm.sigAmp),
+			nChop: pct(seaMetrics.chop, R.calm.chop, R.storm.chop),
+			drive: seaDrive(
+				TUNING_GROUPS.SPECULAR.driveSlope as number,
+				TUNING_GROUPS.SPECULAR.driveAmp as number,
+				TUNING_GROUPS.SPECULAR.driveChop as number
+			)
 		};
 	});
 
@@ -491,6 +529,22 @@
 				{/each}
 			</section>
 
+			<section class="grp live">
+				<h3>SEA <span class="dim">measured</span></h3>
+				<div class="geom">
+					<div><span>significant amplitude</span><span>{sea.sigAmp.toFixed(3)} m</span></div>
+					<div><span>RMS slope</span><span>{sea.rmsSlope.toFixed(4)}</span></div>
+					<div><span>chop</span><span>{sea.chop.toFixed(2)}</span></div>
+					<div><span>dominant wavelength</span><span>{sea.domLambda.toFixed(1)} m</span></div>
+					<div><span>wind</span><span>{sea.wind.toFixed(1)} m/s</span></div>
+					<div class="rule"><span>normalised calm&rarr;storm</span><span></span></div>
+					<div><span>slope</span><span>{(sea.nSlope * 100).toFixed(0)}%</span></div>
+					<div><span>amplitude</span><span>{(sea.nAmp * 100).toFixed(0)}%</span></div>
+					<div><span>chop</span><span>{(sea.nChop * 100).toFixed(0)}%</span></div>
+					<div class="good"><span>specular drive</span><span>{(sea.drive * 100).toFixed(0)}%</span></div>
+				</div>
+			</section>
+
 			<!-- STAGED: baked into GLSL, needs the reload. -->
 			{#each GROUP_NAMES as g (g)}
 				{@const hits = groupHits(g)}
@@ -687,6 +741,12 @@
 	}
 	.geom .good {
 		color: #8fd4b4;
+	}
+	.geom .rule {
+		margin-top: 3px;
+		padding-top: 3px;
+		border-top: 1px solid #1c2833;
+		color: #55708a;
 	}
 	.geom .bad {
 		color: #d3a34a;

@@ -13,7 +13,9 @@
 		fieldForSeaState,
 		generateWaves,
 		waveUniformA,
-		waveUniformB
+		waveUniformB,
+		seaDrive,
+		seaMetrics
 	} from './waves';
 	import {
 		events,
@@ -65,7 +67,8 @@
 		PROFILE,
 		SPECULAR,
 		PLUME,
-		SEA } from './tuning';
+		SEA,
+		UNIFIED } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
@@ -331,8 +334,11 @@
 		uFoamExtent: { value: FOAM_EXTENT },
 		// Baked tiling web-skeleton distance field (set after first bake).
 		uFoamWebTex: { value: null as THREE.Texture | null },
-		// Dominant-band amplitude, for the sprite-size twin in the vertex.
-		uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) }
+		// The froth reference: max(sea's dominant amplitude, FROTH.ampRef).
+		// ONE uniform object, shared by every material that sizes froth —
+		// separate copies are how the caustics once kept refracting a storm
+		// under a calm sea. Refreshed in syncSeaState.
+		uDomAmp: { value: Math.max(waves.reduce((a, b) => Math.max(a, b.amp), 0), FROTH.ampRef) }
 	};
 
 	// The visible ocean "floor" depth; also the miss plane of the water's
@@ -539,17 +545,25 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 			seaEased = target;
 			seaVel = 0;
 		}
-		const key = `${seaEased.toFixed(4)},${SEA.chopOverride}`;
+		// Any UNIFIED knob must trigger a rebuild too — that group IS the
+		// field when useUnified is on, so its values belong in the key.
+		// Joining the whole group is cheap next to the rebuild it guards.
+		const key = SEA.useUnified
+			? `U${Object.values(UNIFIED).join(',')},${SEA.chopOverride}`
+			: `${seaEased.toFixed(4)},${SEA.chopOverride}`;
 		if (key === seaApplied) return;
 		seaApplied = key;
 		applySeaState(seaEased, SEA.chopOverride);
-		const dom = waves.reduce((a, b) => Math.max(a, b.amp), 0);
-		frothMaterial.uniforms.uDomAmp.value = dom;
 		waterUniforms.uWindDir.value.set(
 			Math.cos(activeField.windAngle),
 			Math.sin(activeField.windAngle)
 		);
 		waterUniforms.uFoaminess.value = CONTACT_FOAMINESS;
+		{
+			const ref = Math.max(waves.reduce((a, b) => Math.max(a, b.amp), 0), FROTH.ampRef);
+			waterUniforms.uDomAmp.value = ref;
+			foamField.setDomAmp(ref);
+		}
 		waterUniforms.uRippleGain.value = rippleDisplayGain();
 		// The FFT spectrum is CPU work — two 128^2 float textures — so it is
 		// marked stale here and rebuilt on a throttle rather than inline.
@@ -558,10 +572,6 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth) {
 		waterUniforms.uSunDiffusion.value = dif;
 		causticMap.diffusion = dif;
 		waterUniforms.uCausticFlat.value = THREE.MathUtils.smoothstep(dif, 0.35, 1.0);
-		// The foam sim keeps its OWN dominant-amplitude reference, and the
-		// froth criterion divides by it — left at load it made a calm sea
-		// read as though a storm's crests were the yardstick.
-		foamField.setDomAmp(waves.reduce((a, b) => Math.max(a, b.amp), 0));
 		waterUniforms.uSkyZenith.value.set(activeField.sky?.zenith ?? '#a8c8d8');
 		waterUniforms.uSkyHorizon.value.set(activeField.sky?.horizon ?? '#d5e3ea');
 	}
@@ -746,7 +756,9 @@ float pinchMask(vec2 restXZ) {
 	vec3 Na = cross(Tv, Tu);
 	float ny = Na.y / max(length(Na), 0.0001);
 	// Shared sprite-criterion gate (twin of the vertex).
-	float ampK = clamp((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.3, 1.0);
+	// Compressed absolute sizing — see FROTH.ampCurve. max() guards pow(0, x),
+	// which is undefined in GLSL for a zero base.
+	float ampK = clamp(pow(max((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.0001), ${f(FROTH.ampCurve)}), 0.3, 1.0);
 	float intK = mix(0.4, 1.0, clamp((0.1 - Na.y) / 0.55, 0.0, 1.0));
 	float sk = ampK * intK;
 	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
@@ -1200,7 +1212,9 @@ void main() {
 	// SHARED FROTH CRITERION: the same smoothstep(0.1, 0.42) gate the
 	// sprites use — a loop that generates no sprites neither whitens
 	// nor stretches, so all three systems agree on which pinches count.
-	float ampK = clamp((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.3, 1.0);
+	// Compressed absolute sizing — see FROTH.ampCurve. max() guards pow(0, x),
+	// which is undefined in GLSL for a zero base.
+	float ampK = clamp(pow(max((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.0001), ${f(FROTH.ampCurve)}), 0.3, 1.0);
 	float intK = mix(0.4, 1.0, clamp((0.1 - vJacobian) / 0.55, 0.0, 1.0));
 	float sk = ampK * intK;
 	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
@@ -1679,7 +1693,7 @@ float frothFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 N
 	g = max(gNow, gPast * ${f(FROTH.gateLagWeight)});
 	// Size = folder amplitude ratio (ceiling) x pinch intensity.
 	float loopAmp = wsum > 0.0001 ? wAmp / wsum : 0.0;
-	float ampK = clamp(loopAmp / uDomAmp, ${f(FROTH.ampRatioFloor)}, 1.0);
+	float ampK = clamp(pow(max(loopAmp / uDomAmp, 0.0001), ${f(FROTH.ampCurve)}), ${f(FROTH.ampRatioFloor)}, 1.0);
 	float iNow = clamp((${f(FROTH.intJStart)} - Na.y) / ${f(FROTH.intJSpan)}, 0.0, 1.0);
 	float iPast = clamp((${f(FROTH.intJStart)} - Jp) / ${f(FROTH.intJSpan)}, 0.0, 1.0);
 	// The lagged intensity is weighted by the same gateLagWeight as the
@@ -1709,7 +1723,7 @@ float frothFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 N
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
 			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) },
-			uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) },
+			uDomAmp: waterUniforms.uDomAmp,
 			uSkyZenith: waterUniforms.uSkyZenith,
 			uSkyHorizon: waterUniforms.uSkyHorizon,
 			uSunColor: waterUniforms.uSunColor,
@@ -2824,16 +2838,12 @@ void main() {
 				// Sea state first: a calm mirror and a shattered storm want
 				// lobes two orders of magnitude apart, so each of these has a
 				// storm twin and the preset's chop cross-fades them.
+				// Which property of the sea this effect follows — slope by
+				// default. seaDrive returns 0 at the calm reference and 1 at
+				// the storm one, whatever mix of metrics is weighted in.
 				const chopT = Math.pow(
-					Math.min(
-						Math.max(
-							(activeField.chop - SPECULAR.calmAtChop) /
-								(SPECULAR.stormAtChop - SPECULAR.calmAtChop),
-							0
-						),
-						1
-					),
-					SPECULAR.chopCurve
+					seaDrive(SPECULAR.driveSlope, SPECULAR.driveAmp, SPECULAR.driveChop),
+					SPECULAR.driveCurve
 				);
 				// GEOMETRIC, not linear. These pairs span up to 40x, and a linear
 				// ramp across that spends almost its whole length near the calm

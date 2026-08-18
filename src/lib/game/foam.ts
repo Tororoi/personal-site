@@ -53,7 +53,14 @@ export const FOAM_EXTENT = 100
  * interpolate it at module load, and a const declared later is still in
  * its temporal dead zone at that point — it bakes in as NaN.
  */
-/** Recompute from the sea's chop; called on a live sea-state change. */
+/**
+ * Recompute from the sea's chop; called on a live sea-state change.
+ *
+ * Deliberately chop with a THRESHOLD, not the metric drive the specular
+ * uses: the dead zone below contactChopStart is a feature. A near-glassy
+ * sea should grow no collar at all — a sliver-thin one reads oddly — and
+ * chop-with-floor expresses exactly that.
+ */
 export function contactFoaminess(chop: number) {
   return Math.min(
     Math.max(
@@ -64,14 +71,7 @@ export function contactFoaminess(chop: number) {
   )
 }
 
-export let CONTACT_FOAMINESS = Math.min(
-  Math.max(
-    (activeField.chop - FOAM.contactChopStart) /
-      (FOAM.contactChopFull - FOAM.contactChopStart),
-    0,
-  ),
-  1,
-)
+export let CONTACT_FOAMINESS = contactFoaminess(activeField.chop)
 
 /**
  * Decay time constants on calm water, seconds to 1/e — TWO of them,
@@ -354,7 +354,7 @@ void frothProbe(
 	}
 	J = jxx * jzz - jxz * jxz;
 	float ampK = clamp(
-		(wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp,
+		pow(max((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.0001), ${FROTH.ampCurve.toFixed(3)}),
 		${FROTH.ampRatioFloor.toFixed(3)},
 		1.0
 	);
@@ -679,7 +679,9 @@ export class FoamField {
         uDecay: { value: Math.exp(-1 / (60 * DECAY_TAU_THIN)) },
         uDecayThick: { value: Math.exp(-1 / (60 * DECAY_TAU_THICK)) },
         uDecayTurb: { value: Math.exp(-1 / (60 * DECAY_TAU_TURB)) },
-        uDomAmp: { value: waves.reduce((a, b) => Math.max(a, b.amp), 0) },
+        // The froth reference — see FROTH.ampRef. Kept in step with the
+        // scene's copy via setDomAmp on every sea change.
+        uDomAmp: { value: Math.max(waves.reduce((a, b) => Math.max(a, b.amp), 0), FROTH.ampRef) },
         uWebTex: { value: null as THREE.Texture | null },
         uFlow: { value: new THREE.Vector2() },
         // Shared with the water material: the same array object, so the
@@ -828,7 +830,7 @@ export class FoamField {
     this.current = next
   }
 
-  /** Dominant wave amplitude, the froth criterion's yardstick. */
+  /** The froth reference: max(sea dominant amp, FROTH.ampRef). */
   setDomAmp(v: number) {
     this.material.uniforms.uDomAmp.value = v
   }

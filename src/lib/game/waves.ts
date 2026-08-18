@@ -21,7 +21,7 @@
  */
 
 import * as THREE from 'three'
-import { CURRENT, SEA } from './tuning'
+import { CURRENT, SEA, UNIFIED } from './tuning'
 
 export type WaveParams = {
   /** Unit direction of travel. */
@@ -154,17 +154,6 @@ export type WaveFieldConfig = {
     slope?: number
   }
   /**
-   * Foam-field tuning for this sea (foam.ts). pinchJStart is the
-   * Jacobian below which crests GENERATE foam: it is effectively a
-   * coverage knob per sea state, because the J distribution differs
-   * wildly between presets — 0.65 gives largeSwell sparse elegant
-   * trails but describes most of a storm's surface most of the time
-   * (which saturated the whole sea white). Default 0.65.
-   */
-  foam?: {
-    pinchJStart?: number
-  }
-  /**
    * Reflected sky for this sea, sampled by the water's Wallace-style
    * reflection (Scene.svelte): a vertical gradient from horizon to zenith,
    * plus the sun's glare on the reflected ray. Weather transitions will
@@ -243,7 +232,6 @@ export const SEA_PRESETS = {
     sky: { zenith: '#c3cbd1', horizon: '#e9edf0', diffusion: 0.4 },
     // Wind chop riding the swell: plenty of fine tilt.
     detail: { minLambda: 0.4, maxLambda: 4, slope: 0.055 },
-    foam: { pinchJStart: 0.3 },
     bands: [
       // 1 PRIMARY SWELL. Primary swell: the long rolling system on the wind heading.
       {
@@ -294,6 +282,88 @@ export const SEA_PRESETS = {
         heading: 0.8,
         spread: 1.6,
         slope: 0.04,
+      },
+    ],
+  },
+  /**
+   * EXPERIMENT SEA — built to make the drive metrics disagree.
+   *
+   * Long and gentle: largeSwell's bands with every wavelength x2.2 and
+   * every slope x0.75. That lands it at 78% of the way to storm by
+   * AMPLITUDE but only 36% by SLOPE, because the two are independent by
+   * construction — a component's slope is amp * k = (slope * L / 2pi) *
+   * (2pi / L), so the wavelength cancels and only the band's own `slope`
+   * knob sets it. Stretching wavelengths therefore moves size without
+   * touching steepness.
+   *
+   * That is the whole point: on the real presets slope and amplitude move
+   * in lockstep and the two drivers agree to within 6%, so neither can be
+   * judged against the other. Here they disagree by more than 2x, and with
+   * SPECULAR.driveCurve set to 1 (linear) by over 6x.
+   *
+   * Not a sea to ship — a 145m primary swell barely fits the view. Reach
+   * for it with /?sea=test, or use UNIFIED.lambdaScale to sweep the same
+   * axis continuously.
+   */
+  test: {
+    seed: 1897,
+    windAngle: 0.42,
+    windSpeed: 9,
+    surfaceCurrentHeading: 0.42,
+    surfaceCurrentSpeed: 1.55,
+    chop: 2.25,
+    ripples: { displayGain: 1.6, speed: 2.2, damping: 0.96 },
+    sky: { zenith: '#c3cbd1', horizon: '#e9edf0', diffusion: 0.4 },
+    detail: { minLambda: 0.4, maxLambda: 4, slope: 0.055 },
+    bands: [
+      // 1 PRIMARY SWELL.
+      {
+        count: 4,
+        minLambda: 61.6,
+        maxLambda: 145.2,
+        heading: 0,
+        spread: 0.18,
+        slope: 0.06375,
+        speed: 0.7,
+      },
+      // 2 CROSSING SWELL.
+      {
+        count: 3,
+        minLambda: 39.6,
+        maxLambda: 101.2,
+        heading: 1.9,
+        spread: 1.25,
+        slope: 0.04125,
+        speed: 0.7,
+      },
+      // 3 WIND SEA.
+      {
+        count: 6,
+        minLambda: 17.6,
+        maxLambda: 35.2,
+        heading: 0.3,
+        spread: 0.7,
+        slope: 0.0375,
+        speed: 1.5,
+      },
+      // 4 SHORT CHOP.
+      {
+        count: 5,
+        minLambda: 11,
+        maxLambda: 55,
+        heading: -0.4,
+        spread: 1.2,
+        slope: 0.0262,
+        speed: 1.5,
+      },
+      // 5 RIPPLE.
+      {
+        count: 6,
+        minLambda: 5.72,
+        maxLambda: 9.9,
+        heading: 0.8,
+        spread: 1.6,
+        slope: 0.03,
       },
     ],
   },
@@ -406,9 +476,6 @@ export const SEA_PRESETS = {
     sky: { zenith: '#6b737a', horizon: '#98a0a7', diffusion: 0.7 },
     // Torn-up surface: short, steep, every which way.
     detail: { minLambda: 0.35, maxLambda: 3, slope: 0.055 },
-    // Storm J dips below 0.65 nearly everywhere; only genuinely breaking
-    // water (J < 0.3) may generate foam or the sea saturates white.
-    foam: { pinchJStart: 0.1 },
     bands: [
       // 1 PRIMARY SWELL. Dominant storm wind sea: big, steep, and disorganized.
       {
@@ -581,13 +648,6 @@ function blendFields(
       ),
       slope: lerpN(opt(a.detail?.slope, 0.05), opt(b.detail?.slope, 0.05), t),
     },
-    foam: {
-      pinchJStart: lerpN(
-        opt(a.foam?.pinchJStart, 0.65),
-        opt(b.foam?.pinchJStart, 0.65),
-        t,
-      ),
-    },
     bands: a.bands.map((ba, i) => {
       const bb = b.bands[i]
       if (!bb || ba.count !== bb.count) {
@@ -642,7 +702,6 @@ function cloneField(f: WaveFieldConfig): WaveFieldConfig {
     sky: f.sky && { ...f.sky },
     detail: f.detail && { ...f.detail },
     capillary: f.capillary && { ...f.capillary },
-    foam: f.foam && { ...f.foam },
     bands: f.bands.map((b) => ({ ...b })),
   }
 }
@@ -654,7 +713,13 @@ export function onFieldChange(fn: () => void) {
 }
 
 export function applySeaState(state: number, chopOverride: number) {
-  const next = cloneField(state >= 0 ? fieldForSeaState(state) : pickPreset())
+  const next = cloneField(
+    SEA.useUnified
+      ? unifiedField()
+      : state >= 0
+        ? fieldForSeaState(state)
+        : pickPreset(),
+  )
   if (chopOverride >= 0) next.chop = chopOverride
   Object.assign(activeField, next)
   const fresh = generateWaves(activeField)
@@ -667,7 +732,98 @@ export function applySeaState(state: number, chopOverride: number) {
   for (let i = 0; i < waves.length; i++) Object.assign(waves[i], fresh[i])
   maxSurfaceRate = waves.reduce((sum, w) => sum + Math.abs(w.amp * w.omega), 0)
   syncWaveUniforms()
+  computeMetrics()
   for (const fn of fieldListeners) fn()
+}
+
+/**
+ * The unified sea's FIXED band structure. Wavelengths, headings, spreads
+ * and the slope BALANCE between bands live here as constants; the
+ * UNIFIED.waves dial scales the slopes uniformly, and nothing else about
+ * a band ever moves. See the UNIFIED doc in tuning.ts for why.
+ */
+const UNIFIED_BANDS: WaveBand[] = [
+  // 1 PRIMARY SWELL
+  { count: 4, minLambda: 32, maxLambda: 68, heading: 0, spread: 0.4, slope: 0.085, speed: 0.75 },
+  // 2 CROSSING SWELL
+  { count: 3, minLambda: 19, maxLambda: 44, heading: 2.1, spread: 1.0, slope: 0.055, speed: 0.75 },
+  // 3 WIND SEA
+  { count: 6, minLambda: 9, maxLambda: 18, heading: 0.3, spread: 0.9, slope: 0.05, speed: 1.5 },
+  // 4 SHORT CHOP
+  { count: 5, minLambda: 4.5, maxLambda: 10, heading: -0.45, spread: 1.35, slope: 0.0349, speed: 1.5 },
+  // 5 RIPPLE
+  { count: 6, minLambda: 2.4, maxLambda: 4.8, heading: 0.8, spread: 1.7, slope: 0.04, speed: 1 },
+]
+
+/**
+ * World azimuth of compass NORTH, degrees. Chosen so WEST (compass 270)
+ * lands where the default sun path sets — world azimuth 226, from
+ * sunPathAngleDeg 81 + 180 - sunPathOffsetDeg 35 — so "the sun sets in
+ * the west" holds and the compass knobs read naturally. A fixed
+ * calibration against the DEFAULT sun path, not a live link: retuning the
+ * sun does not silently rotate the wind.
+ */
+const UNIFIED_NORTH_DEG = 316
+
+/**
+ * Energy landmarks for the `waves` dial: the factor to apply to every
+ * band slope so the unified sea's RMS slope matches each preset's.
+ * Computed lazily from the presets themselves rather than hardcoded, so
+ * retuning a preset keeps the dial honest.
+ */
+let unifiedEnergy: { calm: number; storm: number } | null = null
+function energyFactors() {
+  if (!unifiedEnergy) {
+    const rms = (f: WaveFieldConfig) => {
+      let m = 0
+      for (const w of generateWaves(f)) m += ((w.amp * w.k) * (w.amp * w.k)) / 2
+      return Math.sqrt(m)
+    }
+    const base = rms({ ...SEA_PRESETS.largeSwell, bands: UNIFIED_BANDS })
+    unifiedEnergy = {
+      calm: rms(SEA_PRESETS.calm) / base,
+      storm: rms(SEA_PRESETS.storm) / base,
+    }
+  }
+  return unifiedEnergy
+}
+
+/**
+ * The UNIFIED field, assembled from the sliders. Read fresh on every
+ * rebuild, which is what makes every knob live.
+ */
+export function unifiedField(): WaveFieldConfig {
+  const U = UNIFIED
+  const E = energyFactors()
+  const w = Math.min(Math.max(U.waves, 0), 2)
+  // Geometric through the landmarks: slopes span ~23x calm-to-storm, and
+  // a linear ramp across that spends nearly all its length at one end.
+  const fac = w <= 1 ? Math.pow(E.calm, 1 - w) : Math.pow(E.storm, w - 1)
+  // Chop is a budget, not an energy; the presets' values lerp directly.
+  const chop = w <= 1 ? 0.55 + (2.25 - 0.55) * w : 2.25 + (5 - 2.25) * (w - 1)
+  const compass = (deg: number) => ((UNIFIED_NORTH_DEG + deg) % 360) * (Math.PI / 180)
+  return {
+    seed: SEA_PRESETS.largeSwell.seed,
+    windAngle: compass(U.windCompassDeg),
+    windSpeed: U.windSpeed,
+    surfaceCurrentHeading: compass(U.currentCompassDeg),
+    surfaceCurrentSpeed: U.currentSpeed,
+    chop,
+    timeScale: U.timeScale,
+    ripples: { displayGain: 1.6, speed: 2.2, damping: 0.96 },
+    sky: {
+      zenith: lerpHex(SEA_PRESETS.calm.sky.zenith, SEA_PRESETS.storm.sky.zenith, U.weather),
+      horizon: lerpHex(SEA_PRESETS.calm.sky.horizon, SEA_PRESETS.storm.sky.horizon, U.weather),
+      diffusion: 0.05 + (0.7 - 0.05) * U.weather,
+    },
+    detail: { minLambda: U.detailMin, maxLambda: U.detailMax, slope: U.detailSlope },
+    bands: UNIFIED_BANDS.map((b) => ({
+      ...b,
+      minLambda: b.minLambda * U.lambdaScale,
+      maxLambda: b.maxLambda * U.lambdaScale,
+      slope: b.slope * fac,
+    })),
+  }
 }
 
 /** The sea at a point on the calm -> largeSwell -> storm axis. */
@@ -728,7 +884,11 @@ export function generateWaves(
 
 /** The preset actually in effect this session (after the ?sea= override). */
 export const activeField: WaveFieldConfig = cloneField(
-  SEA.seaState >= 0 ? fieldForSeaState(SEA.seaState) : pickPreset(),
+  SEA.useUnified
+    ? unifiedField()
+    : SEA.seaState >= 0
+      ? fieldForSeaState(SEA.seaState)
+      : pickPreset(),
 )
 
 // Test override, applied BEFORE the field is generated: chop sets every
@@ -753,15 +913,104 @@ export const waves = generateWaves(activeField)
 export const waveUniformA = waves.map(
   (w) => new THREE.Vector4(w.dirX, w.dirZ, w.k, w.omega),
 )
-export const waveUniformB = waves.map((w) => new THREE.Vector3(w.amp, w.q, w.phase))
+export const waveUniformB = waves.map(
+  (w) => new THREE.Vector3(w.amp, w.q, w.phase),
+)
 
-function syncWaveUniforms() {
-  for (let i = 0; i < waves.length; i++) {
-    waveUniformA[i].set(waves[i].dirX, waves[i].dirZ, waves[i].k, waves[i].omega)
-    waveUniformB[i].set(waves[i].amp, waves[i].q, waves[i].phase)
+/**
+ * MEASURED PROPERTIES of the live field — what effects should key on,
+ * rather than the raw config values that produced it.
+ *
+ * `chop` is deliberately included but is the weakest of these: q is
+ * defined as chop / (k * amp * N), so sum(q * amp * k) equals chop by
+ * construction. It is a normalised fold BUDGET describing how sharpness
+ * was distributed, not how big or steep the water is — which is why an
+ * effect keyed on it tracks the sea only loosely.
+ *
+ * rmsSlope is usually the one worth reaching for: slope is amplitude x
+ * wavenumber, so it folds wave size and wavelength into a single number,
+ * and it is the quantity real surface optics is written in.
+ */
+export const seaMetrics = {
+  /** RMS wave height, metres. */
+  sigAmp: 0,
+  /** RMS surface gradient. Dimensionless; ~0.02 glassy, ~0.35 storm. */
+  rmsSlope: 0,
+  /** The Gerstner fold budget. See the caveat above. */
+  chop: 0,
+  /** Wavelength of the largest component, metres. */
+  domLambda: 0,
+  windSpeed: 0,
+}
+
+function metricsOf(f: WaveFieldConfig, w: WaveParams[]) {
+  let a2 = 0
+  let mss = 0
+  let dom = w[0]
+  for (const x of w) {
+    a2 += x.amp * x.amp
+    // Each component contributes (amp * k)^2 / 2 to the mean square slope.
+    mss += (x.amp * x.k * (x.amp * x.k)) / 2
+    if (x.amp > dom.amp) dom = x
+  }
+  return {
+    sigAmp: Math.sqrt(a2),
+    rmsSlope: Math.sqrt(mss),
+    chop: f.chop,
+    domLambda: (2 * Math.PI) / dom.k,
+    windSpeed: f.windSpeed ?? 5,
   }
 }
 
+function computeMetrics() {
+  Object.assign(seaMetrics, metricsOf(activeField, waves))
+}
+computeMetrics()
+
+/**
+ * The two ends every metric is normalised against, measured off the calm
+ * and storm presets. Fixed reference points, so a weight of 0.5 means the
+ * same thing for slope as for amplitude despite one being radians and the
+ * other metres.
+ */
+export const SEA_REFERENCE = {
+  calm: metricsOf(SEA_PRESETS.calm, generateWaves(SEA_PRESETS.calm)),
+  storm: metricsOf(SEA_PRESETS.storm, generateWaves(SEA_PRESETS.storm)),
+}
+
+/**
+ * Where this sea sits on a 0 (calm) to 1 (storm) axis, as a weighted mix
+ * of normalised metrics. Weights need not sum to 1; they are divided out.
+ *
+ * This is what lets an effect say "follow slope" or "mostly slope, a
+ * little size" instead of picking a threshold pair in some metric's own
+ * units and hoping it generalises.
+ */
+export function seaDrive(wSlope: number, wAmp: number, wChop: number): number {
+  const total = wSlope + wAmp + wChop
+  if (total <= 0) return 0
+  const n = (v: number, a: number, b: number) =>
+    b === a ? 0 : Math.min(Math.max((v - a) / (b - a), 0), 1)
+  const R = SEA_REFERENCE
+  return (
+    (wSlope * n(seaMetrics.rmsSlope, R.calm.rmsSlope, R.storm.rmsSlope) +
+      wAmp * n(seaMetrics.sigAmp, R.calm.sigAmp, R.storm.sigAmp) +
+      wChop * n(seaMetrics.chop, R.calm.chop, R.storm.chop)) /
+    total
+  )
+}
+
+function syncWaveUniforms() {
+  for (let i = 0; i < waves.length; i++) {
+    waveUniformA[i].set(
+      waves[i].dirX,
+      waves[i].dirZ,
+      waves[i].k,
+      waves[i].omega,
+    )
+    waveUniformB[i].set(waves[i].amp, waves[i].q, waves[i].phase)
+  }
+}
 
 /**
  * Typical crest height (RMS sum): use for normalizing height-based color.
