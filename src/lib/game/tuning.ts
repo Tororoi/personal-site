@@ -1818,7 +1818,7 @@ export const BOAT = {
   /** Tilt toward the water slope: gain, spring stiffness, damping ratio. */
   tiltGain: 1.5,
   righting: 10,
-  tiltZeta: 1.2,
+  tiltZeta: 0.5,
   /** Bow-up trim per m/s of forward speed, radians. */
   trimPerSpeed: 0.028,
   /**

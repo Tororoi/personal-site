@@ -3,6 +3,7 @@
 	import { T, useTask, useThrelte } from '@threlte/core';
 	import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 	import { onDestroy } from 'svelte';
+	import { bakeSdfAtlas } from './sdf';
 	import {
 		activeField,
 		objectWaveGlsl,
@@ -291,6 +292,9 @@
 		// a box approximation of it.
 		uBoatTex: { value: null as THREE.Texture | null },
 		uProj: { value: new THREE.Matrix4() },
+		uBoatSdf: { value: null as THREE.Texture | null },
+		uBoatSdfMin: { value: new THREE.Vector3() },
+		uBoatSdfSize: { value: new THREE.Vector3(1, 1, 1) },
 		// Driven per frame from sun altitude (see altHigh/altLow in SPECULAR).
 		// Every SPECULAR value the shader needs, refreshed each frame — that
 		// is what lets the panel tune them without a reload. Baked literals
@@ -364,6 +368,15 @@
 	 */
 	const winCenter = new THREE.Vector2();
 	const uWinCenter = { value: winCenter };
+
+	/**
+	 * Boat SDF grid: resolution, and the slice-atlas tiling (WebGL1 has no
+	 * sampler3D, so the 3D field ships as tiled 2D slices with a manual
+	 * slice-mix in the shader). Baked once at load from the actual mesh —
+	 * see sdf.ts — so the refracted hull, and the caustics landing on it,
+	 * follow the true surface rather than a bounding approximation.
+	 */
+	const BOAT_SDF = { nx: 96, ny: 40, nz: 48, tilesX: 8, tilesY: 6 };
 
 	// The visible ocean "floor" depth; also the miss plane of the water's
 	// underwater raytrace.
@@ -900,61 +913,60 @@ uniform sampler2D uBoatTex;
 // the camera every frame instead.
 uniform mat4 uProj;
 
-// The hull in boat-local space: the buoys' slab box CLIPPED by two bow
-// planes (the plan's taper from (0.5, +-0.95) to the stem at (2.3, 0),
-// as straight lines), plus the outboard's lower unit as a slim dark box
-// behind the transom. A convex polytope, so the slab method extends: each
-// plane just tightens the enter/exit interval.
+// The hull as a SIGNED DISTANCE FIELD, sphere-traced. boatHit's contract
+// is unchanged — nearest t plus a surface normal — but both now come from
+// the real mesh, baked at load (sdf.ts): the refraction bends around the
+// actual hull, and the caustic and underwater shading read a true surface
+// point and normal, which is what keeps a body recognisable underwater.
+// The image pass still supplies colour. Fish and the Blender hull inherit
+// all of this by being baked the same way.
+uniform sampler2D uBoatSdf;
+uniform vec3 uBoatSdfMin;
+uniform vec3 uBoatSdfSize;
+
+float boatSdfAt(vec3 q) {
+	vec3 u = clamp((q - uBoatSdfMin) / uBoatSdfSize, 0.0, 1.0);
+	// slice index + mix across the 48-deep stack of 8x6 tiles
+	float z = u.z * 47.0;
+	float z0 = floor(min(z, 46.0));
+	float fz = z - z0;
+	vec2 sxy = u.xy * vec2(0.989583, 0.975000) + vec2(0.005208, 0.012500);
+	vec2 tile0 = vec2(mod(z0, 8.0), floor(z0 / 8.0));
+	vec2 tile1 = vec2(mod(z0 + 1.0, 8.0), floor((z0 + 1.0) / 8.0));
+	float d0 = texture2D(uBoatSdf, (tile0 + sxy) * vec2(0.125000, 0.166667)).r;
+	float d1 = texture2D(uBoatSdf, (tile1 + sxy) * vec2(0.125000, 0.166667)).r;
+	return mix(d0, d1, fz);
+}
+
 float boatHit(vec3 ro, vec3 rd, out vec3 nWorld) {
 	vec3 o = (uBoatInv * vec4(ro, 1.0)).xyz;
 	vec3 d = (uBoatInv * vec4(rd, 0.0)).xyz;
+	// enter the SDF's bounding box first
 	vec3 invD = 1.0 / d;
-	// hull box, centred on the draft-to-sheer span
-	vec3 oc = o - vec3(0.0, 0.075, 0.0);
-	// Inflated ~5% past the hull: a BOUND must never clip the mesh; the
-	// texture's alpha rejects rays through the slack.
-	vec3 halfE = vec3(2.42, 0.31, 1.0);
-	vec3 t0 = (-halfE - oc) * invD;
-	vec3 t1 = (halfE - oc) * invD;
-	vec3 tmin3 = min(t0, t1);
-	vec3 tmax3 = max(t0, t1);
+	vec3 t0v = (uBoatSdfMin - o) * invD;
+	vec3 t1v = (uBoatSdfMin + uBoatSdfSize - o) * invD;
+	vec3 tmin3 = min(t0v, t1v);
+	vec3 tmax3 = max(t0v, t1v);
 	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
 	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
-	vec3 nLocal = -sign(d) * step(vec3(tN), tmin3);
-	// bow planes: n.p <= k with n = normalize(0.95, 0, +-1.8)
-	vec3 pn = vec3(0.46676, 0.0, 0.88439);
-	float pk = 1.1272; // 1.07356 * 1.05, matching the inflated bound
-	for (int side = 0; side < 2; side++) {
-		if (side == 1) pn.z = -pn.z;
-		float den = dot(pn, d);
-		float dist = pk - dot(pn, o);
-		if (abs(den) < 1e-6) {
-			if (dist < 0.0) tN = 1e9;
-		} else {
-			float tp = dist / den;
-			if (den > 0.0) tF = min(tF, tp);
-			else if (tp > tN) { tN = tp; nLocal = pn; }
+	if (tN > tF || tF < 0.0) return -1.0;
+	float t = max(tN + 0.001, 0.0);
+	for (int i = 0; i < 28; i++) {
+		vec3 q = o + d * t;
+		float dist = boatSdfAt(q);
+		if (dist < 0.02) {
+			vec2 e = vec2(0.06, 0.0);
+			vec3 nL = normalize(vec3(
+				boatSdfAt(q + e.xyy) - boatSdfAt(q - e.xyy),
+				boatSdfAt(q + e.yxy) - boatSdfAt(q - e.yxy),
+				boatSdfAt(q + e.yyx) - boatSdfAt(q - e.yyx)));
+			nWorld = normalize(nL * mat3(uBoatInv));
+			return t;
 		}
-	}
-	float tHull = (tN <= tF && tN >= 0.0) ? tN : -1.0;
-	// outboard lower unit
-	vec3 om = o - vec3(-2.48, -0.05, 0.0);
-	vec3 hm = vec3(0.09, 0.34, 0.1);
-	vec3 m0 = (-hm - om) * invD;
-	vec3 m1 = (hm - om) * invD;
-	vec3 mn3 = min(m0, m1);
-	vec3 mx3 = max(m0, m1);
-	float mN = max(max(mn3.x, mn3.y), mn3.z);
-	float mF = min(min(mx3.x, mx3.y), mx3.z);
-	float tMot = (mN <= mF && mN >= 0.0) ? mN : -1.0;
-	if (tHull > 0.0 && (tMot < 0.0 || tHull < tMot)) {
-		nWorld = normalize(nLocal * mat3(uBoatInv));
-		return tHull;
-	}
-	if (tMot > 0.0) {
-		vec3 nm = -sign(d) * step(vec3(mN), mn3);
-		nWorld = normalize(nm * mat3(uBoatInv));
-		return tMot;
+		// 0.9 safety on the step: linear filtering can slightly overstate
+		// the distance right at a slice boundary
+		t += max(dist * 0.9, 0.012);
+		if (t > tF) return -1.0;
 	}
 	return -1.0;
 }
@@ -2985,6 +2997,25 @@ void main() {
 		return g;
 	}
 	const boatMesh = buildBoatMesh();
+	// Bake the hull's distance field while the group still sits at the
+	// origin (the bake works in group-local space). ~1s once, at load.
+	{
+		const bake = bakeSdfAtlas(boatMesh, BOAT_SDF.nx, BOAT_SDF.ny, BOAT_SDF.nz, BOAT_SDF.tilesX, 0.25);
+		const tex = new THREE.DataTexture(
+			bake.data,
+			bake.width,
+			bake.height,
+			THREE.RedFormat,
+			THREE.FloatType
+		);
+		tex.minFilter = THREE.LinearFilter;
+		tex.magFilter = THREE.LinearFilter;
+		tex.needsUpdate = true;
+		boatDisposables.push(tex);
+		waterUniforms.uBoatSdf.value = tex;
+		waterUniforms.uBoatSdfMin.value.copy(bake.min);
+		waterUniforms.uBoatSdfSize.value.copy(bake.size);
+	}
 	// Everything the boat-image pass renders lives on layer 3.
 	boatMesh.traverse((o) => o.layers.enable(3));
 	/**
