@@ -216,6 +216,7 @@
 		'BOAT.trimPerAccel': { min: 0, max: 0.08, step: 0.001 },
 		'BOAT.liftPerSpeed': { min: 0, max: 0.02, step: 0.0005 },
 		'BOAT.liftMax': { min: 0, max: 0.5, step: 0.01 },
+		'BOAT.causticGain': { min: 0, max: 2, step: 0.02 },
 		'BOAT.wakeAmp': { min: 0, max: 0.05, step: 0.001 },
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
 		'UNIFIED.waves': { min: 0, max: 2, step: 0.01 },

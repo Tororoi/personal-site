@@ -2929,10 +2929,82 @@ void main() {
 	window.addEventListener('keyup', onBoatKeyUp);
 
 	const boatDisposables: { dispose(): void }[] = [];
+	/** Shimmer gain, fed per frame so the knob stays live. */
+	const uBoatCausticGain = { value: BOAT.causticGain };
+	/**
+	 * Caustic shimmer on the boat's own materials: the same forward-splat
+	 * map every receiver reads, sampled at the fragment's world position
+	 * and banded around the TRUE local surface — evaluated per fragment
+	 * with the same cheap one-iteration inversion the CPU sampler uses.
+	 * A horizontal plane at the boat's centre waterline was tried first
+	 * and put shimmer in mid-air: on a swell the hull's ends ride high
+	 * above the local water, and the plane doesn't know. The band hugs
+	 * the contact line — ~12cm of reach above the surface, a fast fade
+	 * below so the refracted image does not double-count with
+	 * shadeUnderwater's own caustics. Only the bright ridges are added
+	 * (map is ~1-neutral), so shadowed water cannot DARKEN the hull.
+	 */
+	function injectHullCaustics(m: THREE.Material) {
+		m.onBeforeCompile = (shader) => {
+			shader.uniforms.uCausticMap = waterUniforms.uCausticMap;
+			shader.uniforms.uCausticCenter = waterUniforms.uCausticCenter;
+			shader.uniforms.uCausticExtent = waterUniforms.uCausticExtent;
+			shader.uniforms.uCausticFlat = waterUniforms.uCausticFlat;
+			shader.uniforms.uSunColor = waterUniforms.uSunColor;
+			shader.uniforms.uSunI = waterUniforms.uSunI;
+			shader.uniforms.uBoatCausticGain = uBoatCausticGain;
+			shader.uniforms.uWaveA = waterUniforms.uWaveA;
+			shader.uniforms.uWaveB = waterUniforms.uWaveB;
+			shader.uniforms.uTime = waterUniforms.uTime;
+			shader.uniforms.uAmp = waterUniforms.uAmp;
+			shader.vertexShader = shader.vertexShader
+				.replace('#include <common>', '#include <common>\nvarying vec3 vCausticW;')
+				.replace(
+					'#include <worldpos_vertex>',
+					'#include <worldpos_vertex>\nvCausticW = (modelMatrix * vec4(transformed, 1.0)).xyz;'
+				);
+			shader.fragmentShader = shader.fragmentShader
+				.replace(
+					'#include <common>',
+					`#include <common>
+varying vec3 vCausticW;
+uniform sampler2D uCausticMap;
+uniform vec2 uCausticCenter;
+uniform float uCausticExtent;
+uniform float uCausticFlat;
+uniform vec3 uSunColor;
+uniform float uSunI;
+uniform float uBoatCausticGain;
+uniform float uTime;
+uniform float uAmp;
+${wavesGlsl()}`
+				)
+				.replace(
+					'#include <opaque_fragment>',
+					`{
+	// True surface height under this fragment: one-iteration inversion,
+	// centimetre-grade, and the whole reason mid-air shimmer is gone.
+	vec2 crest = vCausticW.xz - waveDisplacement(vCausticW.xz, uTime, uAmp).xz;
+	float surfY = waveDisplacement(crest, uTime, uAmp).y;
+	float dy = vCausticW.y - surfY;
+	float band = dy > 0.0 ? exp(-dy * 9.0) : exp(dy * 5.0);
+	vec2 cuv = (vCausticW.xz - uCausticCenter) / uCausticExtent + 0.5;
+	float caustic = texture2D(uCausticMap, clamp(cuv, 0.002, 0.998)).r;
+	float shimmer = max(caustic - 1.0, 0.0) * (1.0 - uCausticFlat);
+	outgoingLight += diffuseColor.rgb * uSunColor * (uSunI * uBoatCausticGain * shimmer * band);
+}
+#include <opaque_fragment>`
+				);
+		};
+	}
+
 	function buildBoatMesh(): THREE.Group {
 		const g = new THREE.Group();
 		const mat = (color: string, opts: Record<string, unknown> = {}) => {
 			const m = new THREE.MeshStandardMaterial({ color, roughness: 0.6, ...opts });
+			// The windshield stays clean: an additive shimmer on a blended
+			// transparent surface reads as a glow artefact, not light.
+			if (!opts.transparent) injectHullCaustics(m);
 			boatDisposables.push(m);
 			return m;
 		};
@@ -3112,6 +3184,7 @@ void main() {
 			}
 		}
 		boat.wet = !airborne;
+		uBoatCausticGain.value = BOAT.causticGain;
 
 		// TILT toward the water slope, sampled over hull-sized baselines
 		// (cold 1-iteration samples on purpose — see the buoy tilt note).

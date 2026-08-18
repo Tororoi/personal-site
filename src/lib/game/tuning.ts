@@ -1834,6 +1834,12 @@ export const BOAT = {
    */
   liftPerSpeed: 0.018,
   liftMax: 0.26,
+  /**
+   * Caustic shimmer on the topsides: refracted sunlight dancing on the
+   * hull around the waterline. Gain on the caustic map's bright ridges;
+   * 0 disables.
+   */
+  causticGain: 0.8,
   /** Wake: continuous ripple poke, per step at full speed. */
   wakeAmp: 0.016,
   /**
