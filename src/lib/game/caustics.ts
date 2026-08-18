@@ -398,15 +398,19 @@ export class CausticMap {
     const r =
       sphereR + Math.hypot(slantX, slantZ) * depth * 0.5 + 5
 
-    // Mark tiles overlapped by the disc's bounding box.
+    // Mark tiles overlapped by the disc's bounding box — in DOMAIN
+    // coordinates, since the domain now follows the boat. When the sphere
+    // is far outside the travelling window the ranges go empty and the
+    // splat simply skips, which is correct: its caustics are off-screen.
+    const cc = this.material.uniforms.uCenter.value as THREE.Vector2
     const tileSize = CAUSTIC_EXTENT / TILES
     const half = CAUSTIC_EXTENT / 2
     let count = 0
     const attr = this.tileAttr.array as Float32Array
-    const tx0 = Math.max(0, Math.floor((cx - r + half) / tileSize))
-    const tx1 = Math.min(TILES - 1, Math.floor((cx + r + half) / tileSize))
-    const tz0 = Math.max(0, Math.floor((cz - r + half) / tileSize))
-    const tz1 = Math.min(TILES - 1, Math.floor((cz + r + half) / tileSize))
+    const tx0 = Math.max(0, Math.floor((cx - cc.x - r + half) / tileSize))
+    const tx1 = Math.min(TILES - 1, Math.floor((cx - cc.x + r + half) / tileSize))
+    const tz0 = Math.max(0, Math.floor((cz - cc.y - r + half) / tileSize))
+    const tz1 = Math.min(TILES - 1, Math.floor((cz - cc.y + r + half) / tileSize))
     for (let tz = tz0; tz <= tz1 && count < MAX_TILES; tz++) {
       for (let tx = tx0; tx <= tx1 && count < MAX_TILES; tx++) {
         attr[count * 2] = tx
@@ -490,6 +494,26 @@ export class CausticMap {
     renderer.autoClear = previousAutoClear
     renderer.setClearColor(this.savedClearColor, previousClearAlpha)
     renderer.setRenderTarget(previousTarget)
+  }
+
+  /** Domain centre, for the receivers' uCausticCenter uniforms. */
+  get center(): THREE.Vector2 {
+    return this.material.uniforms.uCenter.value as THREE.Vector2
+  }
+
+  /**
+   * Follow the boat. Stateless per frame (the map is fully re-splat each
+   * step), so recentering is just the uniform — no content scroll needed.
+   * The ripple centre rides along so the splat keeps reading the ripple
+   * field at true world coordinates.
+   */
+  setCenter(x: number, z: number, rippleCenter: THREE.Vector2) {
+    const texel = CAUSTIC_EXTENT / CAUSTIC_RESOLUTION
+    ;(this.material.uniforms.uCenter.value as THREE.Vector2).set(
+      Math.round(x / texel) * texel,
+      Math.round(z / texel) * texel,
+    )
+    ;(this.material.uniforms.uRippleCenter.value as THREE.Vector2).copy(rippleCenter)
   }
 
   dispose() {

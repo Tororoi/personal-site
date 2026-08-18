@@ -184,16 +184,21 @@ uniform float uTexel;
 uniform float uPropagation;
 uniform float uDamping;
 uniform vec2 uCenter;
+uniform vec2 uScroll;
 uniform float uExtent;
 uniform vec4 uInject[${MAX_INJECT}]; // worldX, worldZ, radius, strength
 varying vec2 vUv;
 
 void main() {
-	vec2 hv = texture2D(uPrev, vUv).xy;
-	float hr = texture2D(uPrev, vUv + vec2(uTexel, 0.0)).x;
-	float hl = texture2D(uPrev, vUv - vec2(uTexel, 0.0)).x;
-	float hu = texture2D(uPrev, vUv + vec2(0.0, uTexel)).x;
-	float hd = texture2D(uPrev, vUv - vec2(0.0, uTexel)).x;
+	// uScroll shifts every PREV read when the domain recenters on the
+	// moving boat: sampling the old frame offset by the centre delta keeps
+	// rings pinned to the world instead of dragging with the window.
+	vec2 suv = vUv + uScroll;
+	vec2 hv = texture2D(uPrev, suv).xy;
+	float hr = texture2D(uPrev, suv + vec2(uTexel, 0.0)).x;
+	float hl = texture2D(uPrev, suv - vec2(uTexel, 0.0)).x;
+	float hu = texture2D(uPrev, suv + vec2(0.0, uTexel)).x;
+	float hd = texture2D(uPrev, suv - vec2(0.0, uTexel)).x;
 	float sum = hr + hl + hu + hd;
 	float v = hv.y + (sum * 0.25 - hv.x) * uPropagation;
 	v *= uDamping;
@@ -258,6 +263,7 @@ export class RippleSim {
         uPropagation: { value: PROPAGATION },
         uDamping: { value: SETTINGS.damping },
         uCenter: { value: new THREE.Vector2(0, 0) },
+        uScroll: { value: new THREE.Vector2(0, 0) },
         uExtent: { value: RIPPLE_EXTENT },
         uInject: {
           value: Array.from({ length: MAX_INJECT }, () => new THREE.Vector4()),
@@ -282,7 +288,32 @@ export class RippleSim {
   }
 
   /** One wave-equation iteration, consuming queued injections. */
+  /** Domain centre, for consumers' uRippleCenter uniforms. */
+  get center(): THREE.Vector2 {
+    return this.material.uniforms.uCenter.value as THREE.Vector2
+  }
+
+  private scrollPending = new THREE.Vector2()
+
+  /**
+   * Move the domain to follow the boat, in whole-texel steps, scrolling
+   * the sim content so rings stay world-pinned. Texel snapping matters:
+   * a fractional shift resampled every frame would diffuse the field.
+   */
+  recenter(x: number, z: number) {
+    const cell = RIPPLE_EXTENT / RIPPLE_RESOLUTION
+    const c = this.center
+    const nx = Math.round(x / cell) * cell
+    const nz = Math.round(z / cell) * cell
+    if (nx === c.x && nz === c.y) return
+    this.scrollPending.x += (nx - c.x) / RIPPLE_EXTENT
+    this.scrollPending.y += (nz - c.y) / RIPPLE_EXTENT
+    c.set(nx, nz)
+  }
+
   step(renderer: THREE.WebGLRenderer) {
+    ;(this.material.uniforms.uScroll.value as THREE.Vector2).copy(this.scrollPending)
+    this.scrollPending.set(0, 0)
     // Pay out the time-spread pokes, one slice per step.
     for (let i = spreading.length - 1; i >= 0; i--) {
       const sp = spreading[i]

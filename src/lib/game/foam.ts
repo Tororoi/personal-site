@@ -757,6 +757,30 @@ export class FoamField {
   }
 
   /** One field update per frame, consuming queued deposits. */
+  private recenterShift = new THREE.Vector2()
+
+  /**
+   * Follow the boat, texel-snapped, scrolling content through the SAME
+   * uShift mechanism the wind drift already uses: content at world
+   * position stays put while the window slides under it. Foam that
+   * scrolls off the far edge is gone — acceptable, it is 50m behind.
+   */
+  recenter(x: number, z: number) {
+    const texel = FOAM_EXTENT / FOAM_RESOLUTION
+    const c = this.material.uniforms.uCenter.value as THREE.Vector2
+    const nx = Math.round(x / texel) * texel
+    const nz = Math.round(z / texel) * texel
+    if (nx === c.x && nz === c.y) return
+    this.recenterShift.x -= (nx - c.x) / FOAM_EXTENT
+    this.recenterShift.y -= (nz - c.y) / FOAM_EXTENT
+    c.set(nx, nz)
+  }
+
+  /** Domain centre, for the water shader's uFoamCenter. */
+  get center(): THREE.Vector2 {
+    return this.material.uniforms.uCenter.value as THREE.Vector2
+  }
+
   step(
     renderer: THREE.WebGLRenderer,
     windX: number,
@@ -811,6 +835,9 @@ export class FoamField {
       ((windX * FOAM_DRIFT + cur.x * FOAM.currentCarry) * d) / FOAM_EXTENT,
       ((windZ * FOAM_DRIFT + cur.z * FOAM.currentCarry) * d) / FOAM_EXTENT,
     )
+    // Window recentering scrolls content through the same mechanism.
+    shift.add(this.recenterShift)
+    this.recenterShift.set(0, 0)
 
     const inject = this.material.uniforms.uInject.value as THREE.Vector4[]
     for (let i = 0; i < MAX_INJECT; i++) {

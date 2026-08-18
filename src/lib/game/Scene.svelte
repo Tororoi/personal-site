@@ -33,6 +33,7 @@
 	import {
 		emitImpactSpray,
 		MAX_SPRAY,
+		setScanCenter,
 		setScanExtent,
 		setViewQuad,
 		sprayParticles,
@@ -53,6 +54,7 @@
 		FOAM_EXTENT
 	} from './foam';
 	import {
+		BOAT,
 		CONTACT,
 		DROPLET,
 		ENABLE,
@@ -137,6 +139,7 @@
 		return geometry;
 	}
 	let waterGeometry = $state(buildWaterGeometry());
+	let waterMeshRef = $state<THREE.Mesh | undefined>();
 
 	// Window resizes rebuild the plane (debounced), so the water always
 	// covers the CURRENT window instead of the mount-time one.
@@ -278,6 +281,16 @@
 		// is placed along the view axis at SPECULAR.cameraEyeDistance. Under
 		// a real perspective camera it is overwritten with the true position.
 		uCamPos: { value: new THREE.Vector3() },
+		// The boat in the underwater raytrace: world->local, plus its hull
+		// colour for the refracted image.
+		uBoatInv: { value: new THREE.Matrix4() },
+		// The boat's rendered image, for the refracted view. The analytic
+		// polytope in boatHit is only a BOUNDING volume: the ray decides
+		// where the hull is, this texture decides what it looks like — so
+		// the refraction shows the real model, Blender hull included, not
+		// a box approximation of it.
+		uBoatTex: { value: null as THREE.Texture | null },
+		uProj: { value: new THREE.Matrix4() },
 		// Driven per frame from sun altitude (see altHigh/altLow in SPECULAR).
 		// Every SPECULAR value the shader needs, refreshed each frame — that
 		// is what lets the panel tune them without a reload. Baked literals
@@ -341,6 +354,16 @@
 		// under a calm sea. Refreshed in syncSeaState.
 		uDomAmp: { value: Math.max(waves.reduce((a, b) => Math.max(a, b.amp), 0), FROTH.ampRef) }
 	};
+
+	/**
+	 * Centre of the TRAVELLING WINDOW — the water mesh, froth lattice and
+	 * droplet scan all cover a viewport-sized patch that follows the boat.
+	 * Snapped to the water quad (0.5m, a multiple of the froth lattice), so
+	 * recentering shifts the local grids onto the SAME world lattice they
+	 * already occupied: no vertex swimming, no froth reroll.
+	 */
+	const winCenter = new THREE.Vector2();
+	const uWinCenter = { value: winCenter };
 
 	// The visible ocean "floor" depth; also the miss plane of the water's
 	// underwater raytrace.
@@ -712,6 +735,7 @@ varying vec2 vRest;
 varying vec2 vSlope;
 varying float vOverhang;
 uniform float uDomAmp;
+uniform vec2 uWinCenter;
 varying float vLoopSk;
 varying float vPinchWhite;
 varying float vViewZ;
@@ -869,6 +893,72 @@ float contactFoam(vec3 P) {
 // Ray vs a buoy's oriented box: slab test in the box's local frame.
 // Returns the entering t (world units, both frames are rigid) or -1;
 // writes the world-space face normal.
+uniform mat4 uBoatInv;
+uniform sampler2D uBoatTex;
+// Three auto-declares viewMatrix in fragment shaders but NOT
+// projectionMatrix — referencing it kills the compile silently. Fed from
+// the camera every frame instead.
+uniform mat4 uProj;
+
+// The hull in boat-local space: the buoys' slab box CLIPPED by two bow
+// planes (the plan's taper from (0.5, +-0.95) to the stem at (2.3, 0),
+// as straight lines), plus the outboard's lower unit as a slim dark box
+// behind the transom. A convex polytope, so the slab method extends: each
+// plane just tightens the enter/exit interval.
+float boatHit(vec3 ro, vec3 rd, out vec3 nWorld) {
+	vec3 o = (uBoatInv * vec4(ro, 1.0)).xyz;
+	vec3 d = (uBoatInv * vec4(rd, 0.0)).xyz;
+	vec3 invD = 1.0 / d;
+	// hull box, centred on the draft-to-sheer span
+	vec3 oc = o - vec3(0.0, 0.075, 0.0);
+	// Inflated ~5% past the hull: a BOUND must never clip the mesh; the
+	// texture's alpha rejects rays through the slack.
+	vec3 halfE = vec3(2.42, 0.31, 1.0);
+	vec3 t0 = (-halfE - oc) * invD;
+	vec3 t1 = (halfE - oc) * invD;
+	vec3 tmin3 = min(t0, t1);
+	vec3 tmax3 = max(t0, t1);
+	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
+	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
+	vec3 nLocal = -sign(d) * step(vec3(tN), tmin3);
+	// bow planes: n.p <= k with n = normalize(0.95, 0, +-1.8)
+	vec3 pn = vec3(0.46676, 0.0, 0.88439);
+	float pk = 1.1272; // 1.07356 * 1.05, matching the inflated bound
+	for (int side = 0; side < 2; side++) {
+		if (side == 1) pn.z = -pn.z;
+		float den = dot(pn, d);
+		float dist = pk - dot(pn, o);
+		if (abs(den) < 1e-6) {
+			if (dist < 0.0) tN = 1e9;
+		} else {
+			float tp = dist / den;
+			if (den > 0.0) tF = min(tF, tp);
+			else if (tp > tN) { tN = tp; nLocal = pn; }
+		}
+	}
+	float tHull = (tN <= tF && tN >= 0.0) ? tN : -1.0;
+	// outboard lower unit
+	vec3 om = o - vec3(-2.48, -0.05, 0.0);
+	vec3 hm = vec3(0.09, 0.34, 0.1);
+	vec3 m0 = (-hm - om) * invD;
+	vec3 m1 = (hm - om) * invD;
+	vec3 mn3 = min(m0, m1);
+	vec3 mx3 = max(m0, m1);
+	float mN = max(max(mn3.x, mn3.y), mn3.z);
+	float mF = min(min(mx3.x, mx3.y), mx3.z);
+	float tMot = (mN <= mF && mN >= 0.0) ? mN : -1.0;
+	if (tHull > 0.0 && (tMot < 0.0 || tHull < tMot)) {
+		nWorld = normalize(nLocal * mat3(uBoatInv));
+		return tHull;
+	}
+	if (tMot > 0.0) {
+		vec3 nm = -sign(d) * step(vec3(mN), mn3);
+		nWorld = normalize(nm * mat3(uBoatInv));
+		return tMot;
+	}
+	return -1.0;
+}
+
 float buoyHit(mat4 inv, vec3 ro, vec3 rd, out vec3 nWorld) {
 	vec3 o = (inv * vec4(ro, 1.0)).xyz;
 	vec3 d = (inv * vec4(rd, 0.0)).xyz;
@@ -946,6 +1036,26 @@ void main() {
 			tHit = tb;
 			hitN = bn;
 			albedo = uBuoyColor;
+		}
+	}
+	{
+		vec3 bn;
+		float tb = boatHit(vWorld, refr, bn);
+		if (tb > 0.0 && (tHit < 0.0 || tb < tHit)) {
+			// Project the analytic hit through the camera and read the
+			// boat's actual rendered image there. The polytope shapes the
+			// refraction; the texture carries every modelled detail. Alpha
+			// zero means the ray passed through the bound's slack beside
+			// the real hull — not a hit at all.
+			vec3 bp = vWorld + refr * tb;
+			vec4 bclip = uProj * viewMatrix * vec4(bp, 1.0);
+			vec2 buv = (bclip.xy / bclip.w) * 0.5 + 0.5;
+			vec4 bimg = texture2D(uBoatTex, buv);
+			if (bimg.a > 0.35) {
+				tHit = tb;
+				hitN = bn;
+				albedo = bimg.rgb;
+			}
 		}
 	}
 	vec3 transmitted;
@@ -1138,6 +1248,7 @@ void main() {
 		vertexShader: `
 uniform float uTime;
 uniform float uDomAmp;
+uniform vec2 uWinCenter;
 uniform float uAmp;
 varying float vViewZ;
 varying float vHeight;
@@ -1742,6 +1853,7 @@ float frothFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 N
 			uFogDensity: waterUniforms.uFogDensity,
 			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) },
 			uDomAmp: waterUniforms.uDomAmp,
+			uWinCenter,
 			uSkyZenith: waterUniforms.uSkyZenith,
 			uSkyHorizon: waterUniforms.uSkyHorizon,
 			uSunColor: waterUniforms.uSunColor,
@@ -1754,6 +1866,7 @@ uniform float uTime;
 uniform float uAmp;
 uniform float uPointPx;
 uniform float uDomAmp;
+uniform vec2 uWinCenter;
 ${wavesGlsl()}
 ${ENABLE.objectWave ? objWaveGlsl : ''}
 ${frothFrameGlsl}
@@ -1762,7 +1875,16 @@ varying float vViewZ;
 varying vec3 vNrm;
 void main() {
 	vec3 surf; vec3 Nn; float g;
-	float r = frothFrame(position.xz, position.y, aRank, surf, Nn, g);
+	// WORLD anchor: the lattice recenters on the boat, and the offset is
+	// snapped to multiples of the spacing, so local+centre lands on the
+	// same world lattice. Size jitter and density rank are hashed from the
+	// WORLD anchor — hashing the local grid would reroll every mass's size
+	// on every recenter step, a full-screen froth shimmer while driving.
+	vec2 anchor = position.xz + uWinCenter;
+	float baseR = ${f(FROTH.radiusBase)} + ${f(FROTH.radiusVar)}
+		* fract(abs(sin(anchor.x * 37.719 + anchor.y * 53.117) * 24634.6345));
+	float rank = fract(abs(sin(anchor.x * 91.331 + anchor.y * 17.923) * 15731.743));
+	float r = frothFrame(anchor, baseR, rank, surf, Nn, g);
 	// (The hand-built bow froth that used to sit here — proximity band,
 	// windward dot, authored roll cycle — is gone. The object PINCH does
 	// that job upstream by bending the Gerstner map, so these masses now
@@ -2247,6 +2369,7 @@ void main() {
 			uWaveA: waterUniforms.uWaveA,
 			uWaveB: waterUniforms.uWaveB,
 			uDomAmp: frothMaterial.uniforms.uDomAmp,
+			uWinCenter,
 			uPointPx: frothMaterial.uniforms.uPointPx,
 			uColor: { value: new THREE.Color('#f2f8ff') },
 			uFogColor: waterUniforms.uFogColor,
@@ -2277,6 +2400,7 @@ uniform float uTime;
 uniform float uAmp;
 uniform float uPointPx;
 uniform float uDomAmp;
+uniform vec2 uWinCenter;
 uniform float uViewH;
 uniform float uMaxPoint;
 uniform vec2 uWindScreen;
@@ -2294,7 +2418,12 @@ varying float vGale;
 varying vec2 vAnchor;
 void main() {
 	vec3 surf; vec3 Nn; float g;
-	float r = frothFrame(position.xz, position.y, aRank, surf, Nn, g);
+	// Same world-anchor treatment as the froth masses — see the note there.
+	vec2 anchor = position.xz + uWinCenter;
+	float baseR = ${f(FROTH.radiusBase)} + ${f(FROTH.radiusVar)}
+		* fract(abs(sin(anchor.x * 37.719 + anchor.y * 53.117) * 24634.6345));
+	float rank = fract(abs(sin(anchor.x * 91.331 + anchor.y * 17.923) * 15731.743));
+	float r = frothFrame(anchor, baseR, rank, surf, Nn, g);
 	// BURST at the wave's peak: analytic surface height (normalised by
 	// the total amplitude) and its time derivative. Spray fires as the
 	// crest tops out and trails off on the way down — a throw, not a
@@ -2737,6 +2866,303 @@ void main() {
 		profT = now;
 	}
 
+	// ---------- The player's boat ----------
+	// A Boston-Whaler-ish center console from primitives (a Blender hull
+	// will replace the geometry later; the physics won't change). Floats
+	// on the same heave spring as the buoys with its own constants (BOAT),
+	// drives on the arrow keys, and the camera plus every travelling
+	// window follows it.
+	const boat = {
+		x: -1,
+		z: 1,
+		/** Radians; direction of travel is (cos, sin) in xz. */
+		heading: 3.93,
+		speed: 0,
+		y: 0,
+		vy: 0,
+		wet: true,
+		tx: 0,
+		tz: 0,
+		twx: 0,
+		twz: 0,
+		pw: 0,
+		prevSpeed: 0,
+		accelSm: 0,
+		rest: { u: -1, v: 1 }
+	};
+	const boatSurf = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 };
+	const boatKeys = { fwd: false, back: false, left: false, right: false };
+	function boatKey(e: KeyboardEvent, down: boolean) {
+		switch (e.key) {
+			case 'ArrowUp':
+				boatKeys.fwd = down;
+				break;
+			case 'ArrowDown':
+				boatKeys.back = down;
+				break;
+			case 'ArrowLeft':
+				boatKeys.left = down;
+				break;
+			case 'ArrowRight':
+				boatKeys.right = down;
+				break;
+			default:
+				return;
+		}
+		e.preventDefault();
+	}
+	const onBoatKeyDown = (e: KeyboardEvent) => boatKey(e, true);
+	const onBoatKeyUp = (e: KeyboardEvent) => boatKey(e, false);
+	window.addEventListener('keydown', onBoatKeyDown);
+	window.addEventListener('keyup', onBoatKeyUp);
+
+	const boatDisposables: { dispose(): void }[] = [];
+	function buildBoatMesh(): THREE.Group {
+		const g = new THREE.Group();
+		const mat = (color: string, opts: Record<string, unknown> = {}) => {
+			const m = new THREE.MeshStandardMaterial({ color, roughness: 0.6, ...opts });
+			boatDisposables.push(m);
+			return m;
+		};
+		const add = (geo: THREE.BufferGeometry, m: THREE.Material, x: number, y: number, z: number) => {
+			boatDisposables.push(geo);
+			const mesh = new THREE.Mesh(geo, m);
+			mesh.position.set(x, y, z);
+			g.add(mesh);
+			return mesh;
+		};
+		const hullMat = mat('#f2f5f3', { roughness: 0.45 });
+		const railMat = mat('#22364e');
+		const deckMat = mat('#dfe5e1');
+		const consoleMat = mat('#ccd5d9');
+		const darkMat = mat('#1a1d20', { roughness: 0.5 });
+		const glassMat = mat('#9fb4bd', { roughness: 0.15, transparent: true, opacity: 0.45 });
+
+		// Hull plan: parallel sides aft, a curved taper to a near-point bow.
+		// Extruded in Y so the sides are vertical — which a Whaler's nearly
+		// are — then dropped so the design waterline is the group's y = 0.
+		// Every stacked piece sits at a DISTINCT height with real clearance:
+		// the first build reused the full plan for hull, rail and deck with
+		// coincident faces (rail top exactly on the hull cap), and the
+		// z-fighting shimmered as "flickery texture".
+		const plan = (k: number) => {
+			const sh = new THREE.Shape();
+			sh.moveTo(-2.3 * k, -0.95 * k);
+			sh.lineTo(0.5 * k, -0.95 * k);
+			sh.quadraticCurveTo(1.75 * k, -0.8 * k, 2.3 * k, 0);
+			sh.quadraticCurveTo(1.75 * k, 0.8 * k, 0.5 * k, 0.95 * k);
+			sh.lineTo(-2.3 * k, 0.95 * k);
+			sh.closePath();
+			return sh;
+		};
+		const hullGeo = new THREE.ExtrudeGeometry(plan(1), { depth: 0.55, bevelEnabled: false });
+		hullGeo.rotateX(-Math.PI / 2);
+		hullGeo.translate(0, -0.2, 0); // 0.2m draft; cap (= deck) at 0.35
+		add(hullGeo, hullMat, 0, 0, 0);
+		// Rub rail: a RING (outline minus a hole), proud of the sheer and
+		// clear of the cap — no full-plan slab, so no coplanar face.
+		const railShape = plan(1.04);
+		railShape.holes.push(new THREE.Path(plan(0.93).getPoints(24)));
+		const railGeo = new THREE.ExtrudeGeometry(railShape, { depth: 0.08, bevelEnabled: false });
+		railGeo.rotateX(-Math.PI / 2);
+		railGeo.translate(0, 0.31, 0); // 0.31..0.39, straddling the sheer line
+		add(railGeo, railMat, 0, 0, 0);
+		// Deck sole: inset and 2cm PROUD of the hull cap.
+		const deckGeo = new THREE.ExtrudeGeometry(plan(0.88), { depth: 0.02, bevelEnabled: false });
+		deckGeo.rotateX(-Math.PI / 2);
+		deckGeo.translate(0, 0.352, 0);
+		add(deckGeo, deckMat, 0, 0, 0);
+		// Center console + raked windshield + leaning post, standing on the
+		// deck sole (0.372).
+		add(new THREE.BoxGeometry(0.8, 0.55, 0.75), consoleMat, 0.15, 0.65, 0);
+		const shield = add(new THREE.BoxGeometry(0.05, 0.32, 0.66), glassMat, 0.58, 1.05, 0);
+		shield.rotation.z = -0.35;
+		add(new THREE.BoxGeometry(0.34, 0.14, 0.55), consoleMat, -0.75, 0.81, 0);
+		add(new THREE.BoxGeometry(0.28, 0.36, 0.42), consoleMat, -0.75, 0.55, 0);
+		// Outboard: cowl over the transom, lower unit into the water.
+		add(new THREE.BoxGeometry(0.5, 0.4, 0.36), mat('#2a2f34', { roughness: 0.4 }), -2.52, 0.42, 0);
+		add(new THREE.BoxGeometry(0.12, 0.6, 0.14), darkMat, -2.48, -0.05, 0);
+		return g;
+	}
+	const boatMesh = buildBoatMesh();
+	// Everything the boat-image pass renders lives on layer 3.
+	boatMesh.traverse((o) => o.layers.enable(3));
+	/**
+	 * Offscreen render of the boat alone, clipped to below the local
+	 * waterline, refreshed every frame. Square is fine: sampling goes
+	 * through the camera's own projection, so the texture is just an
+	 * anisotropic copy of the screen's NDC space.
+	 */
+	const boatRT = new THREE.WebGLRenderTarget(1024, 1024, { depthBuffer: true });
+	const boatClip = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
+	const boatClearScratch = new THREE.Color();
+	function renderBoatImage() {
+		const cam = camera.current;
+		if (!cam) return;
+		if (sun) sun.layers.enable(3);
+		if (ambient) ambient.layers.enable(3);
+		// Keep only what is below the water at the boat: a horizontal cut
+		// at the local surface height. Locally exact enough — the hull is
+		// 4.6m in seas whose slope across it is modest.
+		boatClip.constant = boatSurf.height + 0.03;
+		renderer.clippingPlanes = [boatClip];
+		const mask = cam.layers.mask;
+		cam.layers.set(3);
+		const prevRT = renderer.getRenderTarget();
+		const prevClearColor = renderer.getClearColor(boatClearScratch);
+		const prevClearAlpha = renderer.getClearAlpha();
+		renderer.setRenderTarget(boatRT);
+		renderer.setClearColor(0x000000, 0);
+		renderer.clear();
+		renderer.render(scene, cam);
+		renderer.setRenderTarget(prevRT);
+		renderer.setClearColor(prevClearColor, prevClearAlpha);
+		cam.layers.mask = mask;
+		renderer.clippingPlanes = [];
+		waterUniforms.uBoatTex.value = boatRT.texture;
+		waterUniforms.uProj.value.copy(cam.projectionMatrix);
+	}
+	const boatUpV = new THREE.Vector3();
+	const boatFwdV = new THREE.Vector3();
+	const boatSideV = new THREE.Vector3();
+	const boatBasis = new THREE.Matrix4();
+	const boatTrimQ = new THREE.Quaternion();
+	const ISO_CAM = [34, 30, 34] as const;
+
+	function updateBoat(dt: number) {
+		// DRIVE. Quadratic + linear hull drag set the top speed (~5.8 m/s
+		// at the defaults); rudder authority grows with way on, and flips
+		// when making sternway, like a real helm.
+		const throttle = (boatKeys.fwd ? BOAT.thrust : 0) - (boatKeys.back ? BOAT.reverseThrust : 0);
+		boat.speed += throttle * dt;
+		boat.speed -= (BOAT.dragLinear * boat.speed + BOAT.dragQuad * boat.speed * Math.abs(boat.speed)) * dt;
+		const steer = (boatKeys.right ? 1 : 0) - (boatKeys.left ? 1 : 0);
+		const authority = BOAT.turnMin + (1 - BOAT.turnMin) * Math.min(Math.abs(boat.speed) / 3, 1);
+		boat.heading += steer * BOAT.turnRate * authority * dt * (boat.speed < -0.2 ? -1 : 1);
+		boat.x += Math.cos(boat.heading) * boat.speed * dt;
+		boat.z += Math.sin(boat.heading) * boat.speed * dt;
+		// Surge, low-passed: drives the lean-back-under-power trim.
+		const fwdAccel = dt > 0 ? (boat.speed - boat.prevSpeed) / dt : 0;
+		boat.prevSpeed = boat.speed;
+		boat.accelSm += (fwdAccel - boat.accelSm) * Math.min(dt / 0.3, 1);
+
+		// HEAVE — the buoys' spring with the boat's constants. Freeboard
+		// lives in the hull geometry, so equilibrium is the surface itself.
+		sampleOceanTracked(boatSurf, boat.rest, boat.x, boat.z, waveTime);
+		const wl = boatSurf.height;
+		const raw = dt > 0 ? (wl - boat.pw) / dt : 0;
+		const rise = Math.abs(raw) > BUOY_STEP_RATE ? 0 : THREE.MathUtils.clamp(raw, -6, 6);
+		boat.pw = wl;
+		const w0 = (2 * Math.PI) / BOAT.bobPeriod;
+		const spring = w0 * w0;
+		const damp = 2 * BOAT.bobZeta * w0;
+		// Planing lift raises the heave EQUILIBRIUM, so the spring carries
+		// the hull up smoothly as it gathers way and settles it on stopping.
+		const lift = THREE.MathUtils.clamp(
+			BOAT.liftPerSpeed * boat.speed * Math.abs(boat.speed),
+			-0.08,
+			BOAT.liftMax
+		);
+		const disp = wl + lift - boat.y;
+		const airborne = disp <= -BUOY_GRAVITY / spring;
+		let accel = Math.max(spring * Math.min(disp, BOAT.maxSubmersion), -BUOY_GRAVITY);
+		if (!airborne) accel -= damp * (boat.vy - rise);
+		boat.vy += accel * dt;
+		boat.y += boat.vy * dt;
+		if (!airborne && !boat.wet) {
+			const impact = Math.abs(rise - boat.vy);
+			if (impact > DROPLET.impactMinSpeed) {
+				const amp = Math.min(
+					(impact - DROPLET.impactMinSpeed) / (DROPLET.impactFullSpeed - DROPLET.impactMinSpeed),
+					1
+				);
+				injectRippleOver(boat.x, boat.z, 1.6, 0.1 + amp * 0.3, 0.075);
+				if (ENABLE.buoySpray) emitImpactSpray(waveTime, boat.x, boat.z, 0, 0, amp);
+			}
+		}
+		boat.wet = !airborne;
+
+		// TILT toward the water slope, sampled over hull-sized baselines
+		// (cold 1-iteration samples on purpose — see the buoy tilt note).
+		let tgtX = 0;
+		let tgtZ = 0;
+		if (!airborne) {
+			tgtX =
+				(-(sampleOcean(boat.x + 1.6, boat.z, waveTime, 1, 1).height -
+					sampleOcean(boat.x - 1.6, boat.z, waveTime, 1, 1).height) /
+					3.2) *
+				BOAT.tiltGain;
+			tgtZ =
+				(-(sampleOcean(boat.x, boat.z + 0.9, waveTime, 1, 1).height -
+					sampleOcean(boat.x, boat.z - 0.9, waveTime, 1, 1).height) /
+					1.8) *
+				BOAT.tiltGain;
+		}
+		const spr = airborne ? 0 : BOAT.righting;
+		const tDrag = airborne ? 0.5 : 2 * BOAT.tiltZeta * Math.sqrt(BOAT.righting);
+		boat.twx += (spr * (tgtX - boat.tx) - tDrag * boat.twx) * dt;
+		boat.twz += (spr * (tgtZ - boat.tz) - tDrag * boat.twz) * dt;
+		boat.tx += boat.twx * dt;
+		boat.tz += boat.twz * dt;
+
+		// WAKE: a continuous quiet poke at the stern. The wave equation
+		// turns the moving disturbance into the trailing V by itself.
+		if (!airborne && Math.abs(boat.speed) > 0.6) {
+			const amp = BOAT.wakeAmp * Math.min(Math.abs(boat.speed) / 5, 1);
+			if (amp > 0.002) {
+				injectRipple(
+					boat.x + Math.cos(boat.heading) * BOAT.wakeOffset,
+					boat.z + Math.sin(boat.heading) * BOAT.wakeOffset,
+					0.9,
+					amp
+				);
+			}
+		}
+
+		// POSE: orthonormal basis from heading and the tilt normal, plus
+		// speed trim (rotating about the side axis lifts the bow).
+		boatUpV.set(boat.tx, 1, boat.tz).normalize();
+		boatFwdV.set(Math.cos(boat.heading), 0, Math.sin(boat.heading));
+		boatFwdV.addScaledVector(boatUpV, -boatFwdV.dot(boatUpV)).normalize();
+		boatSideV.crossVectors(boatFwdV, boatUpV);
+		boatBasis.makeBasis(boatFwdV, boatUpV, boatSideV);
+		boatMesh.quaternion.setFromRotationMatrix(boatBasis);
+		const trim = THREE.MathUtils.clamp(
+			BOAT.trimPerSpeed * boat.speed + BOAT.trimPerAccel * boat.accelSm,
+			-0.08,
+			0.2
+		);
+		boatTrimQ.setFromAxisAngle(boatSideV, trim);
+		boatMesh.quaternion.premultiply(boatTrimQ);
+		boatMesh.position.set(boat.x, boat.y, boat.z);
+		// Feed the water's raytrace now, same as the buoys: Threlte would
+		// update the world matrix later in the frame, and the refracted
+		// half must not lag the rasterized half.
+		boatMesh.updateMatrixWorld();
+		waterUniforms.uBoatInv.value.copy(boatMesh.matrixWorld).invert();
+		renderBoatImage();
+
+		// CAMERA + TRAVELLING WINDOWS. The camera translates with the boat
+		// (direction fixed, so no lookAt needed); each world-window system
+		// recenters through its own mechanism.
+		const cam = camera.current;
+		const off = PROFILE.perspectiveCamera ? perspPos : ISO_CAM;
+		if (cam) cam.position.set(off[0] + boat.x, off[1], off[2] + boat.z);
+		if (PROFILE.perspectiveCamera) {
+			waterUniforms.uCamPos.value.set(perspPos[0] + boat.x, perspPos[1], perspPos[2] + boat.z);
+		}
+		winCenter.set(Math.round(boat.x * 2) / 2, Math.round(boat.z * 2) / 2);
+		if (waterMeshRef) waterMeshRef.position.set(winCenter.x, 0, winCenter.y);
+		rippleSim.recenter(boat.x, boat.z);
+		waterUniforms.uRippleCenter.value.copy(rippleSim.center);
+		backdropUniforms.uRippleCCenter.value.copy(rippleSim.center);
+		causticMap.setCenter(boat.x, boat.z, rippleSim.center);
+		waterUniforms.uCausticCenter.value.copy(causticMap.center);
+		foamField.recenter(boat.x, boat.z);
+		waterUniforms.uFoamCenter.value.copy(foamField.center);
+		setScanCenter(boat.x, boat.z);
+	}
+
 	const task = useTask(
 		(delta) => {
 			const cpuT0 = performance.now();
@@ -2778,6 +3204,7 @@ void main() {
 
 			syncSeaState(delta);
 			syncFftSpectrum(delta);
+			updateBoat(Math.min(delta, 0.1));
 
 			const env = computeEnv(game.time / ENV.daySeconds);
 
@@ -2942,6 +3369,10 @@ void main() {
 						.normalize()
 						.multiplyScalar(mixc(SPECULAR.cameraEyeDistance, SPECULAR.cameraEyeDistanceStorm));
 					waterUniforms.uCamPos.value.y *= SPECULAR.cameraEyeHeight;
+					// The simulated viewpoint is anchored to the LOOK TARGET,
+					// which is the boat now, not the origin.
+					waterUniforms.uCamPos.value.x += boat.x;
+					waterUniforms.uCamPos.value.z += boat.z;
 				}
 				waterUniforms.uSpecHaloGain.value =
 					SPECULAR.haloGain + (SPECULAR.haloGainLow - SPECULAR.haloGain) * t;
@@ -3210,6 +3641,10 @@ void main() {
 
 	onDestroy(() => {
 		renderer.domElement.removeEventListener('pointerdown', onPointerDown);
+		window.removeEventListener('keydown', onBoatKeyDown);
+		window.removeEventListener('keyup', onBoatKeyUp);
+		for (const d of boatDisposables) d.dispose();
+		boatRT.dispose();
 		window.removeEventListener('resize', onWindowResize);
 		clearTimeout(resizeTimer);
 		waterGeometry.dispose();
@@ -3283,8 +3718,11 @@ void main() {
 
 <T is={mistMesh} />
 {#if !PROFILE.hideWater}
-	<T.Mesh geometry={waterGeometry} material={waterMaterial} />
+	<!-- frustumCulled off: the shader samples via modelMatrix so the mesh is
+	     a travelling window; its bbox is recentred every frame anyway. -->
+	<T.Mesh bind:ref={waterMeshRef} geometry={waterGeometry} material={waterMaterial} frustumCulled={false} />
 {/if}
+<T is={boatMesh} />
 
 {#each PROFILE.hideObjects ? [] : buoys as buoy, i (i)}
 	<T.Mesh

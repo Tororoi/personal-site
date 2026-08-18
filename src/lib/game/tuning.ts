@@ -1796,6 +1796,55 @@ export const UNIFIED = {
 }
 
 /**
+ * BOAT — the player's hull. Same heave physics as the buoys (spring on
+ * submersion) with its own constants, plus drive. All live.
+ */
+export const BOAT = {
+  /** m/s^2 at full throttle. */
+  thrust: 5.0,
+  reverseThrust: 1.5,
+  /** Linear + quadratic hull drag; together they set the top speed
+   * (~5.8 m/s at the defaults: thrust = dragLinear*v + dragQuad*v^2). */
+  dragLinear: 0.45,
+  dragQuad: 0.045,
+  /** rad/s of rudder at speed, and the fraction available at standstill. */
+  turnRate: 1.5,
+  turnMin: 0,
+  /** Heave: natural bob period (s) and damping ratio. Longer and more
+   * damped than the buoys — a hull, not a cork. */
+  bobPeriod: 1.6,
+  bobZeta: 0.15,
+  maxSubmersion: 0.5,
+  /** Tilt toward the water slope: gain, spring stiffness, damping ratio. */
+  tiltGain: 1.5,
+  righting: 10,
+  tiltZeta: 1.2,
+  /** Bow-up trim per m/s of forward speed, radians. */
+  trimPerSpeed: 0.028,
+  /**
+   * Extra bow-up per m/s^2 of forward ACCELERATION (throttle surge), on a
+   * ~0.3s low-pass so it reads as the hull leaning back under power and
+   * settling, not as a twitch per keypress.
+   */
+  trimPerAccel: 0.022,
+  /**
+   * Planing lift: metres of extra ride height per (m/s)^2, capped. A hull
+   * with way on rides higher in the water; v-squared because that is what
+   * dynamic lift actually scales with.
+   */
+  liftPerSpeed: 0.018,
+  liftMax: 0.26,
+  /** Wake: continuous ripple poke, per step at full speed. */
+  wakeAmp: 0.016,
+  /**
+   * Where along the hull the wake poke is laid, metres fore of centre
+   * (bow +2.3, stern -2.3). The bow shoulder is where a hull actually
+   * pushes water aside, and the wave equation still trails the V behind.
+   */
+  wakeOffset: -0.8,
+}
+
+/**
  * REGISTRY for the tuning panel (TuningPanel.svelte).
  *
  * Listed explicitly rather than reflected off the module, so that adding
@@ -1810,6 +1859,7 @@ const GROUPS = {
   PROFILE,
   SEA,
   UNIFIED,
+  BOAT,
   FROTH,
   PLUME,
   LOOP,
@@ -1853,4 +1903,4 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
  * frame — otherwise the panel would report a change that never landed,
  * which is worse than asking for a reload.
  */
-export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA', 'UNIFIED'])
+export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA', 'UNIFIED', 'BOAT'])

@@ -104,6 +104,15 @@ const LOOP_SCAN_STEP = DROPLET.scanStep
  */
 let LOOP_SCAN_EXTENT: number = DROPLET.scanExtent
 
+let SCAN_CX = 0
+let SCAN_CZ = 0
+/** Centre of the loop-splash scan — follows the camera target (the boat),
+ * or the whole scan square drifts out of view and froth stops throwing. */
+export function setScanCenter(x: number, z: number) {
+  SCAN_CX = x
+  SCAN_CZ = z
+}
+
 export function setScanExtent(halfMetres: number) {
   LOOP_SCAN_EXTENT = Math.max(halfMetres, DROPLET.scanExtent)
 }
@@ -974,16 +983,16 @@ function scanLoopSplash(t: number) {
   const jx = scanJx
   const jz = scanJz
   const span = 2 * LOOP_SCAN_EXTENT
-  const x0 = -LOOP_SCAN_EXTENT + (span * scanSlice) / SCAN_SLICES
-  const x1 = -LOOP_SCAN_EXTENT + (span * (scanSlice + 1)) / SCAN_SLICES
+  const x0 = SCAN_CX - LOOP_SCAN_EXTENT + (span * scanSlice) / SCAN_SLICES
+  const x1 = SCAN_CX - LOOP_SCAN_EXTENT + (span * (scanSlice + 1)) / SCAN_SLICES
   for (
     let x = x0 + jx;
     x < x1;
     x += LOOP_SCAN_STEP
   ) {
     for (
-      let z = -LOOP_SCAN_EXTENT + jz;
-      z <= LOOP_SCAN_EXTENT;
+      let z = SCAN_CZ - LOOP_SCAN_EXTENT + jz;
+      z <= SCAN_CZ + LOOP_SCAN_EXTENT;
       z += LOOP_SCAN_STEP
     ) {
       if (!inView(x, z)) continue
