@@ -1805,17 +1805,123 @@ export const UNIFIED = {
  * and ridge modulation (preLit*).
  */
 export const UNDERWATER = {
-  /** Sky-tinted ambient on submerged surfaces, 0-1ish. */
-  ambient: 0.45,
-  /** Refracted-sun diffuse strength on flat-albedo objects. */
-  direct: 0.5,
+  /**
+   * Ambient on submerged surfaces, as a MULTIPLE of the ambient the same
+   * object would receive in air. 1.0 matches it, so nothing jumps as it
+   * crosses the surface; the sky still supplies the hue.
+   *
+   * This used to be a raw scale on the sky colour, which is the sea
+   * preset's and barely moves through the day — so submerged things held
+   * a fixed ambient while everything in air dimmed toward dusk, and 1.0
+   * meant roughly FIVE times the above-water level at noon.
+   */
+  ambient: 1.0,
+  /**
+   * Refracted-sun diffuse on flat-albedo objects, as a MULTIPLE of the
+   * above-water directional lighting. At 1.0 the only differences left
+   * are the physical ones: Fresnel loss at the surface, and the beam's
+   * concentration by refraction.
+   */
+  direct: 1.0,
   /** Additive caustic ridge brightness on flat-albedo objects. */
   ridgeGain: 0.8,
-  /** Per-metre extinction on the direct and ridge terms. */
-  depthFalloff: 0.1,
-  /** Water clarity: how far transmitted colour mixes toward the water
-   * tint. The old uAlphaBase. */
-  clarity: 0.3,
+  /**
+   * FADE RANGE, in METRES: the depth at which each channel is 90% gone
+   * (10% of the light left). Beer-Lambert, so the shader converts with
+   * sigma = ln(10) / range.
+   *
+   * Stated as a distance because that is how the effect is actually
+   * known — "red disappears around 15 feet" — and the per-metre
+   * coefficients it produces are the real ones: 5m gives 0.46/m against
+   * pure water's measured 0.465 at 680nm, and 30m gives 0.076 against
+   * 0.064 at 550nm. Blue at 90m implies 0.025/m, which is real SEAwater
+   * with its dissolved organics rather than distilled water (0.009,
+   * ~250m) — the right choice for an ocean.
+   *
+   * Defaults are the standard clear-water figures: red 15ft, orange
+   * 30ft, yellow 50ft, green 100ft, blue past 300ft. Only red, green and
+   * blue are set directly — orange and yellow are mixtures of the red
+   * and green channels and fade where those two leave them, which lands
+   * them near their real depths without a knob of their own. Hitting all
+   * five exactly would take spectral rendering, not RGB.
+   *
+   * Lower a range for murkier water; raise it for gin-clear.
+   */
+  redRangeM: 10,
+  greenRangeM: 60,
+  blueRangeM: 180,
+  /**
+   * RAYLEIGH backscatter — molecular, per metre, quoted at green (550nm).
+   *
+   * Scattering is absorption's mirror image: water absorbs LONG
+   * wavelengths first and scatters SHORT ones hardest. Pure water
+   * molecules follow lambda^-4.3, which the shader applies as channel
+   * weights (0.40, 1.00, 2.38) — blue scattered 5.9x more than red,
+   * matching the ~5x figure for real water. This term alone is what
+   * makes the open ocean deep blue.
+   */
+  rayleighScatter: 0.006,
+  /**
+   * MIE backscatter — plankton and sediment, per metre, EQUAL across
+   * channels.
+   *
+   * Particles much larger than the wavelength scatter every colour
+   * alike, so this returns white light into the column. Filtered through
+   * the water's own absorption it lands as green or teal rather than
+   * white, which is exactly why coastal water is green where open ocean
+   * is blue: at the defaults, raising this lifts the green/blue ratio of
+   * the deep colour from 0.14 toward 0.33. Shortening blueRangeM
+   * (dissolved organics absorbing blue) is the other half of the coastal
+   * look — the two together are the whole mechanism.
+   */
+  mieScatter: 0.0008,
+  /**
+   * Depth, metres, at which downwelling light has lost its direction.
+   *
+   * The zone structure of real water: shallow light is directional and
+   * casts caustics; by ~45m in clear water it has been scattered into a
+   * uniform haze arriving equally from every side, with no visible sun
+   * and no caustics. Fades the directional shading term into flat
+   * ambient and washes the caustics out over that scale. NOTE: with the
+   * seabed at 6m this is nearly inert today (87% directional at the
+   * bottom) — it is here so the model stays right if the scene ever
+   * gets deeper.
+   */
+  diffuseDepthM: 45,
+  /**
+   * How much light gets deep enough to scatter back — clear vs overcast.
+   *
+   * Clear sunlight is directional and drives deep into the column, so
+   * plenty returns as blue. Overcast light arrives diffuse and shallow,
+   * is absorbed near the surface, and far less comes back — which is why
+   * an overcast sea reads grey and flat rather than merely darker blue.
+   * Blended by the sea's own sun diffusion.
+   */
+  scatterClear: 1.0,
+  scatterOvercast: 0.3,
+  /**
+   * FRESNEL FLOOR — how much sky the surface reflects when looked at
+   * head-on, and the largest single source of blue over anything
+   * underwater.
+   *
+   * At this camera (32 degrees above the horizon) a 0.25 floor worked
+   * out to ~0.33 — a third of every water pixel was sky before the
+   * refracted view got a say, and it was the real reason shallow objects
+   * read blue. Physical Fresnel for water at that angle is ~0.05. Now
+   * that the sea's colour comes from backscatter, where it physically
+   * comes from, this can sit near zero and the water still reads as
+   * water. Grazing angles still mirror the sky regardless: the term
+   * rises to 1 as the surface turns edge-on.
+   */
+  surfaceReflect: 0.01,
+  /**
+   * How far the underwater ambient keeps the SKY'S HUE (1) versus going
+   * neutral at the same brightness (0). Skylight really is blue, so 1 is
+   * physical; lower it when submerged bodies should hold their own
+   * colour. Flat-albedo objects (sphere, buoys, seabed) only — the boat's
+   * pre-lit path carries its own colour already.
+   */
+  ambientSkyTint: 1.0,
   /** Caustic-shadow dip on the boat's pre-lit image (x BOAT.causticGain). */
   preLitDip: 0.35,
   /** Caustic ridge brightness on the boat's image (x BOAT.causticGain). */
@@ -1824,14 +1930,23 @@ export const UNDERWATER = {
    * How far the boat's image is RELIT by the underwater terms above.
    *
    * 0 keeps only the image's own (above-water) lighting, caustic-dimmed —
-   * continuous across the waterline, but deaf to `ambient`, `direct`,
-   * `depthFalloff`, which is exactly why most of this group appeared to
-   * do nothing to the submerged hull. 1 treats the image as albedo and
+   * continuous across the waterline, but deaf to `ambient` and `direct`,
+   * which is exactly why most of this group appeared to do nothing to
+   * the submerged hull. 1 treats the image as albedo and
    * lights it like any other submerged surface: every knob acts, at the
    * cost of a brightness step where the hull crosses the surface.
    * `ambient` is the lever for "the hull is too dark down there".
    */
-  preLitRelight: 0.5,
+  preLitRelight: 1.0,
+  /**
+   * A flat six-band rainbow card beside the sphere, riding at the same
+   * height. A measuring instrument, not scenery: each band loses its
+   * colour at its own depth, so the per-channel absorption becomes
+   * directly readable — red should go first and violet-blue last as you
+   * sink it. Hard edges between bands on purpose, so the fade of one
+   * band is judged against its neighbour rather than a gradient.
+   */
+  rainbowCard: true,
   /**
    * Sphere centre height, metres (radius is 5). -6 sinks it just under;
    * +5 lifts it clear of the water. A staging control for judging the
@@ -1962,4 +2077,10 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
  * frame — otherwise the panel would report a change that never landed,
  * which is worse than asking for a reload.
  */
-export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA', 'UNIFIED', 'BOAT', 'UNDERWATER'])
+export const LIVE_GROUPS = new Set([
+  'SPECULAR',
+  'SEA',
+  'UNIFIED',
+  'BOAT',
+  'UNDERWATER',
+])
