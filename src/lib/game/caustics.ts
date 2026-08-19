@@ -420,6 +420,19 @@ export class CausticMap {
     }
     this.tileAttr.needsUpdate = true
     this.splatGeometry.instanceCount = count
+    // WORLD rect the splat actually covered this frame. The map is CLEAR
+    // (zero) outside it, and zero reads as full caustic shadow — any
+    // receiver sampling beyond the rect must fade to neutral instead.
+    if (count > 0) {
+      this.validRegion.set(
+        cc.x - half + ((tx0 + tx1 + 1) / 2) * tileSize,
+        cc.y - half + ((tz0 + tz1 + 1) / 2) * tileSize,
+        ((tx1 - tx0 + 1) / 2) * tileSize,
+        ((tz1 - tz0 + 1) / 2) * tileSize,
+      )
+    } else {
+      this.validRegion.set(0, 0, 0, 0)
+    }
 
     this.material.uniforms.uRippleTex.value = rippleTexture
     this.material.uniforms.uSunDir.value.copy(sunDir)
@@ -494,6 +507,14 @@ export class CausticMap {
     renderer.autoClear = previousAutoClear
     renderer.setClearColor(this.savedClearColor, previousClearAlpha)
     renderer.setRenderTarget(previousTarget)
+  }
+
+  /** World rect (cx, cz, halfX, halfZ) the splat covered; empty = none. */
+  readonly validRegion = new THREE.Vector4(0, 0, 0, 0)
+
+  /** Sphere centre height, live from the tuning panel. */
+  setSphereY(y: number) {
+    ;(this.material.uniforms.uSphereCenter.value as THREE.Vector3).y = y
   }
 
   /** Domain centre, for the receivers' uCausticCenter uniforms. */

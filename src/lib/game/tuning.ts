@@ -1796,6 +1796,58 @@ export const UNIFIED = {
 }
 
 /**
+ * UNDERWATER — how submerged things are lit, and how the caustic pattern
+ * behaves on them. All live (uniform-fed per frame).
+ *
+ * Two shading paths share these: flat-albedo objects (sphere, buoys) get
+ * relit from scratch — ambient + direct + additive ridges — while the
+ * boat's image-pass hits keep their own lighting and only take the dip
+ * and ridge modulation (preLit*).
+ */
+export const UNDERWATER = {
+  /** Sky-tinted ambient on submerged surfaces, 0-1ish. */
+  ambient: 0.45,
+  /** Refracted-sun diffuse strength on flat-albedo objects. */
+  direct: 0.5,
+  /** Additive caustic ridge brightness on flat-albedo objects. */
+  ridgeGain: 0.8,
+  /** Per-metre extinction on the direct and ridge terms. */
+  depthFalloff: 0.1,
+  /** Water clarity: how far transmitted colour mixes toward the water
+   * tint. The old uAlphaBase. */
+  clarity: 0.3,
+  /** Caustic-shadow dip on the boat's pre-lit image (x BOAT.causticGain). */
+  preLitDip: 0.35,
+  /** Caustic ridge brightness on the boat's image (x BOAT.causticGain). */
+  preLitRidge: 0.8,
+  /**
+   * How far the boat's image is RELIT by the underwater terms above.
+   *
+   * 0 keeps only the image's own (above-water) lighting, caustic-dimmed —
+   * continuous across the waterline, but deaf to `ambient`, `direct`,
+   * `depthFalloff`, which is exactly why most of this group appeared to
+   * do nothing to the submerged hull. 1 treats the image as albedo and
+   * lights it like any other submerged surface: every knob acts, at the
+   * cost of a brightness step where the hull crosses the surface.
+   * `ambient` is the lever for "the hull is too dark down there".
+   */
+  preLitRelight: 0.5,
+  /**
+   * Sphere centre height, metres (radius is 5). -6 sinks it just under;
+   * +5 lifts it clear of the water. A staging control for judging the
+   * underwater lighting against a body of known shape.
+   */
+  sphereDepth: -6,
+  /**
+   * Sun-diffusion band over which the caustic pattern washes out to flat
+   * light — an extended source blurs its own pattern away. Start = where
+   * washing begins, end = fully featureless.
+   */
+  flatStart: 0.35,
+  flatEnd: 1.0,
+}
+
+/**
  * BOAT — the player's hull. Same heave physics as the buoys (spring on
  * submersion) with its own constants, plus drive. All live.
  */
@@ -1866,6 +1918,7 @@ const GROUPS = {
   SEA,
   UNIFIED,
   BOAT,
+  UNDERWATER,
   FROTH,
   PLUME,
   LOOP,
@@ -1909,4 +1962,4 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
  * frame — otherwise the panel would report a change that never landed,
  * which is worse than asking for a reload.
  */
-export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA', 'UNIFIED', 'BOAT'])
+export const LIVE_GROUPS = new Set(['SPECULAR', 'SEA', 'UNIFIED', 'BOAT', 'UNDERWATER'])

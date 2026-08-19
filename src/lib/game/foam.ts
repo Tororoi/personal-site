@@ -289,7 +289,7 @@ uniform mat4 uBuoyInv[3];
  *  the water's true motion past a moored object. */
 uniform vec2 uCurrent;
 // Must match Scene.svelte's water shader and caustics.ts.
-const vec3 SPHERE_C = vec3(3.0, -6.0, 2.0);
+uniform vec3 SPHERE_C;
 const float SPHERE_R = 5.0;
 const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
 /** Same accumulated carry the water fragment uses, so the cell a parcel
@@ -656,7 +656,7 @@ export class FoamField {
    *   passed by reference so the sim and the water shader can never see
    *   different buoy positions.
    */
-  constructor(buoyInv: THREE.Matrix4[]) {
+  constructor(buoyInv: THREE.Matrix4[], sphereC: THREE.Vector3) {
     const makeTarget = () =>
       new THREE.WebGLRenderTarget(FOAM_RESOLUTION, FOAM_RESOLUTION, {
         type: THREE.HalfFloatType,
@@ -694,6 +694,9 @@ export class FoamField {
         uDiffTexel: { value: 1 / FOAM_RESOLUTION },
       uFoaminess: { value: CONTACT_FOAMINESS },
         uDtScale: { value: 1 },
+        // Shared with the water and the crest so nothing can disagree
+        // about where the sphere is; live from UNDERWATER.sphereDepth.
+        SPHERE_C: { value: sphereC },
         uShift: { value: new THREE.Vector2(0, 0) },
         uCenter: { value: new THREE.Vector2(0, 0) },
         uExtent: { value: FOAM_EXTENT },
