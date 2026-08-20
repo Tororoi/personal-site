@@ -37,19 +37,19 @@ export const ENABLE = {
    */
   caustics: true,
   /** White ribbon on the folding mesh itself. */
-  loopWhite: false,
+  loopWhite: true,
   /** Pull of the pinch zone toward the sprite plane. */
   loopStretch: true,
   /** Froth masses surfacing from under the fold. */
-  froth: false,
+  froth: true,
   /** Vertical spray thrown off each foam mass. */
   crestPlumes: false,
   /** Ballistic droplets launched from inside the loops. */
-  splashDroplets: false,
+  splashDroplets: true,
   /** Spray kicked up by the buoys. */
   buoySpray: true,
   /** Persistent foam residue field (deposits from landings). */
-  foamField: false,
+  foamField: true,
   /** Continuous foam laid by the sim wherever froth appears. */
   foamTrail: true,
   /**
@@ -121,7 +121,7 @@ export const ENABLE = {
    *   node tools/perf-logger.mjs perf-log.jsonl
    * If it is not running the beacons fail silently and nothing breaks.
    */
-  perfLog: true,
+  perfLog: false,
 }
 
 /**
