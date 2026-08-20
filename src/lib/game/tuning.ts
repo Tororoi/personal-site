@@ -1823,8 +1823,15 @@ export const UNDERWATER = {
    * concentration by refraction.
    */
   direct: 1.0,
-  /** Additive caustic ridge brightness on flat-albedo objects. */
-  ridgeGain: 0.8,
+  /**
+   * Additive caustic ridge brightness on flat-albedo objects. 1.0 keeps
+   * the pattern ENERGY-NEUTRAL: the diffuse term clamps troughs and
+   * ridges to <= 1, and this term re-adds exactly the clamped-off ridge
+   * energy, so caustics redistribute light instead of stealing ~5-10% of
+   * it (which they did at 0.8 — part of the across-the-board underwater
+   * darkening).
+   */
+  ridgeGain: 1.0,
   /**
    * FADE RANGE, in METRES: the depth at which each channel is 90% gone
    * (10% of the light left). Beer-Lambert, so the shader converts with
@@ -1889,6 +1896,31 @@ export const UNDERWATER = {
    */
   diffuseDepthM: 45,
   /**
+   * How much of the extinction shows up as DARKENING, versus only
+   * shifting hue.
+   *
+   * 1.0 is literal single-scattering physics — and it over-darkens,
+   * because this model only ever removes light from a path and never
+   * puts any back. In real water most of what a blue photon "loses" to
+   * scattering is redirected, not absorbed, and a good share of it
+   * rejoins the view; simulating that needs multiple scattering, which
+   * this does not do. Below 1.0 the transmittance is renormalised so the
+   * brightest surviving channel is preserved and the others still fall
+   * away relative to it: colour goes in the same rainbow order, without
+   * everything sinking into gloom. 1.0 if you want the raw physics.
+   */
+  dim: 0.65,
+  /**
+   * The water column's own glow as a LIGHT SOURCE on submerged surfaces.
+   *
+   * Backscattered light does not just hang between the camera and an
+   * object, it also illuminates that object from every side — which is
+   * why a diver at depth is lit blue rather than merely dark. Zero at
+   * the surface (so nothing jumps at the waterline) and growing with
+   * depth as the beam gives way to the scattered field.
+   */
+  glow: 1.0,
+  /**
    * How much light gets deep enough to scatter back — clear vs overcast.
    *
    * Clear sunlight is directional and drives deep into the column, so
@@ -1913,15 +1945,17 @@ export const UNDERWATER = {
    * water. Grazing angles still mirror the sky regardless: the term
    * rises to 1 as the surface turns edge-on.
    */
-  surfaceReflect: 0.01,
+  surfaceReflect: 0.02,
   /**
-   * How far the underwater ambient keeps the SKY'S HUE (1) versus going
-   * neutral at the same brightness (0). Skylight really is blue, so 1 is
-   * physical; lower it when submerged bodies should hold their own
-   * colour. Flat-albedo objects (sphere, buoys, seabed) only — the boat's
-   * pre-lit path carries its own colour already.
+   * Blend of the underwater ambient toward a sky-hued version (same
+   * luma). 0 = the exact per-channel ambient the object would get in
+   * air, which is the physical choice — the water column's own
+   * wavelength filtering is applied separately and correctly by the
+   * extinction. RENAMED from ambientSkyTint on purpose: the old
+   * luma-matched formula pumped the blue channel ~2.2x and starved red,
+   * so a stale saved override must not resurrect it.
    */
-  ambientSkyTint: 1.0,
+  ambientSkyHue: 0.15,
   /** Caustic-shadow dip on the boat's pre-lit image (x BOAT.causticGain). */
   preLitDip: 0.35,
   /** Caustic ridge brightness on the boat's image (x BOAT.causticGain). */
@@ -1953,6 +1987,54 @@ export const UNDERWATER = {
    * underwater lighting against a body of known shape.
    */
   sphereDepth: -6,
+  /**
+   * How dark a caustic shadow may drive the direct light. 0 lets a
+   * trough extinguish it completely.
+   *
+   * Insurance as much as art: the caustic map only holds real data where
+   * its beams were splatted, and any patch they miss reads as pitch
+   * shadow rather than as "no data". Real troughs are not black either —
+   * scattered light still arrives.
+   */
+  causticFloor: 0.35,
+  /**
+   * FOCAL DISTANCE of the caustic pattern, metres: how far light must
+   * travel below the surface before the pattern is fully formed.
+   *
+   * At the interface itself the refracted rays have not converged yet, so
+   * there is no pattern. Ripples focus over centimetres to a fraction of
+   * a metre, so by half a metre down it is fully developed — and from
+   * there it BLURS and dims with depth rather than strengthening (that
+   * part is handled by diffuseDepthM and the extinction). A six-metre
+   * ramp was tried here to suppress an unrelated self-shadow artefact and
+   * had the pattern backwards: weakest where caustics are in fact
+   * sharpest.
+   */
+  causticFocusM: 0.02,
+  /**
+   * How fast the caustic pattern BLURS with depth, in mip levels per
+   * metre. Overlapping focal cones smear the pattern out the further
+   * light travels from the surface, so a shallow receiver gets crisp
+   * filaments and a deep one gets soft mottling — the same softening big
+   * waves produce, but from distance rather than wavelength. 0 keeps the
+   * map equally sharp at every depth, which is what it did before.
+   */
+  causticBlurPerM: 0.35,
+  /**
+   * Flat brightness multiplier on submerged shading — the honest fudge
+   * for the gap this model has not closed analytically.
+   *
+   * Measured on the rainbow card at 1.5m in calm water (framebuffer is
+   * LINEAR, calibrated by rendering a known constant): warm bands land at
+   * 0.37-0.40 of their above-water value, which IS the absorption model
+   * working; blue bands come out at 1.13-1.17, brighter, from in-scatter;
+   * but green sits near 0.43-0.58 where extinction alone predicts ~0.85.
+   * Part of that is the above-water card measuring ~1.3x brighter than
+   * its own analytic model (MeshStandardMaterial adds a specular lobe the
+   * underwater path has no equivalent for). Until that is chased down,
+   * this closes the gap by eye — try ~1.3 to match the waterline.
+   */
+  exposure: 1.0,
   /**
    * Sun-diffusion band over which the caustic pattern washes out to flat
    * light — an extended source blurs its own pattern away. Start = where

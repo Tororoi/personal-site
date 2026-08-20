@@ -247,8 +247,14 @@ export class CausticMap {
         type: THREE.HalfFloatType,
         // Single channel: quarters the additive fill bandwidth vs RGBA.
         format: THREE.RedFormat,
-        minFilter: THREE.LinearFilter,
+        // MIPMAPPED so receivers can soften the pattern with depth: the
+        // map is computed for ONE plane, and without a mip chain every
+        // receiver reads it equally sharp no matter how deep it sits.
+        // Sampling with a depth-proportional LOD bias is the cheap way to
+        // get overlapping focal cones smearing out with distance.
+        minFilter: THREE.LinearMipmapLinearFilter,
         magFilter: THREE.LinearFilter,
+        generateMipmaps: true,
         depthBuffer: false,
         stencilBuffer: false,
       },
@@ -407,10 +413,19 @@ export class CausticMap {
     const half = CAUSTIC_EXTENT / 2
     let count = 0
     const attr = this.tileAttr.array as Float32Array
-    const tx0 = Math.max(0, Math.floor((cx - cc.x - r + half) / tileSize))
-    const tx1 = Math.min(TILES - 1, Math.floor((cx - cc.x + r + half) / tileSize))
-    const tz0 = Math.max(0, Math.floor((cz - cc.y - r + half) / tileSize))
-    const tz1 = Math.min(TILES - 1, Math.floor((cz - cc.y + r + half) / tileSize))
+    // Cover a BOX CENTRED ON THE DOMAIN, as wide as the tile budget
+    // allows, rather than a disc around the sphere. Beams only exist
+    // where tiles are drawn, so a sphere-shaped budget lit a
+    // sphere-shaped patch of sea and left everything else — the rainbow
+    // card, the boat, most of the visible water — outside the pattern
+    // with a hard edge where it stopped. The sphere is not special; the
+    // VIEW is what needs caustics.
+    const span = Math.min(TILES, Math.floor(Math.sqrt(MAX_TILES)))
+    const mid = Math.floor(TILES / 2)
+    const tx0 = Math.max(0, mid - Math.floor(span / 2))
+    const tx1 = Math.min(TILES - 1, tx0 + span - 1)
+    const tz0 = Math.max(0, mid - Math.floor(span / 2))
+    const tz1 = Math.min(TILES - 1, tz0 + span - 1)
     for (let tz = tz0; tz <= tz1 && count < MAX_TILES; tz++) {
       for (let tx = tx0; tx <= tx1 && count < MAX_TILES; tx++) {
         attr[count * 2] = tx
