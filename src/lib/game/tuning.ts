@@ -29,6 +29,13 @@ export const ENABLE = {
    * back on. Toggle it here, or press ` in the page.
    */
   tuningUI: true,
+  /**
+   * All caustic light on submerged surfaces — the projected pattern AND
+   * its shadows (a blocked beam splats darkness: the sphere casts a real
+   * shadow disc downstream of the sun's slant). Off = flat direct light,
+   * and the whole caustic sim (splat + blur + mips) is skipped.
+   */
+  caustics: true,
   /** White ribbon on the folding mesh itself. */
   loopWhite: false,
   /** Pull of the pinch zone toward the sprite plane. */
@@ -1799,10 +1806,9 @@ export const UNIFIED = {
  * UNDERWATER — how submerged things are lit, and how the caustic pattern
  * behaves on them. All live (uniform-fed per frame).
  *
- * Two shading paths share these: flat-albedo objects (sphere, buoys) get
- * relit from scratch — ambient + direct + additive ridges — while the
- * boat's image-pass hits keep their own lighting and only take the dip
- * and ridge modulation (preLit*).
+ * ONE shading path for every submerged surface — sphere, buoys, seabed,
+ * the rainbow card, and the boat (its image pass captures unlit albedo,
+ * so the refracted hull is lit here like everything else).
  */
 export const UNDERWATER = {
   /**
@@ -1921,6 +1927,20 @@ export const UNDERWATER = {
    */
   glow: 1.0,
   /**
+   * WRAP on the underwater direct light, matching the dry sphere's own
+   * wrap term ((N.L + wrap)/(1 + wrap)).
+   *
+   * The dry branch softens its terminator so a flank at N.L = 0 still
+   * gets 29% of the direct light; the underwater path used a hard
+   * clamp, so the same flank went to ambient-only the moment it crossed
+   * the surface — most of what the camera sees of a sphere or hull IS
+   * flank, which read as "everything darkens when it submerges",
+   * caustics on or off. Physically the wrap stands in for the scattered
+   * field filling side faces, which real water does even harder than
+   * air. 0 restores the hard clamp.
+   */
+  wrap: 0.4,
+  /**
    * How much light gets deep enough to scatter back — clear vs overcast.
    *
    * Clear sunlight is directional and drives deep into the column, so
@@ -1947,6 +1967,32 @@ export const UNDERWATER = {
    */
   surfaceReflect: 0.02,
   /**
+   * Strength of the GRAZING rise in the surface reflection — the part of
+   * Fresnel that climbs toward a full mirror as a wave face tilts
+   * edge-on. 1 is physical Schlick; below 1 the water stays transparent
+   * on tilted faces (less sky painted over whatever is beneath a passing
+   * wave), 0 leaves only the flat surfaceReflect floor at every angle.
+   *
+   * WHERE IT HAS AUTHORITY: steep faces. Full-range, it moves a storm
+   * face 2% -> 21-38% sky; flat calm water only 2% -> 4%, which is
+   * imperceptible — on a calm sea this slider does nearly nothing, by
+   * physics, not by bug. NOTE: the sun glitter reads the same Fresnel
+   * through SPECULAR.fresnelMix, so pulling this down also softens how
+   * strongly the glitter favours tilted faces.
+   */
+  fresnelGrazing: 1.0,
+  /**
+   * Scale on the Fresnel loss of SUNLIGHT entering the water — the
+   * "did the light get in" half, distinct from the view-path reflection
+   * above. 1 is physical; 0 lets every ray in.
+   *
+   * WHERE IT HAS AUTHORITY: low sun only. The loss is ~2% at midday
+   * (imperceptible either way), 8% at 26 degrees, 24% at 15, 48% at 8 —
+   * this is the dial for how hard dusk dims the underwater world, and a
+   * midday A/B will show nothing, by physics.
+   */
+  entryLoss: 1.0,
+  /**
    * Blend of the underwater ambient toward a sky-hued version (same
    * luma). 0 = the exact per-channel ambient the object would get in
    * air, which is the physical choice — the water column's own
@@ -1956,22 +2002,6 @@ export const UNDERWATER = {
    * so a stale saved override must not resurrect it.
    */
   ambientSkyHue: 0.15,
-  /** Caustic-shadow dip on the boat's pre-lit image (x BOAT.causticGain). */
-  preLitDip: 0.35,
-  /** Caustic ridge brightness on the boat's image (x BOAT.causticGain). */
-  preLitRidge: 0.8,
-  /**
-   * How far the boat's image is RELIT by the underwater terms above.
-   *
-   * 0 keeps only the image's own (above-water) lighting, caustic-dimmed —
-   * continuous across the waterline, but deaf to `ambient` and `direct`,
-   * which is exactly why most of this group appeared to do nothing to
-   * the submerged hull. 1 treats the image as albedo and
-   * lights it like any other submerged surface: every knob acts, at the
-   * cost of a brightness step where the hull crosses the surface.
-   * `ambient` is the lever for "the hull is too dark down there".
-   */
-  preLitRelight: 1.0,
   /**
    * A flat six-band rainbow card beside the sphere, riding at the same
    * height. A measuring instrument, not scenery: each band loses its
@@ -2083,12 +2113,6 @@ export const BOAT = {
    */
   liftPerSpeed: 0.018,
   liftMax: 0.26,
-  /**
-   * Caustic shimmer on the topsides: refracted sunlight dancing on the
-   * hull around the waterline. Gain on the caustic map's bright ridges;
-   * 0 disables.
-   */
-  causticGain: 0.8,
   /** Wake: continuous ripple poke, per step at full speed. */
   wakeAmp: 0.016,
   /**

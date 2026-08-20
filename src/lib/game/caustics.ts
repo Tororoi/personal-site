@@ -363,6 +363,44 @@ export class CausticMap {
     )
     blurMesh.frustumCulled = false
     this.blurScene.add(blurMesh)
+    this.meanTarget = new THREE.WebGLRenderTarget(1, 1, {
+      type: THREE.HalfFloatType,
+      format: THREE.RedFormat,
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    })
+    this.meanMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uMap: { value: this.target.texture },
+        // splatted rect in the map's uv space: centre xy, half-extent zw
+        uRectUv: { value: new THREE.Vector4(0.5, 0.5, 0.4, 0.4) },
+      },
+      vertexShader: `
+void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+      fragmentShader: `
+precision highp float;
+uniform sampler2D uMap;
+uniform vec4 uRectUv;
+void main() {
+	float acc = 0.0;
+	for (int j = 0; j < 16; j++) {
+		for (int i = 0; i < 16; i++) {
+			vec2 t = (vec2(float(i), float(j)) + 0.5) / 16.0 * 2.0 - 1.0;
+			acc += texture2D(uMap, uRectUv.xy + t * uRectUv.zw).r;
+		}
+	}
+	gl_FragColor = vec4(acc / 256.0, 0.0, 0.0, 1.0);
+}`,
+      depthTest: false,
+      depthWrite: false,
+    })
+    this.meanScene = new THREE.Scene()
+    const meanQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.meanMaterial)
+    meanQuad.frustumCulled = false
+    this.meanScene.add(meanQuad)
+
   }
 
   get texture(): THREE.Texture {
@@ -519,6 +557,29 @@ export class CausticMap {
       }
     }
 
+    // Reduce the splatted rect to its mean, for receiver normalisation.
+    {
+      const cc2 = this.material.uniforms.uCenter.value as THREE.Vector2
+      const rect = this.meanMaterial.uniforms.uRectUv.value as THREE.Vector4
+      if (this.validRegion.z > 0.5) {
+        rect.set(
+          (this.validRegion.x - cc2.x) / CAUSTIC_EXTENT + 0.5,
+          (this.validRegion.y - cc2.y) / CAUSTIC_EXTENT + 0.5,
+          // inset 20%: the rect's rim mixes with unsplatted black and
+          // would drag the mean low
+          (this.validRegion.z / CAUSTIC_EXTENT) * 0.8,
+          (this.validRegion.w / CAUSTIC_EXTENT) * 0.8,
+        )
+        renderer.setRenderTarget(this.meanTarget)
+        renderer.render(this.meanScene, this.meanCamera)
+      } else {
+        // nothing splatted: neutral mean so the division is a no-op
+        renderer.setRenderTarget(this.meanTarget)
+        renderer.setClearColor(new THREE.Color(1, 1, 1), 1)
+        renderer.clear(true, false, false)
+      }
+    }
+
     renderer.autoClear = previousAutoClear
     renderer.setClearColor(this.savedClearColor, previousClearAlpha)
     renderer.setRenderTarget(previousTarget)
@@ -526,6 +587,25 @@ export class CausticMap {
 
   /** World rect (cx, cz, halfX, halfZ) the splat covered; empty = none. */
   readonly validRegion = new THREE.Vector4(0, 0, 0, 0)
+
+  /**
+   * 1x1 target holding the map's MEAN over the splatted rect, refreshed
+   * every step. Receivers divide by it, which forces the pattern to
+   * redistribute light rather than mint it — the splat's absolute
+   * calibration measured 2-7x hot in patches, and normalising at the
+   * sample is robust to whatever the splat does. A dedicated reduction
+   * pass, NOT a mip read: mipmap generation on this half-float target
+   * silently no-ops on some renderers, and a normalisation that quietly
+   * turns itself off is worse than none.
+   */
+  private meanTarget: THREE.WebGLRenderTarget
+  private meanScene: THREE.Scene
+  private meanCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
+  private meanMaterial: THREE.ShaderMaterial
+
+  get meanTexture(): THREE.Texture {
+    return this.meanTarget.texture
+  }
 
   /** Sphere centre height, live from the tuning panel. */
   setSphereY(y: number) {
@@ -553,6 +633,9 @@ export class CausticMap {
   }
 
   dispose() {
+    this.meanTarget.dispose()
+    this.meanMaterial.dispose()
+
     this.target.dispose()
     this.blurTarget.dispose()
     this.blurQuarterA.dispose()

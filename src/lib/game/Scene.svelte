@@ -179,8 +179,6 @@
 	// wireframe over the site background, line brightness lifted at crests so
 	// wave shape reads in stills. Lighting and the low-poly treatment return
 	// after the sim is signed off (the old cel shader is in git history).
-	/** Caustic strength on the refracted hull; fed per frame, live. */
-	const uBoatCausticGain = { value: BOAT.causticGain };
 	/**
 	 * THE sphere's centre. Was a baked GLSL const in three separate
 	 * shaders plus a caustics uniform plus the mesh transform — five
@@ -270,9 +268,6 @@
 		uUwAmbient: { value: UNDERWATER.ambient },
 		uUwDirect: { value: UNDERWATER.direct },
 		uUwRidge: { value: UNDERWATER.ridgeGain },
-		uUwPreLitDip: { value: UNDERWATER.preLitDip },
-		uUwPreLitRidge: { value: UNDERWATER.preLitRidge },
-		uUwPreLitRelight: { value: UNDERWATER.preLitRelight },
 		uUwSigma: { value: new THREE.Vector3() },
 		uUwScatter: { value: new THREE.Vector3() },
 		uUwScatterI: { value: 1 },
@@ -287,10 +282,14 @@
 		uUwGlow: { value: UNDERWATER.glow },
 		uUwCausticFloor: { value: UNDERWATER.causticFloor },
 		uUwCausticFocus: { value: UNDERWATER.causticFocusM },
+		uCausticMean: { value: null as THREE.Texture | null },
 		uUwCausticBlur: { value: UNDERWATER.causticBlurPerM },
 		uUwExposure: { value: UNDERWATER.exposure },
 		uUwAmbTint: { value: UNDERWATER.ambientSkyHue },
+		uUwWrap: { value: UNDERWATER.wrap },
 		uUwSurfaceReflect: { value: UNDERWATER.surfaceReflect },
+		uUwFresnelGraze: { value: UNDERWATER.fresnelGrazing },
+		uUwEntryLoss: { value: UNDERWATER.entryLoss },
 		/** Where the caustic map holds real data (world rect); see caustics.ts. */
 		uCausticValid: { value: new THREE.Vector4(0, 0, 0, 0) }
 	};
@@ -409,7 +408,6 @@
 		uBoatTex: { value: null as THREE.Texture | null },
 		uProj: { value: new THREE.Matrix4() },
 		uBoatSdf: { value: null as THREE.Texture | null },
-		uBoatCausticGain,
 		SPHERE_C: sphereCUniform,
 		...rainbowUniforms,
 		...uwUniforms,
@@ -571,20 +569,23 @@
 uniform float uUwAmbient;
 uniform float uUwDirect;
 uniform float uUwRidge;
-uniform float uUwPreLitDip;
-uniform float uUwPreLitRidge;
-uniform float uUwPreLitRelight;
 uniform vec3 uUwSigma;
 uniform vec3 uUwScatter;
 uniform float uUwScatterI;
 uniform float uUwDiffuseDepth;
 uniform vec3 uUwDirIrr;
 uniform vec3 uUwAmbIrr;
+// Declared IN the chunk: uwSurfaceTransmit below uses it, and this chunk
+// is embedded by BOTH the water and the sphere — a declaration living in
+// the water fragment's own block left the sphere's copy undeclared and
+// killed both shaders silently.
+uniform float uUwEntryLoss;
 uniform float uUwDim;
 uniform float uUwGlow;
 uniform float uUwCausticFloor;
 uniform float uUwCausticFocus;
 uniform float uUwCausticBlur;
+uniform sampler2D uCausticMean;
 uniform float uUwExposure;
 
 float uwLuma(vec3 c) {
@@ -600,7 +601,7 @@ float uwLuma(vec3 c) {
  */
 float uwSurfaceTransmit() {
 	float c = clamp(uSunDir.y, 0.0, 1.0);
-	return 1.0 - (0.02 + 0.98 * pow(1.0 - c, 5.0));
+	return clamp(1.0 - uUwEntryLoss * (0.02 + 0.98 * pow(1.0 - c, 5.0)), 0.0, 1.0);
 }
 
 /**
@@ -654,7 +655,9 @@ vec3 uwVolume() {
 	return (uUwScatter / max(uUwSigma, vec3(0.0001))) * uLightColor * uLightI * uUwScatterI;
 }
 uniform float uUwAmbTint;
+uniform float uUwWrap;
 uniform float uUwSurfaceReflect;
+uniform float uUwFresnelGraze;
 uniform vec4 uCausticValid;
 
 // The caustic map is only SPLATTED near activity (a capped tile budget);
@@ -671,7 +674,12 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// Beam incidence, relaxing toward omnidirectional (0.5) as the light
 	// goes diffuse with depth — see uwDirectionality.
 	float dirK = uwDirectionality(depthBelow);
-	float inc = mix(0.5, clamp(dot(normal, -refrLight), 0.0, 1.0), dirK);
+	// WRAPPED like the dry sphere's own lighting — a hard clamp starved
+	// every side face the moment it submerged (see UNDERWATER.wrap).
+	float inc = mix(
+		0.5,
+		clamp((dot(normal, -refrLight) + uUwWrap) / (1.0 + uUwWrap), 0.0, 1.0),
+		dirK);
 	// Downwelling light, attenuated per channel over the depth it fell
 	// through to reach this surface. The return path to the eye is
 	// applied separately, at the composite.
@@ -690,6 +698,15 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// mip chain on the caustic target is what makes this possible.
 	float caustic = texture2D(
 		uCausticMap, clamp(cuv, 0.002, 0.998), depthBelow * uUwCausticBlur).r;
+	// SELF-NORMALIZE by the map's mean over the splatted rect (a 1x1
+	// reduction target, refreshed each step — NOT a mip read; mips on the
+	// half-float map silently no-op on some renderers). The splat's
+	// absolute calibration measured 2-7x hot in patches; dividing by the
+	// mean forces the pattern to REDISTRIBUTE light instead of minting
+	// it, so troughs read as shadow against honest filaments, not
+	// against a furnace.
+	float cMean = texture2D(uCausticMean, vec2(0.5)).r;
+	caustic /= max(cMean, 0.05);
 	vec2 cEdge = min(cuv, 1.0 - cuv);
 	float inMap = smoothstep(0.0, 0.08, min(cEdge.x, cEdge.y)) * causticValidity(beamXZ);
 	float light = mix(1.0, caustic, inMap);
@@ -708,6 +725,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	light = mix(1.0, light, clamp(depthBelow / max(uUwCausticFocus, 0.01), 0.0, 1.0));
 	// Never let a shadow — real, or merely unsplatted — reach black.
 	light = max(light, uUwCausticFloor);
+	${ENABLE.caustics ? '' : 'light = 1.0; // ENABLE.caustics off: flat direct light'}
 	// Direct light is shadow-modulated only (min with 1); fold brightness
 	// arrives as the additive term, cosine-weighted to true irradiance.
 	// Ambient is SKY-tinted (the underwater half is lit by the whole
@@ -739,83 +757,6 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	vec3 col = albedo
 		* (depthLight * (amb * uUwAmbient + beam * (uUwDirect * inc * min(light, 1.0))) + glow);
 	col += beam * max(light - 1.0, 0.0) * uUwRidge * inc * depthLight;
-	return col * uUwExposure;
-}
-
-// For hits whose colour is ALREADY LIT — the boat's image-pass sample.
-// shadeUnderwater relights a flat albedo from scratch; feeding it a lit
-// image shades the hull twice, which read as "too dark just under the
-// surface" (about half its topside brightness, a visible step at the
-// waterline). Here the image keeps its own lighting: caustic dips dim it
-// gently, ridges add on top, and the factor tends to 1 at zero depth so
-// the hull's brightness is CONTINUOUS across the waterline.
-vec3 shadeUnderwaterPreLit(vec3 P, vec3 normal, vec3 lit, float depth, float depthBelow, float gain) {
-	vec3 sunN = normalize(uSunDir);
-	vec3 refrLight = refract(-sunN, vec3(0.0, 1.0, 0.0), 0.7519);
-	// Beam incidence, relaxing toward omnidirectional (0.5) as the light
-	// goes diffuse with depth — see uwDirectionality.
-	float dirK = uwDirectionality(depthBelow);
-	float inc = mix(0.5, clamp(dot(normal, -refrLight), 0.0, 1.0), dirK);
-	// Downwelling light, attenuated per channel over the depth it fell
-	// through to reach this surface. The return path to the eye is
-	// applied separately, at the composite.
-	vec3 depthLight = uwTransmit(depthBelow);
-	vec2 beamXZ = P.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - P.y) / refrLight.y);
-	vec2 cuv = (beamXZ - uCausticCenter) / uCausticExtent + 0.5;
-	// Depth-proportional LOD bias: the pattern softens the further the
-	// light has travelled from the surface. Fragment-stage bias, so the
-	// mip chain on the caustic target is what makes this possible.
-	float caustic = texture2D(
-		uCausticMap, clamp(cuv, 0.002, 0.998), depthBelow * uUwCausticBlur).r;
-	vec2 cEdge = min(cuv, 1.0 - cuv);
-	float inMap = smoothstep(0.0, 0.08, min(cEdge.x, cEdge.y)) * causticValidity(beamXZ);
-	float light = mix(1.0, caustic, inMap);
-	light = mix(light, 1.0, uCausticFlat);
-	// Caustics are a direct-light phenomenon; they wash out with the
-	// beam's direction, not just with overcast.
-	light = mix(1.0, light, dirK);
-	// Refracted rays need a little distance to converge, so there is no
-	// pattern AT the interface — but ripples focus within a fraction of a
-	// metre, so it is fully formed just below and then blurs and dims with
-	// depth (diffuseDepthM and the extinction do that part). Ramping this
-	// over the full plane depth had it exactly backwards: weakest where
-	// caustics are in truth sharpest.
-	light = mix(1.0, light, clamp(depthBelow / max(uUwCausticFocus, 0.01), 0.0, 1.0));
-	// Never let a shadow — real, or merely unsplatted — reach black.
-	light = max(light, uUwCausticFloor);
-	// Underwater illumination as a RATIO to the same illumination with
-	// nothing taken away — no extinction, neutral caustic. Only the ratio
-	// is applied, so a body sitting AT the surface looks exactly as it
-	// does above it, and depth and caustics act from there. (Applying the
-	// absolute illumination instead put a fixed ~0.7x on everything
-	// submerged, which is why a hull 5cm under read as a different
-	// object.) ambient vs direct now sets how much of the light flickers
-	// with the caustics rather than how bright the body is.
-	// Sky for HUE, the above-water ambient for BRIGHTNESS. The sky colours
-	// are the sea preset's and barely move through the day, so using them
-	// as the level made submerged things hold a constant ambient while
-	// everything in air dimmed toward dusk — up to 9x apart at low sun.
-	// PER-CHANNEL above-water ambient as the base. The old luma-matched
-	// sky-hue version redistributed energy across channels — luma weighs
-	// blue at 0.07, so matching a blue-heavy sky's luma handed the blue
-	// channel ~2.2x its above-water ambient (blue and violet objects
-	// BRIGHTENED under water) while gutting red's. The water's own
-	// wavelength filtering belongs to uwTransmit, not to the ambient.
-	vec3 skyAmbHue = mix(uSkyHorizon, uSkyZenith, clamp(normal.y * 0.5 + 0.5, 0.0, 1.0));
-	skyAmbHue = skyAmbHue / max(uwLuma(skyAmbHue), 0.0001) * uwLuma(uUwAmbIrr);
-	vec3 amb = mix(uUwAmbIrr, skyAmbHue, uUwAmbTint);
-	vec3 ambT = amb * uUwAmbient;
-	vec3 dirT = uUwDirIrr * (uwSurfaceTransmit() * uwBeamCompress(refrLight) * uUwDirect * inc);
-	// PER-CHANNEL buildup: the scattered field grows as each channel's own
-	// light is taken out of the beam. The old luma version was green-paced
-	// — green extinguishes fastest of the cool channels, so blue's glow
-	// arrived ~4x too early and shallow blue objects BRIGHTENED underwater.
-	vec3 glow = uwVolume() * (vec3(1.0) - depthLight) * uUwGlow;
-	vec3 illum = (ambT + dirT * min(light, 1.0)) * depthLight + glow;
-	vec3 illum0 = max(ambT + dirT, vec3(0.0001));
-	vec3 col = lit * mix(vec3(1.0), illum / illum0, uUwPreLitRelight);
-	col *= mix(1.0, min(light, 1.0), uUwPreLitDip * gain);
-	col += lit * max(light - 1.0, 0.0) * (uUwPreLitRidge * gain) * inc * depthLight;
 	return col * uUwExposure;
 }`;
 
@@ -1287,7 +1228,6 @@ uniform mat4 uProj;
 // all of this by being baked the same way.
 uniform sampler2D uBoatSdf;
 uniform vec3 uBoatSdfMin;
-uniform float uBoatCausticGain;
 uniform vec3 uBoatSdfSize;
 
 float boatSdfAt(vec3 q) {
@@ -1404,7 +1344,6 @@ void main() {
 	float tHit = -1.0;
 	vec3 hitN = vec3(0.0, 1.0, 0.0);
 	vec3 albedo = uSphereColor;
-	float hitPreLit = 0.0;
 	if (disc > 0.0) {
 		float th = -b - sqrt(disc);
 		if (th > 0.0) {
@@ -1439,7 +1378,6 @@ void main() {
 				tHit = tb;
 				hitN = bn;
 				albedo = bimg.rgb;
-				hitPreLit = 1.0;
 			}
 		}
 	}
@@ -1450,17 +1388,13 @@ void main() {
 			tHit = tr;
 			hitN = vec3(0.0, 1.0, 0.0);
 			albedo = ralb;
-			hitPreLit = 0.0;
 		}
 	}
 	vec3 transmitted;
 	if (tHit > 0.0) {
 		vec3 P = vWorld + refr * tHit;
 		waterPath = tHit;
-		float below = max(vWorld.y - P.y, 0.0);
-		transmitted = hitPreLit > 0.5
-			? shadeUnderwaterPreLit(P, hitN, albedo, tHit, below, uBoatCausticGain)
-			: shadeUnderwater(P, hitN, albedo, tHit, below);
+		transmitted = shadeUnderwater(P, hitN, albedo, tHit, max(vWorld.y - P.y, 0.0));
 	} else if (refr.y < -0.001) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
@@ -1499,7 +1433,9 @@ void main() {
 	// on a 25-degree wave face where real Fresnel gives ~21% — under a
 	// dark sky that read as the water blackening whatever lay beneath the
 	// face, strongest exactly where a wave passed over something shallow.
-	float fresnel = mix(uUwSurfaceReflect, 1.0, pow(1.0 - facing, 5.0));
+	float fresnel = clamp(
+		uUwSurfaceReflect + (1.0 - uUwSurfaceReflect) * uUwFresnelGraze * pow(1.0 - facing, 5.0),
+		0.0, 1.0);
 	vec3 skyCol = mix(uSkyHorizon, uSkyZenith, clamp(reflectedRay.y, 0.0, 1.0));
 	vec3 col = mix(transmitted, skyCol, fresnel);`}
 
@@ -3473,6 +3409,31 @@ void main() {
 	const boatRT = new THREE.WebGLRenderTarget(1024, 1024, { depthBuffer: true });
 	const boatClip = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
 	const boatClearScratch = new THREE.Color();
+	/**
+	 * Unlit twin per boat material, so the image pass captures ALBEDO, not
+	 * lit colour. The refracted hull is then shaded by the SAME
+	 * shadeUnderwater as every other submerged surface — one lighting
+	 * model, no boat-specific path. (The old pre-lit ratio machinery
+	 * existed to avoid double-lighting a lit image; capturing albedo
+	 * removes the problem at the source.)
+	 */
+	const boatUnlit = new Map<THREE.Material, THREE.MeshBasicMaterial>();
+	function unlitTwin(m: THREE.Material): THREE.MeshBasicMaterial {
+		let t = boatUnlit.get(m);
+		if (!t) {
+			const src = m as THREE.MeshStandardMaterial;
+			t = new THREE.MeshBasicMaterial({
+				color: src.color?.clone() ?? new THREE.Color('#ffffff'),
+				vertexColors: src.vertexColors ?? false,
+				transparent: src.transparent ?? false,
+				opacity: src.opacity ?? 1
+			});
+			boatUnlit.set(m, t);
+			boatDisposables.push(t);
+		}
+		return t;
+	}
+
 	function renderBoatImage() {
 		const cam = camera.current;
 		if (!cam) return;
@@ -3485,6 +3446,15 @@ void main() {
 		renderer.clippingPlanes = [boatClip];
 		const mask = cam.layers.mask;
 		cam.layers.set(3);
+		// Swap to albedo materials for the pass; restore after.
+		const swapped: [THREE.Mesh, THREE.Material | THREE.Material[]][] = [];
+		boatMesh.traverse((o) => {
+			const mesh = o as THREE.Mesh;
+			if (mesh.isMesh && !Array.isArray(mesh.material)) {
+				swapped.push([mesh, mesh.material]);
+				mesh.material = unlitTwin(mesh.material);
+			}
+		});
 		const prevRT = renderer.getRenderTarget();
 		const prevClearColor = renderer.getClearColor(boatClearScratch);
 		const prevClearAlpha = renderer.getClearAlpha();
@@ -3496,6 +3466,7 @@ void main() {
 		renderer.setClearColor(prevClearColor, prevClearAlpha);
 		cam.layers.mask = mask;
 		renderer.clippingPlanes = [];
+		for (const [mesh, mat] of swapped) mesh.material = mat;
 		waterUniforms.uBoatTex.value = boatRT.texture;
 		waterUniforms.uProj.value.copy(cam.projectionMatrix);
 	}
@@ -3558,7 +3529,6 @@ void main() {
 			}
 		}
 		boat.wet = !airborne;
-		uBoatCausticGain.value = BOAT.causticGain;
 
 		// TILT toward the water slope, sampled over hull-sized baselines
 		// (cold 1-iteration samples on purpose — see the buoy tilt note).
@@ -3747,7 +3717,8 @@ void main() {
 			lap('gpuFft');
 			backdropUniforms.uRippleCTex.value = rippleSim.texture;
 			if (!PROFILE.skipCausticSim) {
-				causticMap.step(renderer, rippleSim.texture, waterUniforms.uSunDir.value, waveTime);
+				if (ENABLE.caustics)
+					causticMap.step(renderer, rippleSim.texture, waterUniforms.uSunDir.value, waveTime);
 			}
 			lap('gpuCaustic');
 			backdropUniforms.uCausticMap.value = causticMap.texture;
@@ -3837,6 +3808,7 @@ void main() {
 					clear + (mixc(SPECULAR.sharpOvercast, SPECULAR.sharpOvercastStorm) - clear) * dif;
 				waterUniforms.uSpecSharpCore.value = sharp;
 				uwUniforms.uCausticValid.value.copy(causticMap.validRegion);
+				uwUniforms.uCausticMean.value = causticMap.meanTexture;
 				// One sphere height, pushed to every consumer.
 				SPHERE_CY = UNDERWATER.sphereDepth;
 				sphereCUniform.value.y = SPHERE_CY;
@@ -3847,12 +3819,9 @@ void main() {
 				rainbowUniforms.uRainbowOn.value = UNDERWATER.rainbowCard ? 1 : 0;
 				rainbowMesh.position.y = SPHERE_CY;
 				rainbowMesh.visible = UNDERWATER.rainbowCard;
-				uwUniforms.uUwPreLitRelight.value = UNDERWATER.preLitRelight;
 				uwUniforms.uUwAmbient.value = UNDERWATER.ambient;
 				uwUniforms.uUwDirect.value = UNDERWATER.direct;
 				uwUniforms.uUwRidge.value = UNDERWATER.ridgeGain;
-				uwUniforms.uUwPreLitDip.value = UNDERWATER.preLitDip;
-				uwUniforms.uUwPreLitRidge.value = UNDERWATER.preLitRidge;
 				// Fade RANGES in metres -> per-metre extinction. "Fades" is
 				// 90% of the light gone, so sigma = ln(10) / range.
 				const LN10 = 2.302585;
@@ -3886,6 +3855,9 @@ void main() {
 					(UNDERWATER.scatterOvercast - UNDERWATER.scatterClear) *
 						Math.min(Math.max(dif / 0.7, 0), 1);
 				uwUniforms.uUwAmbTint.value = UNDERWATER.ambientSkyHue;
+				uwUniforms.uUwWrap.value = UNDERWATER.wrap;
+				uwUniforms.uUwFresnelGraze.value = UNDERWATER.fresnelGrazing;
+				uwUniforms.uUwEntryLoss.value = UNDERWATER.entryLoss;
 				uwUniforms.uUwSurfaceReflect.value = UNDERWATER.surfaceReflect;
 				waterUniforms.uCausticFlat.value = smooth01(
 					dif,
