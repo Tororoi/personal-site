@@ -196,17 +196,16 @@
 	const RAINBOW_COLORS = ['#ff0000', '#ff7f00', '#ffe600', '#00c832', '#0050ff', '#8b00ff'];
 	const rainbowUniforms = {
 		uRainbow: {
-			// RAW sRGB components, NOT THREE.Color — measured against the
-			// rasterized card, the mesh displays the raw values while
-			// Color() converts to linear, which rendered the raytraced half
-			// darker by the sRGB gap on every MIXED channel: x1.36 on the
-			// green band's green, x2.3 on orange's, invisible on pure red
-			// and blue (1.0 in both spaces). This was the last piece of the
-			// "water darkens things" residual: it was the card itself,
-			// existing in two colour spaces at once.
+			// LINEAR (THREE.Color) components, matching the mesh's vertex
+			// colours. History: these were once switched to raw sRGB to
+			// match the mesh — but the mesh only displayed raw-ish because
+			// built-ins were sRGB-ENCODING their output while the raytrace
+			// wrote linear. That encode is now stripped (see
+			// injectSceneFog), the mesh displays linear, and linear here
+			// makes the two representations agree at the source.
 			value: RAINBOW_COLORS.map((h) => {
-				const n = parseInt(h.slice(1), 16);
-				return new THREE.Vector3(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+				const c = new THREE.Color(h);
+				return new THREE.Vector3(c.r, c.g, c.b);
 			})
 		},
 		uRainbowRect: {
@@ -3199,6 +3198,18 @@ void main() {
 	// Debug: ?freeze halts the WAVE clock while leaving render running,
 	// so anything still moving is intrinsic to a shader (plume sway,
 	// rise) rather than wave-driven. ?freeze=N starts at time N.
+	// Debug: ?depth=N overrides UNDERWATER.sphereDepth at load, so the
+	// deterministic test harness can move the sphere+card without a
+	// rebuild per position.
+	{
+		const depthParam =
+			typeof window === 'undefined'
+				? null
+				: new URLSearchParams(window.location.search).get('depth');
+		if (depthParam !== null && Number.isFinite(Number(depthParam))) {
+			UNDERWATER.sphereDepth = Number(depthParam);
+		}
+	}
 	const freezeParam =
 		typeof window === 'undefined'
 			? null
@@ -3307,7 +3318,17 @@ void main() {
 	outgoingLight = mix(outgoingLight, uFogColor, fogAmt);
 }
 #include <opaque_fragment>`
-				);
+				)
+				// ONE colour convention. Built-ins encode linear->sRGB at
+				// output; every custom shader in the game — the water above
+				// all — writes raw linear, and the sea's whole look was tuned
+				// under that convention. The encode is CONCAVE: it lifts a
+				// noon-bright card ~10% but a dusk-dim one ~60%, which made
+				// the waterline step GROW as the sun dropped — measured, five
+				// independent light-probes all fitting 0.84 x srgb(model).
+				// (An earlier test 'falsified' this theory; that test sampled
+				// the wrong pixels. The probes are the evidence.)
+				.replace('#include <colorspace_fragment>', '');
 		};
 	}
 	function buildBoatMesh(): THREE.Group {

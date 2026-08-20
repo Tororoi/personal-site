@@ -1991,7 +1991,7 @@ export const UNDERWATER = {
    * this is the dial for how hard dusk dims the underwater world, and a
    * midday A/B will show nothing, by physics.
    */
-  entryLoss: 1.0,
+  entryLoss: 0.0,
   /**
    * Blend of the underwater ambient toward a sky-hued version (same
    * luma). 0 = the exact per-channel ambient the object would get in
