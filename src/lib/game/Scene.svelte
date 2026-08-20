@@ -282,6 +282,10 @@
 		uUwCausticFloor: { value: UNDERWATER.causticFloor },
 		uUwCausticFocus: { value: UNDERWATER.causticFocusM },
 		uCausticMean: { value: null as THREE.Texture | null },
+		uCausticPyr1: { value: null as THREE.Texture | null },
+		uCausticPyr2: { value: null as THREE.Texture | null },
+		uUwCausticFocal: { value: UNDERWATER.causticFocalM },
+		uUwCausticContrast: { value: UNDERWATER.causticContrast },
 		uUwCausticBlur: { value: UNDERWATER.causticBlurPerM },
 		uUwExposure: { value: UNDERWATER.exposure },
 		uUwAmbTint: { value: UNDERWATER.ambientSkyHue },
@@ -585,6 +589,10 @@ uniform float uUwCausticFloor;
 uniform float uUwCausticFocus;
 uniform float uUwCausticBlur;
 uniform sampler2D uCausticMean;
+uniform sampler2D uCausticPyr1;
+uniform sampler2D uCausticPyr2;
+uniform float uUwCausticFocal;
+uniform float uUwCausticContrast;
 uniform float uUwExposure;
 
 float uwLuma(vec3 c) {
@@ -693,10 +701,31 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// snapping off one region at a time. Clamped sample + smooth fade to
 	// unlit keeps it continuous.
 	// Depth-proportional LOD bias: the pattern softens the further the
-	// light has travelled from the surface. Fragment-stage bias, so the
-	// mip chain on the caustic target is what makes this possible.
-	float caustic = texture2D(
-		uCausticMap, clamp(cuv, 0.002, 0.998), depthBelow * uUwCausticBlur).r;
+	// DEPTH DEFOCUS: past the focal depth the beam bundle spreads, so
+	// features grow and peaks dim — sampled as a blend down an explicit
+	// blur pyramid (L0 sharp, L1 ~0.5m kernel, L2 ~2m), by metres of
+	// defocus. The blur conserves energy (peaks dim as features widen);
+	// extinction handles the real losses separately. Replaces a mip-bias
+	// scheme that silently no-oped where drivers refuse half-float mips.
+	vec2 cuvC = clamp(cuv, 0.002, 0.998);
+	// Defocus keys off depth below MEAN water level (-P.y), not the water
+	// column under the heaving surface: with the column measure, a 2.7m
+	// swell swung the seabed's computed depth between 3.3m and 8.7m as
+	// waves passed overhead, so the SAME floor clamped to spread 0 under
+	// troughs (razor sharp, blur knob inert) and blurred under crests —
+	// moving patches of sharp and soft. Extinction keeps the true column
+	// (more water genuinely eats more light); convergence is geometry
+	// referenced to the plane, and the plane does not heave.
+	float spreadM = max(max(-P.y, 0.0) - uUwCausticFocal, 0.0) * uUwCausticBlur;
+	float caustic;
+	{
+		float c0 = texture2D(uCausticMap, cuvC).r;
+		float c1 = texture2D(uCausticPyr1, cuvC).r;
+		float c2 = texture2D(uCausticPyr2, cuvC).r;
+		float t1 = clamp(spreadM / 0.5, 0.0, 1.0);
+		float t2 = clamp((spreadM - 0.5) / 1.5, 0.0, 1.0);
+		caustic = mix(mix(c0, c1, t1), c2, t2);
+	}
 	// SELF-NORMALIZE by the map's mean over the splatted rect (a 1x1
 	// reduction target, refreshed each step — NOT a mip read; mips on the
 	// half-float map silently no-op on some renderers). The splat's
@@ -706,6 +735,9 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// against a furnace.
 	float cMean = texture2D(uCausticMean, vec2(0.5)).r;
 	caustic /= max(cMean, 0.05);
+	// Punch back what the mean-division and the sRGB encode compress —
+	// see UNDERWATER.causticContrast.
+	caustic = max(1.0 + (caustic - 1.0) * uUwCausticContrast, 0.0);
 	vec2 cEdge = min(cuv, 1.0 - cuv);
 	float inMap = smoothstep(0.0, 0.08, min(cEdge.x, cEdge.y)) * causticValidity(beamXZ);
 	float light = mix(1.0, caustic, inMap);
@@ -908,7 +940,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 		fftStale = true;
 		const dif = sunDiffusion();
 		waterUniforms.uSunDiffusion.value = dif;
-		causticMap.diffusion = dif;
+
 		skyZenithBase.set(activeField.sky?.zenith ?? '#a8c8d8');
 		skyHorizonBase.set(activeField.sky?.horizon ?? '#d5e3ea');
 	}
@@ -948,7 +980,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// Forward-splat caustic map (pool-style differential area) over the
 	// full wave surface, blurred by the preset's sun diffusion.
 	const causticMap = new CausticMap();
-	causticMap.diffusion = SUN_DIFFUSION;
+
 
 	// Click to drop a ripple, pool-style. This is also the embryo of the
 	// casting input: click -> raycast -> water point.
@@ -3922,6 +3954,11 @@ void main() {
 				uwUniforms.uUwCausticFloor.value = UNDERWATER.causticFloor;
 				uwUniforms.uUwCausticFocus.value = UNDERWATER.causticFocusM;
 				uwUniforms.uUwCausticBlur.value = UNDERWATER.causticBlurPerM;
+				uwUniforms.uCausticPyr1.value = causticMap.pyr1Texture;
+				uwUniforms.uCausticPyr2.value = causticMap.pyr2Texture;
+				uwUniforms.uUwCausticFocal.value = UNDERWATER.causticFocalM;
+				uwUniforms.uUwCausticContrast.value = UNDERWATER.causticContrast;
+				causticMap.sourceBlurM = UNDERWATER.causticSourceBlurM;
 				uwUniforms.uUwExposure.value = UNDERWATER.exposure;
 				// Clear light drives deep and returns blue; overcast light is
 				// absorbed near the surface and returns little.

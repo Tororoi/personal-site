@@ -218,17 +218,24 @@ void main() {
 
 export class CausticMap {
   /**
-   * Sun diffusion, 0 clear .. 1 heavy overcast (from the sea preset's
-   * sky.diffusion). Sets the source-size blur radius; weather transitions
-   * can animate it. The micro-ripple (wind) spread will add to the same
-   * radius in quadrature when it arrives.
+   * SOURCE BLUR of the caustic pattern, metres of Gaussian sigma at the
+   * map. Was derived from the weather's sun diffusion — physically an
+   * overcast sun is an extended source and does blur its caustics — but
+   * in practice the coupling cost the fine filaments at even modest
+   * weather (past ~0.2m sigma the blur drops the whole map to quarter
+   * resolution), so it is now its OWN dial, fed from
+   * UNDERWATER.causticSourceBlurM. Weather keeps its other caustic
+   * effect (the uCausticFlat wash toward featureless light).
    */
-  diffusion = 0
+  sourceBlurM = 0
 
   private target: THREE.WebGLRenderTarget
   private blurTarget: THREE.WebGLRenderTarget
   private blurQuarterA: THREE.WebGLRenderTarget
   private blurQuarterB: THREE.WebGLRenderTarget
+  private pyr1: THREE.WebGLRenderTarget
+  private pyr2: THREE.WebGLRenderTarget
+  private pyrScratch: THREE.WebGLRenderTarget
   private material: THREE.ShaderMaterial
   private blurMaterial: THREE.ShaderMaterial
   private tileAttr: THREE.InstancedBufferAttribute
@@ -247,14 +254,12 @@ export class CausticMap {
         type: THREE.HalfFloatType,
         // Single channel: quarters the additive fill bandwidth vs RGBA.
         format: THREE.RedFormat,
-        // MIPMAPPED so receivers can soften the pattern with depth: the
-        // map is computed for ONE plane, and without a mip chain every
-        // receiver reads it equally sharp no matter how deep it sits.
-        // Sampling with a depth-proportional LOD bias is the cheap way to
-        // get overlapping focal cones smearing out with distance.
-        minFilter: THREE.LinearMipmapLinearFilter,
+        // No mip chain: depth softening now comes from an explicit blur
+        // pyramid (below) — driver mipmap generation on half-float
+        // targets silently no-ops on some renderers, and regenerating
+        // 2048^2 mips per frame was real cost for a maybe.
+        minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
-        generateMipmaps: true,
         depthBuffer: false,
         stencilBuffer: false,
       },
@@ -344,6 +349,26 @@ export class CausticMap {
       CAUSTIC_RESOLUTION / 4,
       blurTargetOpts,
     )
+    // DEFOCUS PYRAMID: the map is one plane's convergence, but a receiver
+    // past the focal depth sees the beam bundle spread — features grow,
+    // peaks dim, energy holds. For a texture that is exactly a Gaussian
+    // blur, so the pyramid IS the depth model: L0 sharp (the map itself),
+    // L1 ~0.5m kernel, L2 ~2m. Receivers blend by metres of defocus.
+    this.pyr1 = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION / 4,
+      CAUSTIC_RESOLUTION / 4,
+      blurTargetOpts,
+    )
+    this.pyr2 = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION / 8,
+      CAUSTIC_RESOLUTION / 8,
+      blurTargetOpts,
+    )
+    this.pyrScratch = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION / 8,
+      CAUSTIC_RESOLUTION / 8,
+      blurTargetOpts,
+    )
     this.blurMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uSrc: { value: null },
@@ -363,19 +388,23 @@ export class CausticMap {
     )
     blurMesh.frustumCulled = false
     this.blurScene.add(blurMesh)
-    this.meanTarget = new THREE.WebGLRenderTarget(1, 1, {
+    const meanOpts = {
       type: THREE.HalfFloatType,
       format: THREE.RedFormat,
       minFilter: THREE.NearestFilter,
       magFilter: THREE.NearestFilter,
       depthBuffer: false,
       stencilBuffer: false,
-    })
+    } as const
+    this.meanTarget = new THREE.WebGLRenderTarget(1, 1, meanOpts)
+    this.meanTargetB = new THREE.WebGLRenderTarget(1, 1, meanOpts)
     this.meanMaterial = new THREE.ShaderMaterial({
       uniforms: {
         uMap: { value: this.target.texture },
         // splatted rect in the map's uv space: centre xy, half-extent zw
         uRectUv: { value: new THREE.Vector4(0.5, 0.5, 0.4, 0.4) },
+        uPrevMean: { value: null },
+        uMeanBlend: { value: 1 },
       },
       vertexShader: `
 void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }`,
@@ -383,6 +412,8 @@ void main() { gl_Position = vec4(position.xy, 0.0, 1.0); }`,
 precision highp float;
 uniform sampler2D uMap;
 uniform vec4 uRectUv;
+uniform sampler2D uPrevMean;
+uniform float uMeanBlend;
 void main() {
 	float acc = 0.0;
 	for (int j = 0; j < 16; j++) {
@@ -391,7 +422,13 @@ void main() {
 			acc += texture2D(uMap, uRectUv.xy + t * uRectUv.zw).r;
 		}
 	}
-	gl_FragColor = vec4(acc / 256.0, 0.0, 0.0, 1.0);
+	// EMA against last frame's mean: the raw mean of a moving sea swings
+	// frame to frame (crests focusing and defocusing heave it, hardest at
+	// large waves), and dividing the whole pattern by a jittering scalar
+	// FLICKERED every caustic on screen at once. Smoothing converges to
+	// the exact value on a static sea, so frozen waves are unchanged.
+	float prev = texture2D(uPrevMean, vec2(0.5)).r;
+	gl_FragColor = vec4(mix(prev, acc / 256.0, uMeanBlend), 0.0, 0.0, 1.0);
 }`,
       depthTest: false,
       depthWrite: false,
@@ -401,6 +438,14 @@ void main() {
     meanQuad.frustumCulled = false
     this.meanScene.add(meanQuad)
 
+  }
+
+  get pyr1Texture(): THREE.Texture {
+    return this.pyr1.texture
+  }
+
+  get pyr2Texture(): THREE.Texture {
+    return this.pyr2.texture
   }
 
   get texture(): THREE.Texture {
@@ -507,7 +552,7 @@ void main() {
     // spread x plane depth, capped at a practical kernel — the receiver
     // side's flatten term (uCausticFlat, Scene) carries heavy overcast
     // the rest of the way to featureless light.
-    const sigmaMeters = Math.min(this.diffusion * 0.8, 0.62)
+    const sigmaMeters = Math.min(this.sourceBlurM, 0.62)
     const sigmaTexels = sigmaMeters / (CAUSTIC_EXTENT / CAUSTIC_RESOLUTION)
     // Below ~1.5 texels the blur is visually nothing (calm's clear-sky
     // diffusion lands here): skip both passes outright.
@@ -557,6 +602,38 @@ void main() {
       }
     }
 
+    // Build the defocus pyramid (see the pyr1/pyr2 declarations). Full-
+    // frame passes at 512^2/256^2 — cheap. uRegion goes full-quad here;
+    // the diffusion blur above re-sets it from its tile box every frame.
+    {
+      const blurU = this.blurMaterial.uniforms
+      ;(blurU.uRegion.value as THREE.Vector4).set(0, 0, 1, 1)
+      const stepVec = blurU.uStep.value as THREE.Vector2
+      const pass = (
+        src: THREE.WebGLRenderTarget,
+        dst: THREE.WebGLRenderTarget,
+        sx: number,
+        sy: number,
+      ) => {
+        blurU.uSrc.value = src.texture
+        stepVec.set(sx, sy)
+        renderer.setRenderTarget(dst)
+        renderer.clear(true, false, false)
+        renderer.render(this.blurScene, this.splatCamera)
+      }
+      // L1: ~0.5m world sigma. Kernel taps sit at sigma/2 spacing in UV.
+      const s1 = 0.5 / CAUSTIC_EXTENT / 2
+      pass(this.target, this.blurTarget, 0, 0)
+      pass(this.blurTarget, this.blurQuarterA, 0, 0)
+      pass(this.blurQuarterA, this.blurQuarterB, s1, 0)
+      pass(this.blurQuarterB, this.pyr1, 0, s1)
+      // L2: ~2m total; additional sigma on top of L1's 0.5m.
+      const s2 = Math.sqrt(2.0 * 2.0 - 0.5 * 0.5) / CAUSTIC_EXTENT / 2
+      pass(this.pyr1, this.pyr2, 0, 0)
+      pass(this.pyr2, this.pyrScratch, s2, 0)
+      pass(this.pyrScratch, this.pyr2, 0, s2)
+    }
+
     // Reduce the splatted rect to its mean, for receiver normalisation.
     {
       const cc2 = this.material.uniforms.uCenter.value as THREE.Vector2
@@ -570,13 +647,20 @@ void main() {
           (this.validRegion.z / CAUSTIC_EXTENT) * 0.8,
           (this.validRegion.w / CAUSTIC_EXTENT) * 0.8,
         )
-        renderer.setRenderTarget(this.meanTarget)
+        this.meanMaterial.uniforms.uPrevMean.value = this.meanTarget.texture
+        this.meanMaterial.uniforms.uMeanBlend.value = this.meanSeeded ? 0.08 : 1
+        this.meanSeeded = true
+        renderer.setRenderTarget(this.meanTargetB)
         renderer.render(this.meanScene, this.meanCamera)
+        const swap = this.meanTarget
+        this.meanTarget = this.meanTargetB
+        this.meanTargetB = swap
       } else {
         // nothing splatted: neutral mean so the division is a no-op
         renderer.setRenderTarget(this.meanTarget)
         renderer.setClearColor(new THREE.Color(1, 1, 1), 1)
         renderer.clear(true, false, false)
+        this.meanSeeded = false
       }
     }
 
@@ -599,6 +683,8 @@ void main() {
    * turns itself off is worse than none.
    */
   private meanTarget: THREE.WebGLRenderTarget
+  private meanTargetB: THREE.WebGLRenderTarget
+  private meanSeeded = false
   private meanScene: THREE.Scene
   private meanCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
   private meanMaterial: THREE.ShaderMaterial
@@ -634,7 +720,11 @@ void main() {
 
   dispose() {
     this.meanTarget.dispose()
+    this.meanTargetB.dispose()
     this.meanMaterial.dispose()
+    this.pyr1.dispose()
+    this.pyr2.dispose()
+    this.pyrScratch.dispose()
 
     this.target.dispose()
     this.blurTarget.dispose()

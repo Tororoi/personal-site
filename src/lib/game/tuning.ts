@@ -2042,14 +2042,53 @@ export const UNDERWATER = {
    */
   causticFocusM: 0.02,
   /**
-   * How fast the caustic pattern BLURS with depth, in mip levels per
-   * metre. Overlapping focal cones smear the pattern out the further
-   * light travels from the surface, so a shallow receiver gets crisp
-   * filaments and a deep one gets soft mottling — the same softening big
-   * waves produce, but from distance rather than wavelength. 0 keeps the
-   * map equally sharp at every depth, which is what it did before.
+   * SOURCE BLUR of the caustic pattern, metres of Gaussian sigma —
+   * decoupled from weather by request: the weather coupling meant even
+   * modest haze cost the fine filaments. Physically this is the sun's
+   * angular size projected through the water; 0.05 and below is
+   * effectively off (razor lines), and past ~0.2 the blur pipeline
+   * switches to a quarter-resolution path — the fine-detail CLIFF, so
+   * treat 0.2 as the edge of the sharp regime. Capped at 0.62 inside
+   * the map.
    */
-  causticBlurPerM: 0.35,
+  causticSourceBlurM: 0.05,
+  /**
+   * CONTRAST of the caustic pattern about its neutral point:
+   * light' = 1 + (light - 1) x this. Exists to give back the punch two
+   * honest fixes took away — the mean-normalisation divides the whole
+   * pattern by its ~1.35 mean, and the sRGB output encode compresses
+   * highlight ratios (a 2x linear filament displays as ~1.4x). Measured
+   * together they halved the pattern's relative contrast on shallow
+   * receivers; 2.0 restores the pre-era read. Ridges brighten and dips
+   * deepen symmetrically (causticFloor still bounds the dips), so the
+   * pattern's mean stays ~neutral.
+   */
+  causticContrast: 2.0,
+  /**
+   * FOCAL DEPTH of the caustic-driving waves, metres. At this depth the
+   * pattern is sharpest; past it the beam bundle diverges and features
+   * grow while peaks dim (the blur pyramid). Physically f ~ 0.24 x
+   * wavelength / slope, and for the game's detail band that is ~6-9m —
+   * the pattern converges AT the seabed, exactly like a pool floor,
+   * which is also where the splat plane computes convergence exactly.
+   * The first default here (1.5) blurred the floor carpet that IS the
+   * caustic look; 6 keeps everything at or above the seabed sharp, and
+   * the softening only takes over below it (a deeper world's problem).
+   * Lower it deliberately if you want the floor to read defocused —
+   * NOTE this knob GATES causticBlurPerM: the floor's blur authority is
+   * (floorDepth - focal) x blurPerM, so at focal 6 over a 6m seabed the
+   * blur knob has nothing to work with no matter how high it goes.
+   */
+  causticFocalM: 0,
+  /**
+   * Metres of defocus-kernel per metre past the focal depth — how fast
+   * the pattern spreads and softens going down. At the defaults the 6m
+   * seabed sits ~1.6m of kernel deep: soft mottling below, crisp
+   * filaments on shallow bodies. 0 = equally sharp at every depth.
+   * (Replaces a mip-bias version that silently no-oped on renderers
+   * that refuse mip generation on half-float targets.)
+   */
+  causticBlurPerM: 0.2,
   /**
    * Flat brightness multiplier on submerged shading — the honest fudge
    * for the gap this model has not closed analytically.
