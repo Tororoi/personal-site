@@ -62,7 +62,14 @@ const ENV_BASE = {
 	/** The moon's own offset, read exactly like the sun's. */
 	moonPathOffsetDeg: 35,
 	/** Hold the clock where it is, so a phase can be studied still. */
-	freezeTime: false
+	freezeTime: false,
+	/**
+	 * Hold the WAVE clock: the sea stops mid-swell while lighting, time of
+	 * day and every sim keep running. The still companion to freezeTime —
+	 * together they make any moment reproducible, which is what the
+	 * deterministic test harness (?freeze / ?tod URL params) is built on.
+	 */
+	freezeWaves: false
 };
 
 /**

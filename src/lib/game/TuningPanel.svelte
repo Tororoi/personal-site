@@ -524,6 +524,17 @@
 					>
 				</label>
 
+				<label class="bool">
+					<input
+						type="checkbox"
+						checked={!!envVals.freezeWaves}
+						onchange={(e) => setEnv('freezeWaves', e.currentTarget.checked)}
+					/>
+					<span class="name" class:mod={envVals.freezeWaves !== ENV_DEFAULTS.freezeWaves}
+						>freezeWaves</span
+					>
+				</label>
+
 				{#each ENV_KNOBS as k (k)}
 					{@const r = ENV_RANGE[k]}
 					<div class="knob">

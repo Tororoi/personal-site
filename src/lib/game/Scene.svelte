@@ -3697,7 +3697,7 @@ void main() {
 			while (accumulator >= STEP) {
 				accumulator -= STEP;
 				steps++;
-				if (!frozen) waveTime += STEP;
+				if (!frozen && !ENV.freezeWaves) waveTime += STEP;
 				if (!ENV.freezeTime) game.time = (game.time + STEP) % ENV.daySeconds;
 				// Whitecap events and ballistic spray advance on the fixed
 				// step too (spray after whitecaps: it reads the freshly
