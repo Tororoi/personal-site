@@ -768,6 +768,10 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// frames, and the sim (the wave-sum probe especially) is one of the
 	// larger recurring GPU passes.
 	const foamField = new FoamField(waterUniforms.uBuoyInv.value, sphereCUniform.value);
+	// ONE centre object: the water samples foam with the sim's own centre,
+	// so the two cannot disagree even for a frame (the sim moves it only
+	// inside its step, atomically with the content scroll).
+	waterUniforms.uFoamCenter.value = foamField.center;
 	let foamAccum = 0;
 	let foamEven = false;
 
@@ -3679,7 +3683,6 @@ void main() {
 		causticMap.setCenter(boat.x, boat.z, rippleSim.center);
 		waterUniforms.uCausticCenter.value.copy(causticMap.center);
 		foamField.recenter(boat.x, boat.z);
-		waterUniforms.uFoamCenter.value.copy(foamField.center);
 		setScanCenter(boat.x, boat.z);
 	}
 

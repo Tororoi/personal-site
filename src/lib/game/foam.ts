@@ -760,23 +760,21 @@ export class FoamField {
   }
 
   /** One field update per frame, consuming queued deposits. */
-  private recenterShift = new THREE.Vector2()
+  private pendingCenter = new THREE.Vector2(0, 0)
 
   /**
-   * Follow the boat, texel-snapped, scrolling content through the SAME
-   * uShift mechanism the wind drift already uses: content at world
-   * position stays put while the window slides under it. Foam that
-   * scrolls off the far edge is gone — acceptable, it is 50m behind.
+   * Follow the boat, texel-snapped. Only RECORDS the target here: the
+   * centre must move in the same step() that scrolls the content, or the
+   * two disagree for a frame. This sim runs at HALF frame rate, and the
+   * first version moved the centre immediately — so on every in-between
+   * frame the water sampled a moved window over unscrolled content, and
+   * the whole foam layer flicked sideways by a texel each time the
+   * travelling window stepped. Centre + content are one state; they
+   * change together or not at all.
    */
   recenter(x: number, z: number) {
     const texel = FOAM_EXTENT / FOAM_RESOLUTION
-    const c = this.material.uniforms.uCenter.value as THREE.Vector2
-    const nx = Math.round(x / texel) * texel
-    const nz = Math.round(z / texel) * texel
-    if (nx === c.x && nz === c.y) return
-    this.recenterShift.x -= (nx - c.x) / FOAM_EXTENT
-    this.recenterShift.y -= (nz - c.y) / FOAM_EXTENT
-    c.set(nx, nz)
+    this.pendingCenter.set(Math.round(x / texel) * texel, Math.round(z / texel) * texel)
   }
 
   /** Domain centre, for the water shader's uFoamCenter. */
@@ -838,9 +836,16 @@ export class FoamField {
       ((windX * FOAM_DRIFT + cur.x * FOAM.currentCarry) * d) / FOAM_EXTENT,
       ((windZ * FOAM_DRIFT + cur.z * FOAM.currentCarry) * d) / FOAM_EXTENT,
     )
-    // Window recentering scrolls content through the same mechanism.
-    shift.add(this.recenterShift)
-    this.recenterShift.set(0, 0)
+    // Window recentering scrolls content through the same mechanism —
+    // and moves the centre in the SAME step, atomically (see recenter).
+    {
+      const c = u.uCenter.value as THREE.Vector2
+      if (this.pendingCenter.x !== c.x || this.pendingCenter.y !== c.y) {
+        shift.x -= (this.pendingCenter.x - c.x) / FOAM_EXTENT
+        shift.y -= (this.pendingCenter.y - c.y) / FOAM_EXTENT
+        c.copy(this.pendingCenter)
+      }
+    }
 
     const inject = this.material.uniforms.uInject.value as THREE.Vector4[]
     for (let i = 0; i < MAX_INJECT; i++) {
