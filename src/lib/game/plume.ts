@@ -151,6 +151,11 @@ void main() {
 	vec3 lit = whitewaterLight(uColor, vec3(0.0, 1.0, 0.0), 0.0);
 	float fogZ = max(vViewZ - ${fogZBias.toFixed(4)}, 0.0);
 	float fog = clamp(1.0 - exp(-uFogDensity * uFogDensity * fogZ * fogZ), 0.0, 1.0);
-	gl_FragColor = vec4(mix(lit, uFogColor, fog), a);
+	{
+		// Linear -> sRGB at output, same as every canvas shader.
+		vec3 outc = max(mix(lit, uFogColor, fog), vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, a);
+	}
 }`
 }

@@ -1586,7 +1586,14 @@ void main() {
 	${fogGlsl('fog')}
 	col = mix(col, uFogColor, fog);
 
-	gl_FragColor = vec4(col, 1.0);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(col, vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, 1.0);
+	}
 }`;
 
 	const waterMaterial = new THREE.ShaderMaterial({
@@ -1787,7 +1794,14 @@ void main() {
 	${fogGlsl('fog')}
 	col = mix(col, uFogColor, fog);
 
-	gl_FragColor = vec4(col, 1.0);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(col, vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, 1.0);
+	}
 }`
 	});
 	if (!wireframe) waterMaterial.fragmentShader = solidFragment;
@@ -1932,7 +1946,14 @@ void main() {
 
 	${fogGlsl('fog')}
 	col = mix(col, uFogColor, fog);
-	gl_FragColor = vec4(col, 1.0);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(col, vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, 1.0);
+	}
 }`
 	});
 
@@ -2044,7 +2065,14 @@ void main() {
 	// left droplets a few percent brighter than the foam they came from.
 	vec3 lit = whitewaterLight(uColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
 	${fogGlsl('fog')}
-	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(mix(lit, uFogColor, fog), vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, 1.0);
+	}
 }`
 	});
 	const sprayMesh = new THREE.Points(sprayGeometry, sprayMaterial);
@@ -2307,7 +2335,14 @@ void main() {
 	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
 	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
 	${fogGlsl('fog')}
-	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(mix(lit, uFogColor, fog), vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, 1.0);
+	}
 }`
 	});
 	const frothMesh = new THREE.Points(frothGeometry, frothMaterial);
@@ -2532,7 +2567,14 @@ void main() {
 	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
 	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
 	${fogGlsl('fog')}
-	gl_FragColor = vec4(mix(lit, uFogColor, fog), a);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(mix(lit, uFogColor, fog), vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, a);
+	}
 }`,
 		transparent: true,
 		depthWrite: false,
@@ -2698,7 +2740,14 @@ void main() {
 	vec3 upN = normalize(mix(vec3(0.0, 1.0, 0.0), sn, ${f(FROTH.normalTilt)}));
 	vec3 lit = whitewaterLight(uColor, upN, ${f(1 - FOAM.shapeFloor)});
 	${fogGlsl('fog')}
-	gl_FragColor = vec4(mix(lit, uFogColor, fog), 1.0);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(mix(lit, uFogColor, fog), vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, 1.0);
+	}
 }`
 	});
 
@@ -2942,7 +2991,14 @@ void main() {
 	vec2 e = min(uv, 1.0 - uv);
 	a *= smoothstep(0.0, 0.04, min(e.x, e.y));
 	${fogGlsl('fog')}
-	gl_FragColor = vec4(mix(mistCol, uFogColor, fog * 0.75), a * 0.88);
+	{
+		// Linear -> sRGB at OUTPUT. Every custom shader writes this same
+		// transform, and built-ins run their native colorspace_fragment:
+		// one convention for the whole canvas (Milestone 22 in the log).
+		vec3 outc = max(mix(mistCol, uFogColor, fog * 0.75), vec3(0.0));
+		outc = mix(outc * 12.92, 1.055 * pow(outc, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), outc));
+		gl_FragColor = vec4(outc, a * 0.88);
+	}
 }`
 	});
 	const mistMesh = new THREE.Mesh(mistGeometry, mistMaterial);
@@ -3318,17 +3374,12 @@ void main() {
 	outgoingLight = mix(outgoingLight, uFogColor, fogAmt);
 }
 #include <opaque_fragment>`
-				)
-				// ONE colour convention. Built-ins encode linear->sRGB at
-				// output; every custom shader in the game — the water above
-				// all — writes raw linear, and the sea's whole look was tuned
-				// under that convention. The encode is CONCAVE: it lifts a
-				// noon-bright card ~10% but a dusk-dim one ~60%, which made
-				// the waterline step GROW as the sun dropped — measured, five
-				// independent light-probes all fitting 0.84 x srgb(model).
-				// (An earlier test 'falsified' this theory; that test sampled
-				// the wrong pixels. The probes are the evidence.)
-				.replace('#include <colorspace_fragment>', '');
+				);
+			// Built-ins keep their native colorspace_fragment: since every
+			// custom canvas shader now applies the same linear->sRGB output
+			// transform, the whole canvas shares one convention. (The strip
+			// that briefly lived here was the interim fix — see the log's
+			// Milestone 22 for the saga.)
 		};
 	}
 	function buildBoatMesh(): THREE.Group {
