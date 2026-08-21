@@ -1830,15 +1830,6 @@ export const UNDERWATER = {
    */
   direct: 1.0,
   /**
-   * Additive caustic ridge brightness on flat-albedo objects. 1.0 keeps
-   * the pattern ENERGY-NEUTRAL: the diffuse term clamps troughs and
-   * ridges to <= 1, and this term re-adds exactly the clamped-off ridge
-   * energy, so caustics redistribute light instead of stealing ~5-10% of
-   * it (which they did at 0.8 — part of the across-the-board underwater
-   * darkening).
-   */
-  ridgeGain: 1.0,
-  /**
    * FADE RANGE, in METRES: the depth at which each channel is 90% gone
    * (10% of the light left). Beer-Lambert, so the shader converts with
    * sigma = ln(10) / range.
@@ -1888,19 +1879,6 @@ export const UNDERWATER = {
    * look — the two together are the whole mechanism.
    */
   mieScatter: 0.0008,
-  /**
-   * Depth, metres, at which downwelling light has lost its direction.
-   *
-   * The zone structure of real water: shallow light is directional and
-   * casts caustics; by ~45m in clear water it has been scattered into a
-   * uniform haze arriving equally from every side, with no visible sun
-   * and no caustics. Fades the directional shading term into flat
-   * ambient and washes the caustics out over that scale. NOTE: with the
-   * seabed at 6m this is nearly inert today (87% directional at the
-   * bottom) — it is here so the model stays right if the scene ever
-   * gets deeper.
-   */
-  diffuseDepthM: 45,
   /**
    * How much of the extinction shows up as DARKENING, versus only
    * shifting hue.
@@ -2018,78 +1996,6 @@ export const UNDERWATER = {
    */
   sphereDepth: -6,
   /**
-   * How dark a caustic shadow may drive the direct light. 0 lets a
-   * trough extinguish it completely.
-   *
-   * Insurance as much as art: the caustic map only holds real data where
-   * its beams were splatted, and any patch they miss reads as pitch
-   * shadow rather than as "no data". Real troughs are not black either —
-   * scattered light still arrives.
-   */
-  causticFloor: 0.35,
-  /**
-   * FOCAL DISTANCE of the caustic pattern, metres: how far light must
-   * travel below the surface before the pattern is fully formed.
-   *
-   * At the interface itself the refracted rays have not converged yet, so
-   * there is no pattern. Ripples focus over centimetres to a fraction of
-   * a metre, so by half a metre down it is fully developed — and from
-   * there it BLURS and dims with depth rather than strengthening (that
-   * part is handled by diffuseDepthM and the extinction). A six-metre
-   * ramp was tried here to suppress an unrelated self-shadow artefact and
-   * had the pattern backwards: weakest where caustics are in fact
-   * sharpest.
-   */
-  causticFocusM: 0.02,
-  /**
-   * SOURCE BLUR of the caustic pattern, metres of Gaussian sigma —
-   * decoupled from weather by request: the weather coupling meant even
-   * modest haze cost the fine filaments. Physically this is the sun's
-   * angular size projected through the water; 0.05 and below is
-   * effectively off (razor lines), and past ~0.2 the blur pipeline
-   * switches to a quarter-resolution path — the fine-detail CLIFF, so
-   * treat 0.2 as the edge of the sharp regime. Capped at 0.62 inside
-   * the map.
-   */
-  causticSourceBlurM: 0.05,
-  /**
-   * CONTRAST of the caustic pattern about its neutral point:
-   * light' = 1 + (light - 1) x this. Exists to give back the punch two
-   * honest fixes took away — the mean-normalisation divides the whole
-   * pattern by its ~1.35 mean, and the sRGB output encode compresses
-   * highlight ratios (a 2x linear filament displays as ~1.4x). Measured
-   * together they halved the pattern's relative contrast on shallow
-   * receivers; 2.0 restores the pre-era read. Ridges brighten and dips
-   * deepen symmetrically (causticFloor still bounds the dips), so the
-   * pattern's mean stays ~neutral.
-   */
-  causticContrast: 2.0,
-  /**
-   * FOCAL DEPTH of the caustic-driving waves, metres. At this depth the
-   * pattern is sharpest; past it the beam bundle diverges and features
-   * grow while peaks dim (the blur pyramid). Physically f ~ 0.24 x
-   * wavelength / slope, and for the game's detail band that is ~6-9m —
-   * the pattern converges AT the seabed, exactly like a pool floor,
-   * which is also where the splat plane computes convergence exactly.
-   * The first default here (1.5) blurred the floor carpet that IS the
-   * caustic look; 6 keeps everything at or above the seabed sharp, and
-   * the softening only takes over below it (a deeper world's problem).
-   * Lower it deliberately if you want the floor to read defocused —
-   * NOTE this knob GATES causticBlurPerM: the floor's blur authority is
-   * (floorDepth - focal) x blurPerM, so at focal 6 over a 6m seabed the
-   * blur knob has nothing to work with no matter how high it goes.
-   */
-  causticFocalM: 0,
-  /**
-   * Metres of defocus-kernel per metre past the focal depth — how fast
-   * the pattern spreads and softens going down. At the defaults the 6m
-   * seabed sits ~1.6m of kernel deep: soft mottling below, crisp
-   * filaments on shallow bodies. 0 = equally sharp at every depth.
-   * (Replaces a mip-bias version that silently no-oped on renderers
-   * that refuse mip generation on half-float targets.)
-   */
-  causticBlurPerM: 0.2,
-  /**
    * Flat brightness multiplier on submerged shading — the honest fudge
    * for the gap this model has not closed analytically.
    *
@@ -2104,10 +2010,79 @@ export const UNDERWATER = {
    * this closes the gap by eye — try ~1.3 to match the waterline.
    */
   exposure: 1.0,
+}
+
+/**
+ * CAUSTICS — everything about the refracted light pattern on submerged
+ * surfaces: how sharp it is born, how it spreads and fades with depth,
+ * and how bright its filaments and shadows run. All live. The pattern
+ * itself is the forward-splat map (caustics.ts); ENABLE.caustics kills
+ * the whole system.
+ */
+export const CAUSTICS = {
   /**
-   * Sun-diffusion band over which the caustic pattern washes out to flat
-   * light — an extended source blurs its own pattern away. Start = where
-   * washing begins, end = fully featureless.
+   * SOURCE BLUR, metres of Gaussian sigma at the map — the sun's
+   * angular size projected through the water, decoupled from weather on
+   * purpose. 0.05 and below is effectively off (razor lines); past ~0.2
+   * the blur pipeline drops to a quarter-resolution path, the
+   * fine-detail cliff. Capped at 0.62 inside the map.
+   */
+  sourceBlurM: 0.05,
+  /**
+   * FOCAL DEPTH, metres below mean water level, where the pattern is
+   * sharpest. GATES blurPerM: the floor's blur authority is
+   * (floorDepth - focalM) x blurPerM. Physically f ~ 0.24 x wavelength
+   * / slope for the chop that makes caustics (~6-9m here); lower it to
+   * hand the blur knob authority higher in the column.
+   */
+  focalM: 0,
+  /**
+   * Metres of defocus-kernel per metre past the focal depth — how fast
+   * the pattern spreads and softens going down (the blur pyramid:
+   * features grow, peaks dim, energy holds). 0 = equally sharp at every
+   * depth. Measured against depth below MEAN water level, so a passing
+   * swell does not swing the seabed between sharp and soft.
+   */
+  blurPerM: 0.2,
+  /**
+   * FORMATION ramp, metres: refracted rays need a little distance to
+   * converge, so there is no pattern at the very interface; it fades in
+   * over this depth.
+   */
+  formM: 0.02,
+  /**
+   * Directional-light survival depth, metres: pattern strength falls as
+   * exp(-depth / this), because scattering destroys the beam direction
+   * that caustics ARE. THE brightness-dropoff-with-depth knob — at 45 a
+   * 6m floor keeps 87% of the pattern; at 8 it keeps 47%. Also relaxes
+   * lighting incidence toward omnidirectional at the same rate (same
+   * physics, same cause).
+   */
+  diffuseDepthM: 45,
+  /**
+   * CONTRAST about the pattern's neutral point: light' = 1 + (light-1)
+   * x this. Gives back the punch the mean-normalisation and the sRGB
+   * output encode compress (measured: together they halved relative
+   * contrast). Ridges brighten and dips deepen symmetrically.
+   */
+  contrast: 1.0,
+  /**
+   * Additive ridge brightness on flat-albedo objects. 1.0 is
+   * energy-neutral: the diffuse term clamps the pattern at <= 1 and
+   * this re-adds exactly the clamped-off ridge energy, so caustics
+   * redistribute light instead of minting or stealing it.
+   */
+  ridgeGain: 1.0,
+  /**
+   * How dark a caustic shadow may drive the direct light. Also
+   * insurance: any patch the splat misses reads as pitch shadow rather
+   * than "no data" without a floor. Real troughs are not black either.
+   */
+  floor: 0.35,
+  /**
+   * Sun-diffusion band over which the pattern washes to featureless
+   * light (weather's remaining caustic effect): start = where washing
+   * begins, end = fully flat.
    */
   flatStart: 0.35,
   flatEnd: 1.0,
@@ -2179,6 +2154,7 @@ const GROUPS = {
   UNIFIED,
   BOAT,
   UNDERWATER,
+  CAUSTICS,
   FROTH,
   PLUME,
   LOOP,
@@ -2228,4 +2204,7 @@ export const LIVE_GROUPS = new Set([
   'UNIFIED',
   'BOAT',
   'UNDERWATER',
+  // Every CAUSTICS knob reaches the scene through a per-frame uniform
+  // (or the map's own per-step property), so the whole group is live.
+  'CAUSTICS',
 ])

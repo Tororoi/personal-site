@@ -55,6 +55,7 @@
 		FOAM_EXTENT
 	} from './foam';
 	import {
+		CAUSTICS,
 		BOAT,
 		CONTACT,
 		DROPLET,
@@ -266,11 +267,11 @@
 	const uwUniforms = {
 		uUwAmbient: { value: UNDERWATER.ambient },
 		uUwDirect: { value: UNDERWATER.direct },
-		uUwRidge: { value: UNDERWATER.ridgeGain },
+		uUwRidge: { value: CAUSTICS.ridgeGain },
 		uUwSigma: { value: new THREE.Vector3() },
 		uUwScatter: { value: new THREE.Vector3() },
 		uUwScatterI: { value: 1 },
-		uUwDiffuseDepth: { value: UNDERWATER.diffuseDepthM },
+		uUwDiffuseDepth: { value: CAUSTICS.diffuseDepthM },
 		// The SAME irradiances the above-water MeshStandard materials get:
 		// sRGB->linear like the scene lights, and /PI for the Lambert BRDF
 		// three applies. Feeding these makes ambient/direct multipliers
@@ -279,14 +280,14 @@
 		uUwAmbIrr: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
 		uUwDim: { value: UNDERWATER.dim },
 		uUwGlow: { value: UNDERWATER.glow },
-		uUwCausticFloor: { value: UNDERWATER.causticFloor },
-		uUwCausticFocus: { value: UNDERWATER.causticFocusM },
+		uUwCausticFloor: { value: CAUSTICS.floor },
+		uUwCausticFocus: { value: CAUSTICS.formM },
 		uCausticMean: { value: null as THREE.Texture | null },
 		uCausticPyr1: { value: null as THREE.Texture | null },
 		uCausticPyr2: { value: null as THREE.Texture | null },
-		uUwCausticFocal: { value: UNDERWATER.causticFocalM },
-		uUwCausticContrast: { value: UNDERWATER.causticContrast },
-		uUwCausticBlur: { value: UNDERWATER.causticBlurPerM },
+		uUwCausticFocal: { value: CAUSTICS.focalM },
+		uUwCausticContrast: { value: CAUSTICS.contrast },
+		uUwCausticBlur: { value: CAUSTICS.blurPerM },
 		uUwExposure: { value: UNDERWATER.exposure },
 		uUwAmbTint: { value: UNDERWATER.ambientSkyHue },
 		uUwWrap: { value: UNDERWATER.wrap },
@@ -736,7 +737,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	float cMean = texture2D(uCausticMean, vec2(0.5)).r;
 	caustic /= max(cMean, 0.05);
 	// Punch back what the mean-division and the sRGB encode compress —
-	// see UNDERWATER.causticContrast.
+	// see CAUSTICS.contrast.
 	caustic = max(1.0 + (caustic - 1.0) * uUwCausticContrast, 0.0);
 	vec2 cEdge = min(cuv, 1.0 - cuv);
 	float inMap = smoothstep(0.0, 0.08, min(cEdge.x, cEdge.y)) * causticValidity(beamXZ);
@@ -3928,7 +3929,7 @@ void main() {
 				rainbowMesh.visible = UNDERWATER.rainbowCard;
 				uwUniforms.uUwAmbient.value = UNDERWATER.ambient;
 				uwUniforms.uUwDirect.value = UNDERWATER.direct;
-				uwUniforms.uUwRidge.value = UNDERWATER.ridgeGain;
+				uwUniforms.uUwRidge.value = CAUSTICS.ridgeGain;
 				// Fade RANGES in metres -> per-metre extinction. "Fades" is
 				// 90% of the light gone, so sigma = ln(10) / range.
 				const LN10 = 2.302585;
@@ -3948,17 +3949,17 @@ void main() {
 					ray * 1.0 + mie,
 					ray * 2.3795 + mie
 				);
-				uwUniforms.uUwDiffuseDepth.value = UNDERWATER.diffuseDepthM;
+				uwUniforms.uUwDiffuseDepth.value = CAUSTICS.diffuseDepthM;
 				uwUniforms.uUwDim.value = UNDERWATER.dim;
 				uwUniforms.uUwGlow.value = UNDERWATER.glow;
-				uwUniforms.uUwCausticFloor.value = UNDERWATER.causticFloor;
-				uwUniforms.uUwCausticFocus.value = UNDERWATER.causticFocusM;
-				uwUniforms.uUwCausticBlur.value = UNDERWATER.causticBlurPerM;
+				uwUniforms.uUwCausticFloor.value = CAUSTICS.floor;
+				uwUniforms.uUwCausticFocus.value = CAUSTICS.formM;
+				uwUniforms.uUwCausticBlur.value = CAUSTICS.blurPerM;
 				uwUniforms.uCausticPyr1.value = causticMap.pyr1Texture;
 				uwUniforms.uCausticPyr2.value = causticMap.pyr2Texture;
-				uwUniforms.uUwCausticFocal.value = UNDERWATER.causticFocalM;
-				uwUniforms.uUwCausticContrast.value = UNDERWATER.causticContrast;
-				causticMap.sourceBlurM = UNDERWATER.causticSourceBlurM;
+				uwUniforms.uUwCausticFocal.value = CAUSTICS.focalM;
+				uwUniforms.uUwCausticContrast.value = CAUSTICS.contrast;
+				causticMap.sourceBlurM = CAUSTICS.sourceBlurM;
 				uwUniforms.uUwExposure.value = UNDERWATER.exposure;
 				// Clear light drives deep and returns blue; overcast light is
 				// absorbed near the surface and returns little.
@@ -3973,8 +3974,8 @@ void main() {
 				uwUniforms.uUwSurfaceReflect.value = UNDERWATER.surfaceReflect;
 				waterUniforms.uCausticFlat.value = smooth01(
 					dif,
-					UNDERWATER.flatStart,
-					UNDERWATER.flatEnd
+					CAUSTICS.flatStart,
+					CAUSTICS.flatEnd
 				);
 				waterUniforms.uSpecSharpWash.value = sharp * SPECULAR.haloSharp;
 				waterUniforms.uSpecGain.value =
