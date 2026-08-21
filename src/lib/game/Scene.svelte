@@ -3365,6 +3365,9 @@ void main() {
 		pitchW: 0,
 		rollW: 0,
 		pw: 0,
+		/** Course over ground, radians (world azimuth of the velocity),
+		 * held below steerage way so the HUD doesn't spin on drift noise. */
+		course: 3.93,
 		prevSpeed: 0,
 		accelSm: 0,
 		rest: { u: -1, v: 1 }
@@ -3505,6 +3508,80 @@ void main() {
 		add(new THREE.BoxGeometry(0.12, 0.6, 0.14), darkMat, -2.48, -0.05, 0);
 		return g;
 	}
+	/**
+	 * HUD HEADING INDICATOR — a low-poly instrument IN the scene, placed
+	 * at a screen-anchored world position each frame. Rendering it with
+	 * the game's own camera makes the isometric look and the screen-true
+	 * cardinals automatic: markers sit at real world azimuths and project
+	 * exactly as the world does. Unlit (an instrument glows the same at
+	 * midnight), depthTest off + high renderOrder so it draws over the
+	 * sea. The silhouette is the hull's own plan outline in miniature,
+	 * yawed to the boat's heading — a live model of the boat, top-down.
+	 */
+	const hudCompass = (() => {
+		const g = new THREE.Group();
+		const mats: THREE.Material[] = [];
+		const mat = (color: string) => {
+			const m = new THREE.MeshBasicMaterial({ color, depthTest: false });
+			mats.push(m);
+			boatDisposables.push(m);
+			return m;
+		};
+		const add = (geo: THREE.BufferGeometry, m: THREE.Material, parent: THREE.Object3D = g) => {
+			boatDisposables.push(geo);
+			const mesh = new THREE.Mesh(geo, m);
+			mesh.renderOrder = 999;
+			parent.add(mesh);
+			return mesh;
+		};
+		// bezel and face: two squat low-poly cylinders
+		add(new THREE.CylinderGeometry(1.8, 1.9, 0.22, 14), mat('#2b3947')).position.y = -0.06;
+		add(new THREE.CylinderGeometry(1.62, 1.62, 0.16, 14), mat('#141e28'));
+		// cardinal + intercardinal ticks at true world azimuths; N is the
+		// red wedge, the rest are bars (low-poly stands in for lettering)
+		const northMat = mat('#ff4040');
+		const tickMat = mat('#e8eef2');
+		const minorMat = mat('#5a6a78');
+		for (let i = 0; i < 8; i++) {
+			const az = ((316 + i * 45) * Math.PI) / 180;
+			const major = i % 2 === 0;
+			const r = 1.28;
+			let m: THREE.Mesh;
+			if (i === 0) {
+				const tri = new THREE.Shape();
+				tri.moveTo(0.3, 0);
+				tri.lineTo(-0.14, 0.16);
+				tri.lineTo(-0.14, -0.16);
+				tri.closePath();
+				const geo = new THREE.ExtrudeGeometry(tri, { depth: 0.06, bevelEnabled: false });
+				geo.rotateX(-Math.PI / 2);
+				m = add(geo, northMat);
+			} else {
+				m = add(
+					new THREE.BoxGeometry(major ? 0.4 : 0.22, 0.06, major ? 0.12 : 0.07),
+					major ? tickMat : minorMat
+				);
+			}
+			m.position.set(Math.cos(az) * r, 0.12, Math.sin(az) * r);
+			m.rotation.y = -az;
+		}
+		// the boat, top-down: the hull's own plan at 1:2.5-ish
+		const k = 0.38;
+		const plan = new THREE.Shape();
+		plan.moveTo(-2.3 * k, -0.95 * k);
+		plan.lineTo(0.5 * k, -0.95 * k);
+		plan.quadraticCurveTo(1.75 * k, -0.8 * k, 2.3 * k, 0);
+		plan.quadraticCurveTo(1.75 * k, 0.8 * k, 0.5 * k, 0.95 * k);
+		plan.lineTo(-2.3 * k, 0.95 * k);
+		plan.closePath();
+		const silGeo = new THREE.ExtrudeGeometry(plan, { depth: 0.08, bevelEnabled: false });
+		silGeo.rotateX(-Math.PI / 2);
+		const silhouette = new THREE.Group();
+		add(silGeo, mat('#f2f5f3'), silhouette).position.y = 0.14;
+		g.add(silhouette);
+		return { group: g, silhouette };
+	})();
+
 	const boatMesh = buildBoatMesh();
 	// Bake the hull's distance field while the group still sits at the
 	// origin (the bake works in group-local space). ~1s once, at load.
@@ -3676,6 +3753,11 @@ void main() {
 			boat.vz = wpz + f * fwdZ + latZ;
 		}
 		boat.speed = boat.vx * fwdX + boat.vz * fwdZ;
+		// HUD speedometer: speed over ground (the vector's magnitude, not
+		// the forward projection — a drifting or surfing boat is still
+		// travelling). 1 m/s = 1.9438 knots.
+		game.knots = Math.hypot(boat.vx, boat.vz) * 1.9438;
+		if (game.knots > 0.4) boat.course = Math.atan2(boat.vz, boat.vx);
 		boat.x += boat.vx * dt;
 		boat.z += boat.vz * dt;
 		// Surge, low-passed: drives the lean-back-under-power trim. Only
@@ -3906,6 +3988,24 @@ void main() {
 		if (cam) cam.position.set(off[0] + boat.x, off[1], off[2] + boat.z);
 		if (PROFILE.perspectiveCamera) {
 			waterUniforms.uCamPos.value.set(perspPos[0] + boat.x, perspPos[1], perspPos[2] + boat.z);
+		}
+		// HUD: pin the instrument to the lower-left of the view. Camera
+		// right/up for the iso camera; margins in CSS px over the ortho
+		// zoom give world offsets from the view centre.
+		{
+			const halfW = window.innerWidth / 2 / zoom;
+			const halfH = window.innerHeight / 2 / zoom;
+			const ox = -halfW + 62 / zoom;
+			const oy = -halfH + 122 / zoom;
+			hudCompass.group.position.set(
+				boat.x + 0.7071 * ox + -0.374 * oy,
+				0.848 * oy,
+				boat.z + -0.7071 * ox + -0.374 * oy
+			);
+			// COURSE over ground, not facing: the mini-boat shows where you
+			// are actually travelling in the world; the gap between it and
+			// the real hull's bow on screen IS your drift angle.
+			hudCompass.silhouette.rotation.y = -boat.course;
 		}
 		winCenter.set(Math.round(boat.x * 2) / 2, Math.round(boat.z * 2) / 2);
 		if (waterMeshRef) waterMeshRef.position.set(winCenter.x, 0, winCenter.y);
@@ -4566,6 +4666,7 @@ void main() {
 	<T.Mesh bind:ref={waterMeshRef} geometry={waterGeometry} material={waterMaterial} frustumCulled={false} />
 {/if}
 <T is={boatMesh} />
+<T is={hudCompass.group} />
 <T is={rainbowMesh} />
 
 {#each PROFILE.hideObjects ? [] : buoys as buoy, i (i)}

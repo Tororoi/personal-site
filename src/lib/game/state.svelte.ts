@@ -13,7 +13,10 @@ export const game = $state({
 	 * opening on. Phase 0.396 is the mirrored morning pose.
 	 */
 	time: ENV.daySeconds * 0.63,
-	running: true
+	running: true,
+	/** Boat speed over ground, knots, written each frame by Scene. */
+	knots: 0,
+	
 });
 
 /**

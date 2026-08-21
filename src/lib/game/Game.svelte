@@ -158,6 +158,10 @@
 	{#if ENABLE.tuningUI}
 		<TuningPanel />
 	{/if}
+	<div class="knots">
+		<span class="value">{game.knots.toFixed(1)}</span>
+		<span class="unit">kn</span>
+	</div>
 </div>
 
 <style>
@@ -172,6 +176,28 @@
 
 	.warn {
 		color: #d3a34a;
+	}
+
+	.knots {
+		position: absolute;
+		bottom: 14px;
+		left: 14px;
+		font-family: var(--font-mono);
+		color: #3ee06f;
+		letter-spacing: 0.08em;
+		pointer-events: none;
+		user-select: none;
+	}
+
+	.knots .value {
+		font-size: 22px;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.knots .unit {
+		font-size: 12px;
+		margin-left: 2px;
+		opacity: 0.7;
 	}
 
 	.fps {

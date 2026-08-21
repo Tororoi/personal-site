@@ -2222,7 +2222,7 @@ export const BOAT = {
    * swings toward it with momentum and overshoot. A beamy hull rolls
    * less than it pitches; these two set that character.
    */
-  rollGain: 1.5,
+  rollGain: 1.0,
   pitchGain: 1.5,
   /**
    * Resting stern-down trim, radians: the engine's weight sits the
