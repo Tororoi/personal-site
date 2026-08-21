@@ -41,14 +41,36 @@ import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
 import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
-export const CAUSTIC_RESOLUTION = 2048
 /**
  * The caustic domain covers the VIEW, not the ripple domain: light only
- * needs computing where the eye can see it, and the smaller extent buys
- * finer texels (80m / 2048 = 3.9cm) than matching the 100m ripple field
- * would. Receivers outside the domain read neutral light.
+ * needs computing where the eye can see it. The view's footprint depends
+ * on the window, so the extent is sized at load — a fixed 80m left big
+ * windows sampling beyond the map at the top and corners, which read as
+ * the seabed's caustics ending mid-screen. Resolution steps up with the
+ * extent to hold the texel near 4cm. (Sized once: a resize to a LARGER
+ * window needs a reload to regain full coverage.)
  */
-export const CAUSTIC_EXTENT = 80
+const viewHalfAxis = (() => {
+  if (typeof window === 'undefined') return 30
+  // Mirrors Scene's screen->world footprint factors (0.71/1.34) and its
+  // mobile/zoom split; caustics can't import Scene (cycle).
+  const zoom = window.innerWidth < 720 ? 18 : 26
+  return (
+    0.71 * (window.innerWidth / zoom / 2) + 1.34 * (window.innerHeight / zoom / 2)
+  )
+})()
+/**
+ * BASE extent: covers the view with the seabed at the caustic plane's own
+ * depth. The LIVE extent (CausticMap.extent) grows past this when a deep
+ * seabed pushes the sampled rect further — refraction lands floor pixels
+ * up-screen of their surface point and deep receivers walk sunward to the
+ * beam plane, both in proportion to depth. Texels coarsen as it grows,
+ * which is the physically graceful trade: the deep floor that demands the
+ * reach is exactly the one whose pattern is blurred anyway.
+ */
+export const CAUSTIC_EXTENT = Math.max(80, Math.ceil(2 * (viewHalfAxis + 16)))
+export const CAUSTIC_RESOLUTION =
+  typeof window !== 'undefined' && window.innerWidth < 720 ? 2048 : 3072
 /**
  * ACTIVE-TILE splatting: the domain divides into TILES x TILES tiles and
  * only tiles over the receivers (the sphere, later fish) are splatted each
@@ -57,7 +79,11 @@ export const CAUSTIC_EXTENT = 80
  * past this GPU's ~200k/frame budget; receiver culling spends the
  * vertices only where landed light is actually visible.
  */
-const TILES = 16
+// Fixed tile GRID: tileSize = extent / TILES scales with the live
+// extent, and ray spacing (tileSize / TILE_GRID) scales with it — the
+// spacing-to-texel ratio stays constant, so splat density per texel is
+// depth-independent.
+const TILES = 20
 /** Rays per tile side: 5m tile / 48 = 0.104m spacing, the approved density. */
 const TILE_GRID = 48
 /** Vertex budget: cap on simultaneously active tiles (~140k verts). */
@@ -67,7 +93,11 @@ const TILE_GRID = 48
 // 15 degrees elevation and tiles were dropped in scan order — which
 // showed as caustics vanishing from one quarter of a receiver, then the
 // next, as the cut-off band swept across.
-const MAX_TILES = 160
+// Raised from 160 with the view-shaped marking below: the padded view
+// rect on a large window wants ~200+ tiles, and the centre-out priority
+// means an overrun clips the least-visible corners instead of sweeping
+// bands off a receiver.
+const MAX_TILES = 256
 const IOR = (1 / 1.33).toFixed(4)
 /**
  * Depth of the beam-space reference plane, meters below rest. Brightness
@@ -453,12 +483,11 @@ void main() {
   }
 
   /**
-   * Splat the tiles covering the sphere's caustic footprint. Only objects
-   * receive caustics now, so the active region is just the sphere's disc,
-   * shifted along the sun's slant (rays enter the water upwind of where
-   * they land) and padded for wave sway and refraction spread. The map
-   * clears to BLACK — 0 means "no light reaches here" — and receivers
-   * outside the splatted region must treat the map as dark too.
+   * Splat the tiles covering the padded VIEW rect (see setViewRect),
+   * extended sunward so rays enter the water where they must to land
+   * inside it. The map clears to BLACK — 0 means "no light reaches
+   * here" — and receivers outside the splatted region must treat the map
+   * as dark too (the validity fade).
    */
   step(
     renderer: THREE.WebGLRenderer,
@@ -466,70 +495,95 @@ void main() {
     sunDir: THREE.Vector3,
     time: number,
   ) {
-    const sphere = this.material.uniforms.uSphereCenter.value as THREE.Vector3
-    const sphereR = this.material.uniforms.uSphereRadius.value as number
-
-    // Surface entry points sit sunward of the landing point by roughly
-    // depth * tan(sunZenith); refraction bends rays toward vertical so the
-    // un-refracted tangent over-estimates, which is the safe direction.
-    // Slant clamp. Below this the region would grow without bound as the
-    // sun approaches the horizon; 0.3 (about 17 degrees) cut in while the
-    // sun was still high enough to matter, freezing the region while the
-    // real rays kept slanting away from it — receivers then sampled
-    // unsplatted (black) map. Held lower now, with the receiver-side
-    // border fade covering the last few degrees before the light dies.
+    // Splat SOURCES sit sunward of their landings by roughly
+    // planeDepth * tan(sunZenith); refraction bends rays toward vertical
+    // so the un-refracted tangent (x0.6) over-estimates, which is the
+    // safe direction. Slant clamp: below sy=0.12 the pad would grow
+    // without bound as the sun approaches the horizon, with the
+    // receiver-side border fade covering the last few degrees before the
+    // light dies.
     const sy = Math.max(sunDir.y, 0.12)
-    const slantX = sunDir.x / sy
-    const slantZ = sunDir.z / sy
-    const depth = Math.max(-sphere.y, 0) + sphereR
-    const cx = sphere.x + slantX * depth * 0.5
-    const cz = sphere.z + slantZ * depth * 0.5
-    const r =
-      sphereR + Math.hypot(slantX, slantZ) * depth * 0.5 + 5
+    const shiftX = (sunDir.x / sy) * CAUSTIC_PLANE_DEPTH * 0.6
+    const shiftZ = (sunDir.z / sy) * CAUSTIC_PLANE_DEPTH * 0.6
+    const R = 0.70710678
+    const sa = shiftX * R - shiftZ * R
+    const sb = -shiftX * R - shiftZ * R
 
-    // Mark tiles overlapped by the disc's bounding box — in DOMAIN
-    // coordinates, since the domain now follows the boat. When the sphere
-    // is far outside the travelling window the ranges go empty and the
-    // splat simply skips, which is correct: its caustics are off-screen.
     const cc = this.material.uniforms.uCenter.value as THREE.Vector2
-    const tileSize = CAUSTIC_EXTENT / TILES
-    const half = CAUSTIC_EXTENT / 2
-    let count = 0
-    const attr = this.tileAttr.array as Float32Array
-    // Cover a BOX CENTRED ON THE DOMAIN, as wide as the tile budget
-    // allows, rather than a disc around the sphere. Beams only exist
-    // where tiles are drawn, so a sphere-shaped budget lit a
-    // sphere-shaped patch of sea and left everything else — the rainbow
-    // card, the boat, most of the visible water — outside the pattern
-    // with a hard edge where it stopped. The sphere is not special; the
-    // VIEW is what needs caustics.
-    const span = Math.min(TILES, Math.floor(Math.sqrt(MAX_TILES)))
-    const mid = Math.floor(TILES / 2)
-    const tx0 = Math.max(0, mid - Math.floor(span / 2))
-    const tx1 = Math.min(TILES - 1, tx0 + span - 1)
-    const tz0 = Math.max(0, mid - Math.floor(span / 2))
-    const tz1 = Math.min(TILES - 1, tz0 + span - 1)
-    for (let tz = tz0; tz <= tz1 && count < MAX_TILES; tz++) {
-      for (let tx = tx0; tx <= tx1 && count < MAX_TILES; tx++) {
-        attr[count * 2] = tx
-        attr[count * 2 + 1] = tz
-        count++
+    this.material.uniforms.uExtent.value = this.extent
+    const tileSize = this.extent / TILES
+    const half = this.extent / 2
+    const rr = tileSize * R // tile half-diagonal
+    // Mark every tile whose square overlaps the padded VIEW rect, in the
+    // screen-aligned basis around the domain centre: right =
+    // (0.7071, -0.7071) in xz, screen-up-horizontal = (-0.7071, -0.7071).
+    // The old budget-wide SQUARE centred on the boat wasted its corners
+    // off-screen and stopped short of the top of the view: floor samples
+    // sit up-screen of their surface pixel (the eye ray keeps travelling
+    // as it refracts), so what needs caustics is the view rect SHIFTED
+    // up-screen, not a box around the boat. The rect (viewHw/Hn/Hf, from
+    // Scene each frame) carries that shift; the sun pad above extends it
+    // to where the splat rays ENTER the water.
+    const aLo = -this.viewHw + Math.min(sa, 0) - rr
+    const aHi = this.viewHw + Math.max(sa, 0) + rr
+    const bLo = -this.viewHn + Math.min(sb, 0) - rr
+    const bHi = this.viewHf + Math.max(sb, 0) + rr
+    const bMid = (this.viewHf - this.viewHn) / 2
+    const bHalf = Math.max((this.viewHn + this.viewHf) / 2, 1)
+    const aHalf = Math.max(this.viewHw, 1)
+    const idx = this.candIdx
+    const keys = this.candKeys
+    idx.length = 0
+    for (let tz = 0; tz < TILES; tz++) {
+      for (let tx = 0; tx < TILES; tx++) {
+        const px = -half + (tx + 0.5) * tileSize
+        const pz = -half + (tz + 0.5) * tileSize
+        const a = px * R - pz * R
+        const b = -px * R - pz * R
+        if (a < aLo || a > aHi || b < bLo || b > bHi) continue
+        // Centre-out priority (normalised max-metric): if the budget
+        // clips, it clips the least-visible corners.
+        const t = tz * TILES + tx
+        keys[t] = Math.max(Math.abs(a) / aHalf, Math.abs(b - bMid) / bHalf)
+        idx.push(t)
       }
+    }
+    idx.sort((x, y) => keys[x] - keys[y])
+    const count = Math.min(idx.length, MAX_TILES)
+    const attr = this.tileAttr.array as Float32Array
+    let tx0 = TILES
+    let tx1 = -1
+    let tz0 = TILES
+    let tz1 = -1
+    for (let i = 0; i < count; i++) {
+      const tx = idx[i] % TILES
+      const tz = (idx[i] - tx) / TILES
+      attr[i * 2] = tx
+      attr[i * 2 + 1] = tz
+      if (tx < tx0) tx0 = tx
+      if (tx > tx1) tx1 = tx
+      if (tz < tz0) tz0 = tz
+      if (tz > tz1) tz1 = tz
     }
     this.tileAttr.needsUpdate = true
     this.splatGeometry.instanceCount = count
-    // WORLD rect the splat actually covered this frame. The map is CLEAR
-    // (zero) outside it, and zero reads as full caustic shadow — any
-    // receiver sampling beyond the rect must fade to neutral instead.
+    // The rect the receivers may trust this frame. The map is CLEAR
+    // (zero) outside the splatted tiles, and zero reads as full caustic
+    // shadow — any receiver sampling beyond must fade to neutral instead
+    // (causticValidity in Scene, in this same rotated basis). When the
+    // budget clipped, shrink the trusted rect to the centre-out metric
+    // actually kept, so dropped corner tiles fade instead of going black.
     if (count > 0) {
-      this.validRegion.set(
-        cc.x - half + ((tx0 + tx1 + 1) / 2) * tileSize,
-        cc.y - half + ((tz0 + tz1 + 1) / 2) * tileSize,
-        ((tx1 - tx0 + 1) / 2) * tileSize,
-        ((tz1 - tz0 + 1) / 2) * tileSize,
-      )
+      this.validCenter.set(cc.x, cc.y)
+      const dm =
+        idx.length > count ? Math.max(Math.min(keys[idx[count - 1]], 1) - 0.03, 0) : 1
+      this.validHw = this.viewHw * dm
+      this.validHn = Math.max(bHalf * dm - bMid, 0)
+      this.validHf = Math.max(bMid + bHalf * dm, 0)
     } else {
-      this.validRegion.set(0, 0, 0, 0)
+      this.validHw = 0
+      this.validHn = 0
+      this.validHf = 0
     }
 
     this.material.uniforms.uRippleTex.value = rippleTexture
@@ -553,7 +607,7 @@ void main() {
     // side's flatten term (uCausticFlat, Scene) carries heavy overcast
     // the rest of the way to featureless light.
     const sigmaMeters = Math.min(this.sourceBlurM, 0.62)
-    const sigmaTexels = sigmaMeters / (CAUSTIC_EXTENT / CAUSTIC_RESOLUTION)
+    const sigmaTexels = sigmaMeters / (this.extent / CAUSTIC_RESOLUTION)
     // Below ~1.5 texels the blur is visually nothing (calm's clear-sky
     // diffusion lands here): skip both passes outright.
     if (sigmaTexels > 1.5 && count > 0) {
@@ -622,13 +676,13 @@ void main() {
         renderer.render(this.blurScene, this.splatCamera)
       }
       // L1: ~0.5m world sigma. Kernel taps sit at sigma/2 spacing in UV.
-      const s1 = 0.5 / CAUSTIC_EXTENT / 2
+      const s1 = 0.5 / this.extent / 2
       pass(this.target, this.blurTarget, 0, 0)
       pass(this.blurTarget, this.blurQuarterA, 0, 0)
       pass(this.blurQuarterA, this.blurQuarterB, s1, 0)
       pass(this.blurQuarterB, this.pyr1, 0, s1)
       // L2: ~2m total; additional sigma on top of L1's 0.5m.
-      const s2 = Math.sqrt(2.0 * 2.0 - 0.5 * 0.5) / CAUSTIC_EXTENT / 2
+      const s2 = Math.sqrt(2.0 * 2.0 - 0.5 * 0.5) / this.extent / 2
       pass(this.pyr1, this.pyr2, 0, 0)
       pass(this.pyr2, this.pyrScratch, s2, 0)
       pass(this.pyrScratch, this.pyr2, 0, s2)
@@ -638,14 +692,25 @@ void main() {
     {
       const cc2 = this.material.uniforms.uCenter.value as THREE.Vector2
       const rect = this.meanMaterial.uniforms.uRectUv.value as THREE.Vector4
-      if (this.validRegion.z > 0.5) {
+      if (this.validHw > 0.5) {
+        // The trusted rect is ROTATED 45deg to the map's axes; averaging
+        // its axis-aligned bounding box would fold ~half unsplatted black
+        // into the mean and the normalisation would over-brighten. Reduce
+        // over the axis-aligned square INSCRIBED in the rect instead —
+        // centred on the rect's (up-screen-shifted) middle, half-size
+        // 0.7071 x the smaller half-extent.
+        const R2 = 0.70710678
+        const bc = (this.validHf - this.validHn) / 2
+        const sHalf = Math.min(this.validHw, (this.validHn + this.validHf) / 2) * R2
+        const mx = this.validCenter.x - R2 * bc
+        const mz = this.validCenter.y - R2 * bc
         rect.set(
-          (this.validRegion.x - cc2.x) / CAUSTIC_EXTENT + 0.5,
-          (this.validRegion.y - cc2.y) / CAUSTIC_EXTENT + 0.5,
-          // inset 20%: the rect's rim mixes with unsplatted black and
-          // would drag the mean low
-          (this.validRegion.z / CAUSTIC_EXTENT) * 0.8,
-          (this.validRegion.w / CAUSTIC_EXTENT) * 0.8,
+          (mx - cc2.x) / this.extent + 0.5,
+          (mz - cc2.y) / this.extent + 0.5,
+          // inset 20%: the rim mixes with unsplatted black and would drag
+          // the mean low
+          (sHalf / this.extent) * 0.8,
+          (sHalf / this.extent) * 0.8,
         )
         this.meanMaterial.uniforms.uPrevMean.value = this.meanTarget.texture
         this.meanMaterial.uniforms.uMeanBlend.value = this.meanSeeded ? 0.08 : 1
@@ -670,7 +735,44 @@ void main() {
   }
 
   /** World rect (cx, cz, halfX, halfZ) the splat covered; empty = none. */
-  readonly validRegion = new THREE.Vector4(0, 0, 0, 0)
+  /**
+   * View rect the splat must cover, in the screen-aligned basis around
+   * the domain centre: half-extents right / near (toward camera) / far
+   * (up-screen). Scene refreshes it each frame from the unprojected view
+   * quad plus the refraction shifts.
+   */
+  private viewHw = 40
+  private viewHn = 40
+  private viewHf = 40
+  /**
+   * Live domain size, world metres. Scene grows it each frame to whatever
+   * the view rect (seabed depth included) demands, quantised to 2m so the
+   * sun's slow slant doesn't shimmer the texel grid every frame.
+   */
+  extent = CAUSTIC_EXTENT
+  setExtent(e: number) {
+    this.extent = Math.max(CAUSTIC_EXTENT, Math.ceil(e / 2) * 2)
+  }
+  setViewRect(hw: number, hn: number, hf: number) {
+    // Guard: the rotated rect must FIT the domain square, or the trusted
+    // rect would claim tiles the marking loop can never reach and the
+    // fade would give way to unsplatted black. With the live extent sized
+    // from the same rect this should never bite; shrink proportionally if
+    // it somehow does.
+    const cap = this.extent * 0.7071 - 2
+    const need = hw + Math.max(hn, hf)
+    const k = need > cap ? cap / need : 1
+    this.viewHw = hw * k
+    this.viewHn = hn * k
+    this.viewHf = hf * k
+  }
+  /** The rect receivers may trust this frame (same basis, world centre). */
+  readonly validCenter = new THREE.Vector2()
+  validHw = 0
+  validHn = 0
+  validHf = 0
+  private candIdx: number[] = []
+  private candKeys = new Float32Array(TILES * TILES)
 
   /**
    * 1x1 target holding the map's MEAN over the splatted rect, refreshed
@@ -710,7 +812,7 @@ void main() {
    * field at true world coordinates.
    */
   setCenter(x: number, z: number, rippleCenter: THREE.Vector2) {
-    const texel = CAUSTIC_EXTENT / CAUSTIC_RESOLUTION
+    const texel = this.extent / CAUSTIC_RESOLUTION
     ;(this.material.uniforms.uCenter.value as THREE.Vector2).set(
       Math.round(x / texel) * texel,
       Math.round(z / texel) * texel,

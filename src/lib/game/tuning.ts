@@ -1830,6 +1830,18 @@ export const UNDERWATER = {
    */
   direct: 1.0,
   /**
+   * The raytraced SEABED: whether it exists, and its depth in METRES
+   * below the mean surface. Off, the refracted ray never lands — every
+   * underwater pixel is pure water column, the open-ocean look. The
+   * depth feeds the same extinction and caustic-defocus maths as any
+   * submerged surface, so a deeper floor darkens and blurs on its own;
+   * the caustic map is still splatted at its fixed focal plane, so
+   * brightness and blur follow this knob but the pattern's scale
+   * doesn't.
+   */
+  seabed: true,
+  seabedDepthM: 6,
+  /**
    * FADE RANGE, in METRES: the depth at which each channel is 90% gone
    * (10% of the light left). Beer-Lambert, so the shader converts with
    * sigma = ln(10) / range.

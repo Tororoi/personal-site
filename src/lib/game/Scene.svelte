@@ -19,7 +19,8 @@
 		seaMetrics,
 		surfaceHeight,
 		orbitalVelocityInto,
-		filteredSlopeInto
+		filteredSlopeInto,
+		onFieldChange
 	} from './waves';
 	import {
 		events,
@@ -115,33 +116,66 @@
 	// uncovers ground behind it by ~1.6x its height at our camera
 	// elevation — the old flat 4m margin let storm seas reveal unrendered
 	// corners.
-	// Sized for the ROUGHEST sea, not the one loaded. Geometry extent is
-	// baked into buffers at build, so a live sea-state change cannot resize
-	// it — and a margin cut for calm would let a storm reveal unrendered
-	// corners the moment the dial moved. Over-covering costs some
-	// off-screen quads on calm; under-covering is a visible hole.
+	// Sized for the ROUGHER of the storm preset and the LIVE field: the
+	// unified sea's knobs have no preset ceiling, so a hot lambdaScale can
+	// out-sway the storm. Geometry extent is baked into buffers at build,
+	// so growth needs a rebuild — the onFieldChange hook below regrows the
+	// plane when the active field asks for more than it has (never
+	// shrinks; over-covering costs some off-screen quads, under-covering
+	// is a visible hole).
+	function coverageMargin(arr: { q: number; amp: number }[]) {
+		const sway = arr.reduce((sum, w) => sum + w.q * w.amp, 0);
+		return 2 + sway + 3.2 * Math.sqrt(arr.reduce((sum, w) => sum + w.amp * w.amp, 0));
+	}
 	const worstField = fieldForSeaState(2);
 	const worstWaves = generateWaves(worstField);
-	const SWAY_BOUND = worstWaves.reduce((sum, w) => sum + w.q * w.amp, 0);
-	const EDGE_MARGIN =
-		2 + SWAY_BOUND + 3.2 * Math.sqrt(worstWaves.reduce((sum, w) => sum + w.amp * w.amp, 0));
+	// Baked into the contact-ring shader as an inverse-displacement clamp,
+	// so it stays a load-time constant (worst of the storm preset and the
+	// field loaded now).
+	const SWAY_BOUND = Math.max(
+		worstWaves.reduce((sum, w) => sum + w.q * w.amp, 0),
+		waves.reduce((sum, w) => sum + w.q * w.amp, 0)
+	);
+	let EDGE_MARGIN = Math.max(coverageMargin(worstWaves), coverageMargin(waves));
 	function buildWaterGeometry() {
-		const size =
-			2 *
-			(0.71 * (window.innerWidth / zoom / 2) +
-				1.34 * (window.innerHeight / zoom / 2) +
-				EDGE_MARGIN);
 		// Quad size only limits displacement silhouettes now: shading is
 		// smooth (analytic vertex slopes + per-pixel ripple gradients), so
 		// the mesh can be far coarser than the old facet-shaded 0.2m
 		// without visible faceting. Must stay under ~1/3 of the shortest
 		// ripple wavelength.
-		const segments = Math.min(
-			Math.round(size / (mobile ? 0.6 : 0.5)),
-			mobile ? 170 : 510
+		const spacing = mobile ? 0.6 : 0.5;
+		const segCap = mobile ? 170 : 510;
+		if (PROFILE.perspectiveCamera) {
+			// The experiment's frustum footprint isn't the iso rect; keep
+			// the old axis-aligned square that circumscribes it.
+			const size =
+				2 *
+				(0.71 * (window.innerWidth / zoom / 2) +
+					1.34 * (window.innerHeight / zoom / 2) +
+					EDGE_MARGIN);
+			const segments = Math.min(Math.round(size / spacing), segCap);
+			const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
+			geometry.rotateX(-Math.PI / 2);
+			return geometry;
+		}
+		// MATCH THE VIEW'S SHAPE: the iso frustum's footprint is a rect
+		// rotated 45deg to world axes, and the old axis-aligned square
+		// circumscribing it meshed ~2x the area it could ever show. Build
+		// the rect itself — width spans screen-x (1 world unit per unit of
+		// right), height spans the screen-up horizontal (1/0.529 world
+		// units per world unit of screen height at our 45deg elevation) —
+		// and rotate it into place. EDGE_MARGIN still pads for sway and
+		// crest reveal.
+		const w = 2 * (window.innerWidth / zoom / 2 + EDGE_MARGIN);
+		const h = 2 * (1.8904 * (window.innerHeight / zoom / 2) + EDGE_MARGIN);
+		const geometry = new THREE.PlaneGeometry(
+			w,
+			h,
+			Math.min(Math.round(w / spacing), segCap),
+			Math.min(Math.round(h / spacing), segCap)
 		);
-		const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
 		geometry.rotateX(-Math.PI / 2);
+		geometry.rotateY(Math.PI / 4);
 		return geometry;
 	}
 	let waterGeometry = $state(buildWaterGeometry());
@@ -162,6 +196,15 @@
 		}, 200);
 	}
 	window.addEventListener('resize', onWindowResize);
+	// A live sea change can need more margin than the plane was built
+	// with — the seabed then visibly ends before the window does. Regrow
+	// via the same debounced rebuild as a resize.
+	onFieldChange(() => {
+		const need = coverageMargin(waves);
+		if (need <= EDGE_MARGIN) return;
+		EDGE_MARGIN = need;
+		onWindowResize();
+	});
 
 	const env0 = computeEnv(game.time / ENV.daySeconds);
 
@@ -283,6 +326,8 @@
 		uUwAmbIrr: { value: new THREE.Vector3(0.1, 0.1, 0.1) },
 		uUwDim: { value: UNDERWATER.dim },
 		uUwGlow: { value: UNDERWATER.glow },
+		uUwSeabedOn: { value: UNDERWATER.seabed ? 1 : 0 },
+		uUwSeabedD: { value: UNDERWATER.seabedDepthM },
 		uUwCausticFloor: { value: CAUSTICS.floor },
 		uUwCausticFocus: { value: CAUSTICS.formM },
 		uCausticMean: { value: null as THREE.Texture | null },
@@ -297,8 +342,9 @@
 		uUwSurfaceReflect: { value: UNDERWATER.surfaceReflect },
 		uUwFresnelGraze: { value: UNDERWATER.fresnelGrazing },
 		uUwEntryLoss: { value: UNDERWATER.entryLoss },
-		/** Where the caustic map holds real data (world rect); see caustics.ts. */
-		uCausticValid: { value: new THREE.Vector4(0, 0, 0, 0) }
+		/** Where the caustic map holds real data; see caustics.ts. */
+		uCausticValid: { value: new THREE.Vector4(0, 0, 0, 0) },
+		uCausticValidF: { value: 0 }
 	};
 
 	const waterUniforms = {
@@ -589,6 +635,8 @@ uniform vec3 uUwAmbIrr;
 uniform float uUwEntryLoss;
 uniform float uUwDim;
 uniform float uUwGlow;
+uniform float uUwSeabedOn;
+uniform float uUwSeabedD;
 uniform float uUwCausticFloor;
 uniform float uUwCausticFocus;
 uniform float uUwCausticBlur;
@@ -669,14 +717,21 @@ uniform float uUwAmbTint;
 uniform float uUwWrap;
 uniform float uUwSurfaceReflect;
 uniform float uUwFresnelGraze;
-uniform vec4 uCausticValid;
+uniform vec4 uCausticValid;   // xy = rect centre (world xz), z = right half-extent, w = near
+uniform float uCausticValidF; // far (up-screen) half-extent
 
-// The caustic map is only SPLATTED near activity (a capped tile budget);
-// beyond that rect it is cleared to zero, and zero would read as deep
-// shadow. Fade the pattern to neutral over a few metres outside the rect.
+// The caustic map is only SPLATTED over the padded view rect (a capped
+// tile budget); beyond that it is cleared to zero, and zero would read
+// as deep shadow. Fade the pattern to neutral over a few metres outside.
+// The rect lives in the SCREEN-ALIGNED basis (rotated 45deg to world
+// axes) and is asymmetric up-screen, where refraction shifts every floor
+// sample — see CausticMap.setViewRect.
 float causticValidity(vec2 beamXZ) {
-	vec2 vd = abs(beamXZ - uCausticValid.xy) - uCausticValid.zw;
-	return 1.0 - smoothstep(-3.0, 0.0, max(vd.x, vd.y));
+	vec2 d = beamXZ - uCausticValid.xy;
+	float a = abs(d.x * 0.70711 - d.y * 0.70711);
+	float b = (-d.x - d.y) * 0.70711;
+	float m = max(a - uCausticValid.z, max(-b - uCausticValid.w, b - uCausticValidF));
+	return 1.0 - smoothstep(-3.0, 0.0, m);
 }
 
 vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow) {
@@ -1434,23 +1489,25 @@ void main() {
 		vec3 P = vWorld + refr * tHit;
 		waterPath = tHit;
 		transmitted = shadeUnderwater(P, hitN, albedo, tHit, max(vWorld.y - P.y, 0.0));
-	} else if (refr.y < -0.001) {
+	} else if (uUwSeabedOn > 0.5 && refr.y < -0.001) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
 		// seabed — most of every underwater pixel — ignored the UNDERWATER
 		// knobs entirely and carried no caustics; the panel then read as
 		// "only affects the sphere". Intersect the refracted ray with the
 		// caustic plane and shade it like any other submerged surface.
-		float tFloor = (${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - vWorld.y) / refr.y;
+		float tFloor = (-uUwSeabedD - vWorld.y) / refr.y;
 		vec3 Pf = vWorld + refr * tFloor;
 		waterPath = tFloor;
 		transmitted = shadeUnderwater(
 			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(vWorld.y - Pf.y, 0.0));
 	} else {
-		// Total internal reflection or a grazing ray with no floor ahead:
-		// the old flat colour as a safe fallback.
-		transmitted = uFloorColor * (0.1 + 0.32 * uLightI);
-		waterPath = 40.0;
+		// Seabed off, total internal reflection, or a grazing ray with no
+		// floor ahead: the water column alone. uwVolume() is its
+		// infinite-depth asymptote — all in-scatter, nothing back from
+		// below — and the long waterPath lets extinction finish the job.
+		transmitted = uwVolume();
+		waterPath = 60.0;
 	}`}
 	// The return path to the eye: what survives (per channel, so colour
 	// goes in rainbow order) plus what the water column scatters IN over
@@ -4084,6 +4141,53 @@ void main() {
 			// it at geometry-build time ran before the camera's matrices
 			// existed, and the garbage quad culled the entire scan.
 			updateViewQuad();
+			// Hand the caustic splat the same view rect, in the
+			// screen-aligned basis around the domain centre (the boat).
+			// The corners already carry EDGE_MARGIN as the sway pad.
+			if (quadCorners.length === 8) {
+				let vHw = 0;
+				let vHn = 0;
+				let vHf = 0;
+				for (let i = 0; i < 4; i++) {
+					const dx = quadCorners[i * 2] - boat.x;
+					const dz = quadCorners[i * 2 + 1] - boat.z;
+					const a = Math.abs(dx * 0.70710678 - dz * 0.70710678);
+					const b = (-dx - dz) * 0.70710678;
+					if (a > vHw) vHw = a;
+					if (-b > vHn) vHn = -b;
+					if (b > vHf) vHf = b;
+				}
+				// Floor pixels shade through surface points DOWN-screen of
+				// them: the eye ray keeps travelling as it refracts, landing
+				// ~0.63 x depth up-screen (tan 32deg, the underwater angle of
+				// our 45deg view). The map must reach that far past the
+				// window top; near-surface receivers still need the base
+				// rect, so only the far side grows.
+				const floorD = UNDERWATER.seabed ? UNDERWATER.seabedDepthM : 0;
+				vHf += 0.63 * floorD;
+				// Receivers deeper than the beam plane sample the map along
+				// the refracted sun from where they sit; direction turns
+				// with the day, so pad every side for the worst walk — the
+				// REFRACTED tangent x the depth below the plane, uncapped
+				// except for sanity (the domain grows to hold it now).
+				const sunN = waterUniforms.uSunDir.value;
+				const slant = Math.hypot(sunN.x, sunN.z) / Math.max(sunN.y, 0.12);
+				const sinW = slant / Math.hypot(1, slant) / 1.33;
+				const sunPad = Math.min(
+					(sinW / Math.sqrt(1 - sinW * sinW)) *
+						Math.max(floorD - CAUSTIC_PLANE_DEPTH, 0),
+					60
+				);
+				// Grow the domain to whatever the rect demands (never below
+				// the load-time base): coverage stays complete at any seabed
+				// depth, trading texel size only when the depth actually
+				// asks for the reach.
+				causticMap.setExtent(
+					1.4143 * (vHw + sunPad + Math.max(vHn, vHf) + sunPad) + 4
+				);
+				causticMap.setViewRect(vHw + sunPad, vHn + sunPad, vHf + sunPad);
+				waterUniforms.uCausticExtent.value = causticMap.extent;
+			}
 			const wind = windVector(waveTime);
 			waterUniforms.uWind.value.set(wind.x, wind.z);
 			// The collar leans downstream on the same carry the foam field
@@ -4214,7 +4318,13 @@ void main() {
 				const sharp =
 					clear + (mixc(SPECULAR.sharpOvercast, SPECULAR.sharpOvercastStorm) - clear) * dif;
 				waterUniforms.uSpecSharpCore.value = sharp;
-				uwUniforms.uCausticValid.value.copy(causticMap.validRegion);
+				uwUniforms.uCausticValid.value.set(
+					causticMap.validCenter.x,
+					causticMap.validCenter.y,
+					causticMap.validHw,
+					causticMap.validHn
+				);
+				uwUniforms.uCausticValidF.value = causticMap.validHf;
 				uwUniforms.uCausticMean.value = causticMap.meanTexture;
 				// One sphere height, pushed to every consumer.
 				SPHERE_CY = UNDERWATER.sphereDepth;
@@ -4251,6 +4361,8 @@ void main() {
 				uwUniforms.uUwDiffuseDepth.value = CAUSTICS.diffuseDepthM;
 				uwUniforms.uUwDim.value = UNDERWATER.dim;
 				uwUniforms.uUwGlow.value = UNDERWATER.glow;
+				uwUniforms.uUwSeabedOn.value = UNDERWATER.seabed ? 1 : 0;
+				uwUniforms.uUwSeabedD.value = UNDERWATER.seabedDepthM;
 				uwUniforms.uUwCausticFloor.value = CAUSTICS.floor;
 				uwUniforms.uUwCausticFocus.value = CAUSTICS.formM;
 				uwUniforms.uUwCausticBlur.value = CAUSTICS.blurPerM;
