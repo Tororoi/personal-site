@@ -1294,6 +1294,72 @@ export function restHeight(u: number, v: number, t: number, ampScale = 1): numbe
 }
 
 /**
+ * The water's own horizontal ORBITAL velocity at a rest point — the exact
+ * time-derivative of the Gerstner displacement, not a finite difference.
+ * A difference taken along a MOVING sample track measures boatVelocity x
+ * grad(sway) as well (with frozen waves, ONLY that), which once pushed a
+ * driving boat along crest lines instead of with the wave's momentum.
+ * The analytic form is phase-locked to elevation: strongest forward flow
+ * at the crest, backward in the trough, zero mid-face.
+ */
+export function orbitalVelocityInto(
+  out: { x: number; z: number },
+  u: number,
+  v: number,
+  t: number,
+  ampScale = 1,
+  depth = 0,
+): void {
+  let vx = 0
+  let vz = 0
+  for (const w of waves) {
+    const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
+    // Deep-water orbits shrink as e^(-k depth) — PER COMPONENT, so a
+    // submerged hull stops feeling the chop (large k dies within a
+    // metre) while the long swell still reaches it. The textbook
+    // decaying-circles picture, exact because the sum is per-wave.
+    const s = Math.sin(theta) * w.q * w.amp * w.omega * Math.exp(-w.k * depth)
+    vx += s * w.dirX
+    vz += s * w.dirZ
+  }
+  out.x = vx * ampScale
+  out.z = vz * ampScale
+}
+
+/**
+ * Surface slope at a rest point, LOW-PASSED by wavelength: components
+ * shorter than minLambda/2 contribute nothing, ramping to full weight at
+ * minLambda. For hull physics — a boat bridges waves shorter than
+ * itself, its waterline averaging their slopes away, while a long swell
+ * tilts the whole vessel and slides it. Analytic, so the filter is exact
+ * per component instead of an averaging baseline's sinc-shaped guess.
+ */
+export function filteredSlopeInto(
+  out: { x: number; z: number },
+  u: number,
+  v: number,
+  t: number,
+  minLambda: number,
+  ampScale = 1,
+): void {
+  let sx = 0
+  let sz = 0
+  const twoPi = Math.PI * 2
+  for (const w of waves) {
+    const lambda = twoPi / w.k
+    const t01 = Math.min(Math.max((lambda - minLambda * 0.5) / (minLambda * 0.5), 0), 1)
+    if (t01 <= 0) continue
+    const g = t01 * t01 * (3 - 2 * t01)
+    const theta = (u * w.dirX + v * w.dirZ) * w.k - w.omega * t + w.phase
+    const c = Math.cos(theta) * w.amp * w.k * g
+    sx += c * w.dirX
+    sz += c * w.dirZ
+  }
+  out.x = sx * ampScale
+  out.z = sz * ampScale
+}
+
+/**
  * Rest-point state for sampleSurfaceTracked: one per floating object,
  * carried across frames.
  */

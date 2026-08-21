@@ -2094,7 +2094,7 @@ export const CAUSTICS = {
  */
 export const BOAT = {
   /** m/s^2 at full throttle. */
-  thrust: 5.0,
+  thrust: 6.0,
   reverseThrust: 1.5,
   /** Linear + quadratic hull drag; together they set the top speed
    * (~5.8 m/s at the defaults: thrust = dragLinear*v + dragQuad*v^2). */
@@ -2103,15 +2103,148 @@ export const BOAT = {
   /** rad/s of rudder at speed, and the fraction available at standstill. */
   turnRate: 1.5,
   turnMin: 0,
+  /**
+   * How far below its mount the propeller reaches, metres — the depth of
+   * the air-control gate. Control holds while the water surface is
+   * within this distance below the prop mount, because a real lower
+   * unit sits DEEP: a Whaler's prop is ~0.4m under the transom, so a
+   * small rise of the stern does not stop the screw biting. The first
+   * version used a 5cm grace and cut control on the slightest lift.
+   */
+  propDepthM: 1.0,
+  /**
+   * WATER-ENTRY resistance (slamming), an upward drag of
+   * entryDrag x (relative fall speed)^2 while penetrating. Real entry
+   * force scales with rho v^2 x presented area — the faster the impact,
+   * the harder water resists, which is why a dropped hull slaps to a
+   * stop near the surface instead of submarining. Pitch streamlines it:
+   * a steep bow-first attitude cuts the slam by up to 80%, so a diving
+   * entry CAN still bury the bow. 2.5 stops a 6 m/s flat drop in about
+   * 20cm; the old spring-only model let the same drop sink ~2m.
+   */
+  entryDrag: 2.0,
+  /**
+   * ARCADE AIR CONTROL: when true, throttle and rudder keep working with
+   * the prop out of the water. False is the physical model — a motor
+   * screaming in air moves nothing. (Momentum behaves physically either
+   * way: no water drag in the air, yaw keeps spinning.)
+   */
+  airControl: false,
+  /**
+   * How far FORWARD of the hull's centre the turn pivots, metres. A boat
+   * does not spin like a turntable: the rudder pushes the STERN
+   * sideways, so the hull rotates about a point near the forward third —
+   * the bow holds its line while the stern sweeps out. 1.5 puts the
+   * pivot a third forward on this hull, giving the transom a ~4m arm.
+   * 0 restores centre-spin. Water-only: an airborne hull genuinely does
+   * rotate about its own centre of mass.
+   */
+  turnPivotM: 1.5,
+  /**
+   * How fast the yaw rate chases the rudder's command, 1/s. Yaw is a
+   * STATE with momentum now, not a direct rotation: high values feel like
+   * the old instant steering, but a launch no longer freezes a turn
+   * mid-spin — the boat keeps rotating through the air.
+   */
+  yawResponse: 4,
+  /**
+   * Yaw damping when the hull is wet but the prop is OUT (stern kicked
+   * clear over a crest): the water still sheds spin, just without the
+   * rudder's authority. Fully airborne sheds none.
+   */
+  yawWaterDrag: 1.2,
+  /**
+   * How hard the keel bleeds SIDEWAYS slip, 1/s. Velocity is a vector
+   * now, coupled to the facing only through the water: the keel slides
+   * freely along its own axis and resists crossing it, which is what
+   * makes a boat carve onto its nose instead of teleporting its momentum
+   * whenever the bow swings. High = rails like the old model; low =
+   * drifty; airborne = zero, so a launch carries the true launch vector
+   * no matter how the hull spins on the way down.
+   */
+  keelGrip: 4,
+  /**
+   * Shortest wavelength that slides the boat, metres. The hull BRIDGES
+   * waves shorter than itself — their slopes average away across the
+   * waterline — so only components with lambda above ~half this ramp in,
+   * full weight at this value. 24 means the swell bands slide the boat
+   * while wind chop and ripple do nothing, however steep.
+   */
+  slideLambdaM: 24,
+  /**
+   * Fraction of the true gravity-slide felt on a tilted surface. A
+   * floating hull's buoyancy is normal to the water while gravity is
+   * straight down; the tangential remainder, g x surface-gradient,
+   * accelerates it downslope — real boats surf exactly this force. 1 is
+   * physical (a 0.2-slope face pulls ~2 m/s^2); default well below,
+   * per "minor effect". Steeper waves push harder for free, since the
+   * gradient IS the steepness.
+   */
+  slopeSlide: 0.7,
+  /**
+   * ORBITAL FOLLOWING, not push: water particles in a non-breaking wave
+   * travel closed circles, and a floating hull rides that circle — the
+   * elliptical surge of a moored boat, with ZERO net thrust over a wave
+   * period. Implemented as hull drag acting in the moving water's frame.
+   * 1 = the hull fully rides the orbit; 0 = the water's motion is
+   * ignored. Net propulsion belongs to breakPush below, because only a
+   * BREAKING wave actually throws water.
+   */
+  orbitalMotion: 0.5,
+  /**
+   * BREAKING-CREST push, m/s^2 at a full fold. Where the orbit fails —
+   * the Jacobian says the crest is folding — water is thrown forward
+   * near phase speed onto the front face, and THAT is the shove a hull
+   * really feels from waves. Fires only on a RISING front face with a
+   * breaking crest uphill of the hull, shoves straight down the face
+   * (forward-only by construction), and scales with how far that crest
+   * towers above the boat — 1m of crest overhead is nominal, a 2.5m
+   * storm wall hits 2.5x, a knee-high fold gets the 0.3 floor. This is
+   * the surf mechanic.
+   */
+  breakPush: 5,
   /** Heave: natural bob period (s) and damping ratio. Longer and more
    * damped than the buoys — a hull, not a cork. */
-  bobPeriod: 1.6,
-  bobZeta: 0.15,
+  /** THE WEIGHT DIALS. Period is inertia against buoyancy: short = cork
+   * that chases every crest, long = mass that lags and cuts through.
+   * Zeta is how dead the response is: low rings and OVERSHOOTS — and the
+   * overshoot velocity is what flings a hull airborne off a crest. The
+   * airborne threshold also scales: detach needs g/(2pi/T)^2 metres above
+   * equilibrium — 0.64m at T=1.6, 1.95m at T=2.8. */
+  bobPeriod: 2.0,
+  bobZeta: 0.2,
   maxSubmersion: 0.5,
-  /** Tilt toward the water slope: gain, spring stiffness, damping ratio. */
-  tiltGain: 1.5,
-  righting: 10,
-  tiltZeta: 0.5,
+  /**
+   * How much waves ROLL the boat (side to side) and PITCH it (fore and
+   * aft) — separate authorities over the same wave slope, decomposed in
+   * the boat's own frame. The shared spring (righting, tiltZeta) still
+   * provides the WEIGHT: the hull does not snap to the water's angle, it
+   * swings toward it with momentum and overshoot. A beamy hull rolls
+   * less than it pitches; these two set that character.
+   */
+  rollGain: 1.5,
+  pitchGain: 1.5,
+  /**
+   * Resting stern-down trim, radians: the engine's weight sits the
+   * transom lower in the water, so the hull's neutral attitude is
+   * slightly bow-up before speed trim adds to it. ~0.04 rad is 2.3
+   * degrees.
+   */
+  sternTrim: 0.04,
+  /**
+   * THE SWING LEVERS, per axis. Zeta is how much the hull swings back
+   * and forth: below ~0.5 it overshoots the water's angle and rocks
+   * through visible cycles before settling; near 1 it eases on with no
+   * overshoot. Righting is the swing SPEED (spring stiffness) — how
+   * quickly each axis chases its target. rollGain/pitchGain above set
+   * how far the waves command; these set the character of getting
+   * there. Roll defaults looser than pitch because boats ROLL — a hull
+   * is length-damped in pitch but rocks freely on its beam.
+   */
+  pitchRighting: 20,
+  pitchZeta: 0.75,
+  rollRighting: 8,
+  rollZeta: 0.25,
   /** Bow-up trim per m/s of forward speed, radians. */
   trimPerSpeed: 0.028,
   /**

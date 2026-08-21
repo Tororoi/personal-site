@@ -16,7 +16,10 @@
 		waveUniformA,
 		waveUniformB,
 		seaDrive,
-		seaMetrics
+		seaMetrics,
+		surfaceHeight,
+		orbitalVelocityInto,
+		filteredSlopeInto
 	} from './waves';
 	import {
 		events,
@@ -3341,20 +3344,35 @@ void main() {
 		z: 1,
 		/** Radians; direction of travel is (cos, sin) in xz. */
 		heading: 3.93,
+		/** Forward speed along the facing, DERIVED from (vx, vz) each frame
+		 * — kept because trim, lift, wake and rudder authority all key on
+		 * it. The velocity vector is the state. */
 		speed: 0,
+		vx: 0,
+		vz: 0,
+		yawRate: 0,
+		/** Water's own horizontal (orbital) velocity at the hull —
+		 * analytic, from orbitalVelocityInto. */
+		wvx: 0,
+		wvz: 0,
 		y: 0,
 		vy: 0,
 		wet: true,
-		tx: 0,
-		tz: 0,
-		twx: 0,
-		twz: 0,
+		/** Tilt state in the BOAT'S frame: pitch (bow-up +) and roll, each
+		 * on its own spring so their swing characters differ. */
+		pitchT: 0,
+		rollT: 0,
+		pitchW: 0,
+		rollW: 0,
 		pw: 0,
 		prevSpeed: 0,
 		accelSm: 0,
 		rest: { u: -1, v: 1 }
 	};
 	const boatSurf = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 };
+	const propScratch = new THREE.Vector3();
+	const orbScratch = { x: 0, z: 0 };
+	const slideScratch = { x: 0, z: 0 };
 	const boatKeys = { fwd: false, back: false, left: false, right: false };
 	function boatKey(e: KeyboardEvent, down: boolean) {
 		switch (e.key) {
@@ -3590,26 +3608,161 @@ void main() {
 		// DRIVE. Quadratic + linear hull drag set the top speed (~5.8 m/s
 		// at the defaults); rudder authority grows with way on, and flips
 		// when making sternway, like a real helm.
-		const throttle = (boatKeys.fwd ? BOAT.thrust : 0) - (boatKeys.back ? BOAT.reverseThrust : 0);
-		boat.speed += throttle * dt;
-		boat.speed -= (BOAT.dragLinear * boat.speed + BOAT.dragQuad * boat.speed * Math.abs(boat.speed)) * dt;
+		// The motor only works IN THE WATER: prop position from last frame's
+		// pose (a control gate tolerates one frame of staleness), against
+		// the surface height there. A prop screaming in air moves nothing
+		// and steers nothing; a hull clear of the water sheds no momentum
+		// (hull drag gates on the heave contact, since the hull can drag
+		// while a lifted stern has the prop out).
+		propScratch.set(-2.48, -0.2, 0);
+		boatMesh.localToWorld(propScratch);
+		const propWet =
+			BOAT.airControl ||
+			propScratch.y - BOAT.propDepthM <
+				surfaceHeight(propScratch.x, propScratch.z, waveTime);
+		const throttle = propWet
+			? (boatKeys.fwd ? BOAT.thrust : 0) - (boatKeys.back ? BOAT.reverseThrust : 0)
+			: 0;
 		const steer = (boatKeys.right ? 1 : 0) - (boatKeys.left ? 1 : 0);
 		const authority = BOAT.turnMin + (1 - BOAT.turnMin) * Math.min(Math.abs(boat.speed) / 3, 1);
-		boat.heading += steer * BOAT.turnRate * authority * dt * (boat.speed < -0.2 ? -1 : 1);
-		boat.x += Math.cos(boat.heading) * boat.speed * dt;
-		boat.z += Math.sin(boat.heading) * boat.speed * dt;
-		// Surge, low-passed: drives the lean-back-under-power trim.
-		const fwdAccel = dt > 0 ? (boat.speed - boat.prevSpeed) / dt : 0;
+		// YAW carries momentum: the rate chases the rudder's command while
+		// the prop bites, the water damps it when only the hull is wet,
+		// and nothing touches it in the air — a launch mid-turn keeps
+		// spinning instead of freezing.
+		const yawCmd = steer * BOAT.turnRate * authority * (boat.speed < -0.2 ? -1 : 1);
+		if (propWet) {
+			boat.yawRate += (yawCmd - boat.yawRate) * Math.min(dt * BOAT.yawResponse, 1);
+		} else if (boat.wet) {
+			boat.yawRate -= boat.yawRate * Math.min(dt * BOAT.yawWaterDrag, 1);
+		}
+		const headingBefore = boat.heading;
+		boat.heading += boat.yawRate * dt;
+
+		// VELOCITY IS A VECTOR, coupled to the facing only through the
+		// water. Thrust pushes along the facing; the hull's drag is
+		// ANISOTROPIC — nearly free along the keel, keelGrip across it —
+		// which is what carves the course onto the nose. In the air
+		// neither applies: the launch vector persists while the hull
+		// spins freely above it.
+		const fwdX = Math.cos(boat.heading);
+		const fwdZ = Math.sin(boat.heading);
+		// Turn about a pivot FORWARD of centre, not the centre: rotating
+		// the hull about that point displaces the centre sideways and
+		// sweeps the stern on a long arm — the rudder-kick a turntable
+		// spin lacks. Water-only; an airborne hull spins about its mass.
+		if (boat.wet && BOAT.turnPivotM > 0) {
+			boat.x += (Math.cos(headingBefore) - fwdX) * BOAT.turnPivotM;
+			boat.z += (Math.sin(headingBefore) - fwdZ) * BOAT.turnPivotM;
+		}
+		boat.vx += fwdX * throttle * dt;
+		boat.vz += fwdZ * throttle * dt;
+		if (boat.wet) {
+			// Drag acts in the WATER'S frame: the water itself moves with
+			// the waves' orbital motion, and drag pulls the hull toward
+			// that motion, not toward rest — which is the wave push, felt
+			// through the same anisotropy (hard sideways, gentle fore-aft).
+			const wpx = boat.wvx * BOAT.orbitalMotion;
+			const wpz = boat.wvz * BOAT.orbitalMotion;
+			const relX = boat.vx - wpx;
+			const relZ = boat.vz - wpz;
+			let f = relX * fwdX + relZ * fwdZ;
+			let latX = relX - f * fwdX;
+			let latZ = relZ - f * fwdZ;
+			f -= (BOAT.dragLinear * f + BOAT.dragQuad * f * Math.abs(f)) * dt;
+			const bleed = Math.min(BOAT.keelGrip * dt, 1);
+			latX -= latX * bleed;
+			latZ -= latZ * bleed;
+			boat.vx = wpx + f * fwdX + latX;
+			boat.vz = wpz + f * fwdZ + latZ;
+		}
+		boat.speed = boat.vx * fwdX + boat.vz * fwdZ;
+		boat.x += boat.vx * dt;
+		boat.z += boat.vz * dt;
+		// Surge, low-passed: drives the lean-back-under-power trim. Only
+		// tracked with the hull in the water — an airborne spin swings the
+		// forward PROJECTION without any real surge.
+		const fwdAccel = dt > 0 && boat.wet ? (boat.speed - boat.prevSpeed) / dt : 0;
 		boat.prevSpeed = boat.speed;
 		boat.accelSm += (fwdAccel - boat.accelSm) * Math.min(dt / 0.3, 1);
 
 		// HEAVE — the buoys' spring with the boat's constants. Freeboard
 		// lives in the hull geometry, so equilibrium is the surface itself.
 		sampleOceanTracked(boatSurf, boat.rest, boat.x, boat.z, waveTime);
+		// Orbital velocity of the water at the hull: ANALYTIC time
+		// derivative at the tracked rest point. A finite difference of the
+		// sway along the boat's own track measured boat x grad(sway) too
+		// (with frozen waves, ONLY that) — the push ran along crest lines
+		// instead of with the wave's momentum, and needed a step-guard
+		// whose clipping once rectified a backward drift. Exact, smooth,
+		// guard-free.
+		// Orbits shrink with depth (e^-k per component), so a hull driven
+		// under by a slam or a lagging heave feels less of the water's
+		// motion — the chop vanishes first, the swell persists.
+		orbitalVelocityInto(
+			orbScratch,
+			boat.rest.u,
+			boat.rest.v,
+			waveTime,
+			1,
+			Math.max(boatSurf.height - boat.y, 0)
+		);
+		boat.wvx = orbScratch.x;
+		boat.wvz = orbScratch.z;
 		const wl = boatSurf.height;
 		const raw = dt > 0 ? (wl - boat.pw) / dt : 0;
 		const rise = Math.abs(raw) > BUOY_STEP_RATE ? 0 : THREE.MathUtils.clamp(raw, -6, 6);
 		boat.pw = wl;
+
+		// SURF PUSH — the only true wave propulsion, forward by
+		// construction. Direction comes from GEOMETRY, not flow: orbital
+		// flow is in phase with elevation, so on the lower front face (and
+		// at points inside a fold loop) the water moves BACKWARD, and a
+		// flow-directed shove pushed the boat behind the wave. On the
+		// front face, downhill IS the wave's travel direction, and only
+		// the front face has a RISING surface — so: rising gate, probe
+		// UPHILL for the breaking crest (it stands behind and above the
+		// face it throws water onto), shove DOWNHILL. A back face fails
+		// the rising gate; a trough has no uphill crest breaking; the
+		// shove can never point backward.
+		if (boat.wet && BOAT.breakPush > 0 && rise > 0.05) {
+			const ggx =
+				(surfaceHeight(boat.x + 1, boat.z, waveTime) -
+					surfaceHeight(boat.x - 1, boat.z, waveTime)) /
+				2;
+			const ggz =
+				(surfaceHeight(boat.x, boat.z + 1, waveTime) -
+					surfaceHeight(boat.x, boat.z - 1, waveTime)) /
+				2;
+			const gMag = Math.hypot(ggx, ggz);
+			if (gMag > 0.02) {
+				const ux = ggx / gMag;
+				const uz = ggz / gMag;
+				let breaking = THREE.MathUtils.clamp((0.4 - boatSurf.jacobian) / 0.5, 0, 1);
+				const probe1 = sampleOcean(boat.x + ux * 2.5, boat.z + uz * 2.5, waveTime, 1, 1);
+				breaking = Math.max(
+					breaking,
+					THREE.MathUtils.clamp((0.4 - probe1.jacobian) / 0.5, 0, 1) * 0.9
+				);
+				const probe2 = sampleOcean(boat.x + ux * 6, boat.z + uz * 6, waveTime, 1, 1);
+				breaking = Math.max(
+					breaking,
+					THREE.MathUtils.clamp((0.4 - probe2.jacobian) / 0.5, 0, 1) * 0.55
+				);
+				if (breaking > 0) {
+					// DYNAMIC with crest size: the mass and energy of thrown
+					// water scale with how far the breaking crest TOWERS over
+					// the hull, so the shove is folded x crestRise. 1m of
+					// crest above you = the nominal breakPush; a 2.5m storm
+					// wall = 2.5x (capped); a knee-high fold at your own
+					// waterline = the 0.3 floor.
+					const crestRise = Math.max(probe1.height - wl, probe2.height - wl);
+					const sizeF = THREE.MathUtils.clamp(crestRise / 1.0, 0.3, 2.5);
+					const shove = BOAT.breakPush * breaking * sizeF * dt;
+					boat.vx -= ux * shove;
+					boat.vz -= uz * shove;
+				}
+			}
+		}
 		const w0 = (2 * Math.PI) / BOAT.bobPeriod;
 		const spring = w0 * w0;
 		const damp = 2 * BOAT.bobZeta * w0;
@@ -3623,7 +3776,23 @@ void main() {
 		const disp = wl + lift - boat.y;
 		const airborne = disp <= -BUOY_GRAVITY / spring;
 		let accel = Math.max(spring * Math.min(disp, BOAT.maxSubmersion), -BUOY_GRAVITY);
-		if (!airborne) accel -= damp * (boat.vy - rise);
+		if (!airborne) {
+			accel -= damp * (boat.vy - rise);
+			// SLAMMING: water resists entry with a rho-v^2 drag the spring
+			// alone cannot represent (its push caps near half a g — a fast
+			// landing submarined ~2m). Quadratic in the relative fall
+			// speed, and STREAMLINED by pitch: a steep bow-first attitude
+			// presents a point instead of a flat bottom and keeps most of
+			// its plunge — the one entry that should still go deep.
+			const relVy = boat.vy - rise;
+			if (relVy < 0) {
+				const pitchF = boat.pitchT;
+				const streamlined = 1 - Math.min(Math.abs(pitchF) / 0.35, 1) * 0.8;
+				const slam = BOAT.entryDrag * relVy * relVy * streamlined;
+				// never enough to reverse the relative motion in one step
+				accel += Math.min(slam, -relVy / Math.max(dt, 1e-4));
+			}
+		}
 		boat.vy += accel * dt;
 		boat.y += boat.vy * dt;
 		if (!airborne && !boat.wet) {
@@ -3641,26 +3810,46 @@ void main() {
 
 		// TILT toward the water slope, sampled over hull-sized baselines
 		// (cold 1-iteration samples on purpose — see the buoy tilt note).
-		let tgtX = 0;
-		let tgtZ = 0;
+		let pitchTgt = 0;
+		let rollTgt = 0;
 		if (!airborne) {
-			tgtX =
-				(-(sampleOcean(boat.x + 1.6, boat.z, waveTime, 1, 1).height -
+			const gX =
+				(sampleOcean(boat.x + 1.6, boat.z, waveTime, 1, 1).height -
 					sampleOcean(boat.x - 1.6, boat.z, waveTime, 1, 1).height) /
-					3.2) *
-				BOAT.tiltGain;
-			tgtZ =
-				(-(sampleOcean(boat.x, boat.z + 0.9, waveTime, 1, 1).height -
+				3.2;
+			const gZ =
+				(sampleOcean(boat.x, boat.z + 0.9, waveTime, 1, 1).height -
 					sampleOcean(boat.x, boat.z - 0.9, waveTime, 1, 1).height) /
-					1.8) *
-				BOAT.tiltGain;
+				1.8;
+			// Slope in the BOAT'S frame: along-keel commands pitch,
+			// across-beam commands roll. side = fwd x up = (-fwdZ, fwdX).
+			const gAlong = gX * fwdX + gZ * fwdZ;
+			const gAcross = gX * -fwdZ + gZ * fwdX;
+			pitchTgt = -gAlong * BOAT.pitchGain;
+			rollTgt = -gAcross * BOAT.rollGain;
+			// GRAVITY SLIDE: buoyancy is normal to a tilted surface, gravity
+			// is not — the tangential remainder g x slope pulls the hull
+			// downslope. The slope is WAVELENGTH-FILTERED (slideLambdaM):
+			// the hull bridges short chop however steep, so only the big
+			// waves slide it. Tilt above keeps the full gradient — the
+			// hull still visibly pitches on chop it does not slide on.
+			filteredSlopeInto(slideScratch, boat.rest.u, boat.rest.v, waveTime, BOAT.slideLambdaM);
+			boat.vx -= 9.8 * slideScratch.x * BOAT.slopeSlide * dt;
+			boat.vz -= 9.8 * slideScratch.z * BOAT.slopeSlide * dt;
 		}
-		const spr = airborne ? 0 : BOAT.righting;
-		const tDrag = airborne ? 0.5 : 2 * BOAT.tiltZeta * Math.sqrt(BOAT.righting);
-		boat.twx += (spr * (tgtX - boat.tx) - tDrag * boat.twx) * dt;
-		boat.twz += (spr * (tgtZ - boat.tz) - tDrag * boat.twz) * dt;
-		boat.tx += boat.twx * dt;
-		boat.tz += boat.twz * dt;
+		// Per-axis springs: each axis chases its target with its OWN
+		// stiffness and damping, so pitch can sit taut while roll rocks
+		// through cycles — the swing character lives in the zetas.
+		{
+			const kP = airborne ? 0 : BOAT.pitchRighting;
+			const dP = airborne ? 0.5 : 2 * BOAT.pitchZeta * Math.sqrt(BOAT.pitchRighting);
+			boat.pitchW += (kP * (pitchTgt - boat.pitchT) - dP * boat.pitchW) * dt;
+			boat.pitchT += boat.pitchW * dt;
+			const kR = airborne ? 0 : BOAT.rollRighting;
+			const dR = airborne ? 0.5 : 2 * BOAT.rollZeta * Math.sqrt(BOAT.rollRighting);
+			boat.rollW += (kR * (rollTgt - boat.rollT) - dR * boat.rollW) * dt;
+			boat.rollT += boat.rollW * dt;
+		}
 
 		// WAKE: a continuous quiet poke at the stern. The wave equation
 		// turns the moving disturbance into the trailing V by itself.
@@ -3678,17 +3867,27 @@ void main() {
 
 		// POSE: orthonormal basis from heading and the tilt normal, plus
 		// speed trim (rotating about the side axis lifts the bow).
-		boatUpV.set(boat.tx, 1, boat.tz).normalize();
+		boatUpV
+			.set(
+				boat.pitchT * fwdX + boat.rollT * -fwdZ,
+				1,
+				boat.pitchT * fwdZ + boat.rollT * fwdX
+			)
+			.normalize();
 		boatFwdV.set(Math.cos(boat.heading), 0, Math.sin(boat.heading));
 		boatFwdV.addScaledVector(boatUpV, -boatFwdV.dot(boatUpV)).normalize();
 		boatSideV.crossVectors(boatFwdV, boatUpV);
 		boatBasis.makeBasis(boatFwdV, boatUpV, boatSideV);
 		boatMesh.quaternion.setFromRotationMatrix(boatBasis);
-		const trim = THREE.MathUtils.clamp(
-			BOAT.trimPerSpeed * boat.speed + BOAT.trimPerAccel * boat.accelSm,
-			-0.08,
-			0.2
-		);
+		// sternTrim: the engine's weight sits the transom lower, a static
+		// bow-up bias under the dynamic speed and surge trim.
+		const trim =
+			BOAT.sternTrim +
+			THREE.MathUtils.clamp(
+				BOAT.trimPerSpeed * boat.speed + BOAT.trimPerAccel * boat.accelSm,
+				-0.08,
+				0.2
+			);
 		boatTrimQ.setFromAxisAngle(boatSideV, trim);
 		boatMesh.quaternion.premultiply(boatTrimQ);
 		boatMesh.position.set(boat.x, boat.y, boat.z);
