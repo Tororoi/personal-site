@@ -77,7 +77,8 @@
 		PLUME,
 		SEA,
 		UNIFIED,
-		UNDERWATER } from './tuning';
+		UNDERWATER,
+		INSPECT } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
 	import { whitewaterLightGlsl, WHITEWATER_UNIFORM_DECLS } from './whitewater';
 	import { advanceCurrent } from './current';
@@ -100,6 +101,28 @@
 	const todParam = urlParams.get('tod');
 	if (todParam !== null) game.time = ENV.daySeconds * parseFloat(todParam);
 	const zoom = mobile ? 18 : 26;
+
+	// CAMERA AXIS. Stock iso offset is (34, 30, 34) — view azimuth 225deg,
+	// elevation ~32deg, distance 56.9. The INSPECT camera knobs re-aim it
+	// (camYawDeg rotates about the boat; camElevDeg replaces the down-look
+	// angle, 0 = stock, floored at 5) so a wave can be watched in
+	// cross-section. Everything angle-dependent derives from here: the
+	// camera itself, uViewDir, the specular eye, and the water mesh's
+	// footprint. The HUD compass and the caustic coverage basis keep their
+	// stock-view alignment and sit wrong at other angles — inspection, not
+	// play.
+	const CAM_DIST = Math.hypot(34, 30, 34);
+	const CAM_ELEV_STOCK = Math.asin(30 / CAM_DIST);
+	const CAM_ELEV =
+		INSPECT.camElevDeg > 0
+			? (Math.max(INSPECT.camElevDeg, 5) * Math.PI) / 180
+			: CAM_ELEV_STOCK;
+	const CAM_AZ = Math.PI / 4 + (INSPECT.camYawDeg * Math.PI) / 180;
+	const CAM_AXIS = new THREE.Vector3(
+		Math.cos(CAM_ELEV) * Math.cos(CAM_AZ),
+		Math.sin(CAM_ELEV),
+		Math.cos(CAM_ELEV) * Math.sin(CAM_AZ)
+	);
 
 	// ---------- Water ----------
 	// The plane is fitted to THIS window's actual ground footprint: ortho
@@ -167,7 +190,13 @@
 		// and rotate it into place. EDGE_MARGIN still pads for sway and
 		// crest reveal.
 		const w = 2 * (window.innerWidth / zoom / 2 + EDGE_MARGIN);
-		const h = 2 * (1.8904 * (window.innerHeight / zoom / 2) + EDGE_MARGIN);
+		// The screen-up footprint stretches as 1/sin(elev) (stock 1.89x),
+		// and crest reveal grows as 1/tan(elev) — a lower camera sees
+		// further behind every crest, so the margin scales with it too.
+		const reveal = Math.min(Math.tan(CAM_ELEV_STOCK) / Math.tan(CAM_ELEV), 5);
+		const h =
+			2 *
+			(window.innerHeight / zoom / 2 / Math.sin(CAM_ELEV) + EDGE_MARGIN * reveal);
 		const geometry = new THREE.PlaneGeometry(
 			w,
 			h,
@@ -175,7 +204,10 @@
 			Math.min(Math.round(h / spacing), segCap)
 		);
 		geometry.rotateX(-Math.PI / 2);
-		geometry.rotateY(Math.PI / 4);
+		// Align the rect's width axis with the screen-x direction for the
+		// CURRENT view azimuth (stock folds to the familiar PI/4).
+		const viewAz = CAM_AZ + Math.PI;
+		geometry.rotateY(Math.atan2(-Math.cos(viewAz), -Math.sin(viewAz)));
 		return geometry;
 	}
 	let waterGeometry = $state(buildWaterGeometry());
@@ -442,7 +474,7 @@
 		uSunColor: { value: new THREE.Color('#fff2d0') },
 		uSunI: { value: 1.2 },
 		// Constant for the ortho camera: unit vector from scene toward camera.
-		uViewDir: { value: new THREE.Vector3(34, 30, 34).normalize() },
+		uViewDir: { value: CAM_AXIS.clone() },
 		// True camera position, for the perspective experiment. Under the
 		// isometric camera nothing reads it — every pixel shares uViewDir.
 		// The viewpoint the specular converges on. Under the isometric camera
@@ -900,13 +932,13 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	const skyScratch = new THREE.Color();
 	const uwScratch = new THREE.Color();
 
-	const BASE_CAM_DIST = Math.hypot(34, 30, 34);
+	const BASE_CAM_DIST = CAM_DIST;
 	// The simulated viewpoint the specular converges on. Distance sets the
 	// fan (focus); height, scaled separately, sets how far the reflection
 	// travels as the sun lowers. Static under the isometric camera; the
 	// perspective branch overwrites it with the real position below.
 	{
-		const d = new THREE.Vector3(34, 30, 34).normalize().multiplyScalar(SPECULAR.cameraEyeDistance);
+		const d = CAM_AXIS.clone().multiplyScalar(SPECULAR.cameraEyeDistance);
 		d.y *= SPECULAR.cameraEyeHeight;
 		waterUniforms.uCamPos.value.copy(d);
 	}
@@ -3736,7 +3768,11 @@ void main() {
 	const boatSideV = new THREE.Vector3();
 	const boatBasis = new THREE.Matrix4();
 	const boatTrimQ = new THREE.Quaternion();
-	const ISO_CAM = [34, 30, 34] as const;
+	const ISO_CAM = [
+		CAM_AXIS.x * CAM_DIST,
+		CAM_AXIS.y * CAM_DIST,
+		CAM_AXIS.z * CAM_DIST
+	] as const;
 
 	function updateBoat(dt: number) {
 		// DRIVE. Quadratic + linear hull drag set the top speed (~5.8 m/s
@@ -4736,7 +4772,7 @@ void main() {
 {:else}
 	<T.OrthographicCamera
 		makeDefault
-		position={[34, 30, 34]}
+		position={[ISO_CAM[0], ISO_CAM[1], ISO_CAM[2]]}
 		{zoom}
 		near={1}
 		far={400}

@@ -21,7 +21,7 @@
  */
 
 import * as THREE from 'three'
-import { CURRENT, SEA, UNIFIED } from './tuning'
+import { CURRENT, INSPECT, SEA, UNIFIED } from './tuning'
 
 export type WaveParams = {
   /** Unit direction of travel. */
@@ -725,7 +725,7 @@ export function applySeaState(state: number, chopOverride: number) {
   )
   if (chopOverride >= 0) next.chop = chopOverride
   Object.assign(activeField, next)
-  const fresh = generateWaves(activeField)
+  const fresh = INSPECT.simpleSea ? simpleSeaWaves() : generateWaves(activeField)
   if (fresh.length !== waves.length) {
     throw new Error(
       `sea state changed the component count (${waves.length} -> ${fresh.length}). ` +
@@ -953,8 +953,31 @@ export const activeField: WaveFieldConfig = cloneField(
 // specular's chop blend — reads the patched value and follows.
 if (SEA.chopOverride >= 0) activeField.chop = SEA.chopOverride
 
+/**
+ * ISOLATION override (INSPECT.simpleSea): one large rolling wave instead
+ * of the banded spectrum, so behaviour can be judged against a single
+ * readable crest. Steepness is given as q*k*amp directly (1 = the
+ * looping threshold). Staged, so a toggle is a reload and WAVE_COUNT
+ * re-bakes consistently into every shader.
+ */
+function simpleSeaWaves(): WaveParams[] {
+  const k = (2 * Math.PI) / INSPECT.simpleLambdaM
+  const angle = (INSPECT.simpleHeadingDeg * Math.PI) / 180
+  return [
+    {
+      dirX: Math.cos(angle),
+      dirZ: Math.sin(angle),
+      k,
+      omega: Math.sqrt(G * k),
+      amp: INSPECT.simpleAmpM,
+      q: INSPECT.simpleSteepness / (k * INSPECT.simpleAmpM),
+      phase: 0,
+    },
+  ]
+}
+
 /** The live field. One array; the GPU uniforms and the CPU sampler both read it. */
-export const waves = generateWaves(activeField)
+export const waves = INSPECT.simpleSea ? simpleSeaWaves() : generateWaves(activeField)
 
 /**
  * THE GPU MIRROR of `waves` — one set of objects, shared by every material

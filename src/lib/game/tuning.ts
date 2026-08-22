@@ -2101,6 +2101,44 @@ export const CAUSTICS = {
 }
 
 /**
+ * INSPECT — debugging instruments, all staged (reload to apply). Nothing
+ * here is gameplay: an isolation sea for studying a single wave, and a
+ * re-aimable camera for looking at it side-on. The /wave route is the
+ * matching 2D cross-section viewer.
+ */
+export const INSPECT = {
+  /**
+   * ISOLATION SEA: replace the whole banded spectrum with ONE large
+   * rolling wave (waves.ts simpleSeaWaves), so behaviour can be judged
+   * against a single readable crest. The sea-preset dial and UNIFIED
+   * knobs are inert while this is on.
+   */
+  simpleSea: false,
+  /** Wavelength of the single wave, metres. */
+  simpleLambdaM: 64,
+  /** Amplitude, metres. */
+  simpleAmpM: 3,
+  /**
+   * Steepness as q*k*amp: 0 = pure sine, 1 = crest pinched vertical,
+   * above 1 it loops.
+   */
+  simpleSteepness: 0.77,
+  /** Travel heading, degrees (0 = +x; 315 is perpendicular to the stock camera). */
+  simpleHeadingDeg: 315,
+  /**
+   * INSPECTION CAMERA. Yaw rotates the iso camera around the boat
+   * (degrees; 0 = stock, which views toward azimuth 225 — already
+   * perpendicular to a 315-degree wave). Elevation replaces the stock
+   * ~32-degree down-look when non-zero (floored at 5); low values give
+   * a wave's cross-section silhouette. The water mesh follows both; the
+   * HUD compass and caustic coverage keep their stock alignment and sit
+   * wrong at other angles — inspection tools, not gameplay.
+   */
+  camYawDeg: 0,
+  camElevDeg: 0,
+}
+
+/**
  * BOAT — the player's hull. Same heave physics as the buoys (spring on
  * submersion) with its own constants, plus drive. All live.
  */
@@ -2312,6 +2350,7 @@ const GROUPS = {
   DROPLET,
   FOAM,
   MIST,
+  INSPECT,
 }
 
 /**
