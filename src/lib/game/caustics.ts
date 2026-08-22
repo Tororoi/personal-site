@@ -184,8 +184,16 @@ void main() {
 	// precisely the crown's shadow in beam space. It still lands along its
 	// geometric path so its triangles stay sane.
 	vec3 origin = P;
-	vec3 oc = origin - uSphereCenter;
-	vWeight = dot(oc, oc) < uSphereRadius * uSphereRadius ? 0.0 : 1.0;
+	// NO crown shadow. It used to be splatted here (zero-weight beams for
+	// entry points inside the sphere's waterline circle), but it was the
+	// only cast shadow in the whole game — the sun has no shadow maps and
+	// nothing above water shades anything — and a binary ray-kill at
+	// splat-grid pitch aliased the circle into radial spokes (the
+	// drip-streaks on the buoy's flank). Underwater differs from above
+	// only by absorption, refraction, caustics and scattering; a lone
+	// hard shadow was not on that list. If cast shadows ever arrive,
+	// they should arrive everywhere at once.
+	vWeight = 1.0;
 	float t = max((origin.y + uPlaneDepth) / max(-refr.y, 0.05), 0.0);
 	vec3 land = origin + refr * t;
 

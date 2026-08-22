@@ -1577,6 +1577,13 @@ export const FFT = {
  * per-pixel cost.
  */
 export const PROFILE = {
+  /**
+   * Ambient wave slope from the VERTEX stage (interpolated) instead of
+   * the per-pixel analytic loop. Cheaper by one WAVE_COUNT loop per
+   * water fragment, but the interpolation kinks at quad edges and
+   * refraction magnifies the kinks into streaks at the buoy waterline.
+   */
+  vertexSlope: false,
   /** Underwater raytrace: refract, sphere + 3 buoy intersections, shade. */
   skipRefraction: false,
   /** Fresnel blend and the sky-gradient reflection. */

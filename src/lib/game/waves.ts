@@ -1551,6 +1551,40 @@ float waveJacobian(vec2 p, float t, float ampScale) {
 		jxz -= qak * a.x * a.y * s;
 	}
 	return jxx * jzz - jxz * jxz;
+}
+
+// Analytic surface slope at REST coordinates — the same tangent sums the
+// water vertex shader accumulates, packaged for PER-PIXEL use. The
+// vertex-interpolated slope is continuous but kinks at every quad edge,
+// and refraction magnifies those kinks into quad-pitch streaks wherever
+// the view path is a lens (the buoy at its waterline). Rest coordinates
+// interpolate exactly (linear in the mesh), so evaluating here gives a
+// genuinely smooth normal at any tessellation — the analytic equivalent
+// of the pool reference's per-pixel normal texture.
+vec2 waveSlope(vec2 p, float t, float ampScale) {
+	float txx = 0.0;
+	float txy = 0.0;
+	float txz = 0.0;
+	float tzy = 0.0;
+	float tzz = 0.0;
+	for (int i = 0; i < WAVE_COUNT; i++) {
+		vec4 a = uWaveA[i];
+		vec3 b = uWaveB[i];
+		float theta = (p.x * a.x + p.y * a.y) * a.z - a.w * t + b.z;
+		float sn = sin(theta);
+		float cs = cos(theta);
+		float qak = b.y * b.x * ampScale * a.z;
+		float ak = b.x * ampScale * a.z;
+		txx -= qak * a.x * a.x * sn;
+		txy += ak * a.x * cs;
+		txz -= qak * a.x * a.y * sn;
+		tzy += ak * a.y * cs;
+		tzz -= qak * a.y * a.y * sn;
+	}
+	vec3 Tu = vec3(1.0 + txx, txy, txz);
+	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
+	vec3 Na = cross(Tv, Tu);
+	return -Na.xz / max(Na.y, 0.2);
 }`
 }
 

@@ -767,7 +767,7 @@ float causticValidity(vec2 beamXZ) {
 	return 1.0 - smoothstep(-3.0, 0.0, m);
 }
 
-vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow) {
+vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow, float graze) {
 	vec3 sunN = normalize(uSunDir);
 	vec3 refrLight = refract(-sunN, vec3(0.0, 1.0, 0.0), 0.7519);
 	// Beam incidence, relaxing toward omnidirectional (0.5) as the light
@@ -808,7 +808,13 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// moving patches of sharp and soft. Extinction keeps the true column
 	// (more water genuinely eats more light); convergence is geometry
 	// referenced to the plane, and the plane does not heave.
-	float spreadM = max(max(-P.y, 0.0) - uUwCausticFocal, 0.0) * uUwCausticBlur;
+	// Two widening terms: DEPTH defocus (the physical one), plus the VIEW
+	// FOOTPRINT — at grazing incidence one screen pixel spans 1/graze as
+	// much surface, and a sharp pattern sampled across that stretch reads
+	// as streaks (the drip-like bands at the buoy's waterline, where the
+	// refracted eye ray skims the flank). Blur to the footprint instead.
+	float spreadM = max(max(-P.y, 0.0) - uUwCausticFocal, 0.0) * uUwCausticBlur
+		+ min((1.0 / max(graze, 0.05) - 1.0) * 0.08, 2.0);
 	float caustic;
 	{
 		float c0 = texture2D(uCausticMap, cuvC).r;
@@ -1437,7 +1443,9 @@ void main() {
 	// the surface for lighting without a single extra vertex — and the
 	// specular lives on exactly that, since a glint appears only where
 	// the normal reaches the mirror angle.
-	vec2 slope = vSlope + ${PROFILE.skipRipple ? 'vec2(0.0)' : 'rippleShadeGrad(vWorld.xz)'}
+	vec2 slope = ${
+		PROFILE.vertexSlope ? 'vSlope' : 'waveSlope(vRest, uTime, uAmp)'
+	} + ${PROFILE.skipRipple ? 'vec2(0.0)' : 'rippleShadeGrad(vWorld.xz)'}
 		${ENABLE.fftDetail ? '+ detailSlope(vWorld.xz, uTime)' : ''}
 		${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
 	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
@@ -1521,7 +1529,7 @@ void main() {
 	if (tHit > 0.0) {
 		vec3 P = vWorld + refr * tHit;
 		waterPath = tHit;
-		transmitted = shadeUnderwater(P, hitN, albedo, tHit, max(vWorld.y - P.y, 0.0));
+		transmitted = shadeUnderwater(P, hitN, albedo, tHit, max(vWorld.y - P.y, 0.0), abs(dot(refr, hitN)));
 	} else if (uUwSeabedOn > 0.5 && refr.y < -0.001) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
@@ -1533,7 +1541,7 @@ void main() {
 		vec3 Pf = vWorld + refr * tFloor;
 		waterPath = tFloor;
 		transmitted = shadeUnderwater(
-			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(vWorld.y - Pf.y, 0.0));
+			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(vWorld.y - Pf.y, 0.0), abs(refr.y));
 	} else {
 		// Seabed off, total internal reflection, or a grazing ray with no
 		// floor ahead: the water column alone. uwVolume() is its
@@ -2070,7 +2078,8 @@ void main() {
 	// the opaque water surface doesn't cover — i.e. the thin waterline
 	// blend band on an exposed crown.
 	float belowS = max(waterY - vWorld.y, 0.0);
-	vec3 wet = shadeUnderwater(vWorld, normal, uSphereColor, belowS, belowS);
+	vec3 wet = shadeUnderwater(vWorld, normal, uSphereColor, belowS, belowS,
+		abs(dot(normal, vec3(${f(CAM_AXIS.x)}, ${f(CAM_AXIS.y)}, ${f(CAM_AXIS.z)}))));
 
 	vec3 col = mix(dry, wet, submerged);
 
