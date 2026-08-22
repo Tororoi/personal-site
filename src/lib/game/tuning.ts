@@ -651,49 +651,6 @@ export const BOWCREST = {
   segLip: 8,
 }
 
-/**
- * CONTACT FOAM — the painted collar where the surface meets a solid.
- *
- * Distinct from the foam objects EMIT into the field (FOAM.contact*).
- * That emission is ordinary foam and behaves like all the rest: it
- * drifts off downstream, spreads and dies. This is the collar that stays
- * ON the object — pinned, not drifting, present for as long as the
- * object is at the surface. The two are meant to be seen together: the
- * collar marks the waterline, the emission trails away from it.
- *
- * Nothing here reads wind or current. Drift belongs to the emitted foam,
- * which gets it from the field for free.
- */
-export const CONTACT = {
-  /** Collar width in metres at full foaminess. */
-  width: 0.15,
-  /** Opacity of the collar, applied as thickness into the foam web. */
-  alpha: 0.95,
-  /** Softness of the outer edge, as a fraction of the width. Not 0 —
-   * a hard cut aliases against a curved silhouette. */
-  soft: 0.18,
-  /** Width wobble, as a fraction, so the collar is not a clean ring. */
-  wobble: 0.3,
-  /** Wobble wavelength, metres: the size of one bulge in the edge. */
-  wobbleScale: 2.5,
-  /**
-   * How DEEP water can lie over an object and still show a collar,
-   * metres, measured to the object's surface directly below each point.
-   * Generous on purpose: this is the REACH, and shortening it leaves
-   * fragments near the hull outside every case, so they paint nothing
-   * and tear a hole in the collar. Shape the response with
-   * `submergeBias` instead.
-   */
-  overwash: 0.9,
-  /** Exponent on the overwash falloff: how readily white still shows
-   * once an object is under. Higher = gone sooner, same reach. */
-  submergeBias: 2,
-  /** How fast the collar stops below a hull lifted clear, metres. */
-  liftFade: 0.08,
-  /** Narrowest the collar gets, as a fraction of `width`. Not 0, or the
-   * vertical reading becomes a gate again and tears the collar. */
-  spreadFloor: 0.25,
-}
 
 /**
  * SUN SPECULAR — the sun's own mirror image on the water.
@@ -1312,6 +1269,48 @@ export const FOAM = {
    */
   contactChopStart: 1,
   contactChopFull: 5,
+  // ---- THE COLLAR (formerly the CONTACT group) ----
+  /*
+   * CONTACT FOAM — the painted collar where the surface meets a solid.
+   *
+   * Distinct from the foam objects EMIT into the field (contact* above).
+   * That emission is ordinary foam and behaves like all the rest: it
+   * drifts off downstream, spreads and dies. This is the collar that stays
+   * ON the object — pinned, not drifting, present for as long as the
+   * object is at the surface. The two are meant to be seen together: the
+   * collar marks the waterline, the emission trails away from it.
+   *
+   * Nothing here reads wind or current. Drift belongs to the emitted foam,
+   * which gets it from the field for free.
+ */
+  /** Collar width in metres at full foaminess. */
+  collarWidth: 0.15,
+  /** Opacity of the collar, applied as thickness into the foam web. */
+  collarAlpha: 0.95,
+  /** Softness of the outer edge, as a fraction of the width. Not 0 —
+   * a hard cut aliases against a curved silhouette. */
+  collarSoft: 0.18,
+  /** Width wobble, as a fraction, so the collar is not a clean ring. */
+  collarWobble: 0.3,
+  /** Wobble wavelength, metres: the size of one bulge in the edge. */
+  collarWobbleScale: 2.5,
+  /**
+   * How DEEP water can lie over an object and still show a collar,
+   * metres, measured to the object's surface directly below each point.
+   * Generous on purpose: this is the REACH, and shortening it leaves
+   * fragments near the hull outside every case, so they paint nothing
+   * and tear a hole in the collar. Shape the response with
+   * `submergeBias` instead.
+   */
+  collarOverwash: 0.9,
+  /** Exponent on the overwash falloff: how readily white still shows
+   * once an object is under. Higher = gone sooner, same reach. */
+  collarSubmergeBias: 2,
+  /** How fast the collar stops below a hull lifted clear, metres. */
+  collarLiftFade: 0.08,
+  /** Narrowest the collar gets, as a fraction of `width`. Not 0, or the
+   * vertical reading becomes a gate again and tears the collar. */
+  collarSpreadFloor: 0.25,
 
   layPinchStart: 0.05,
   layPinchFull: 0.35,
@@ -1537,30 +1536,6 @@ export const MIST = {
   hover: 0.3,
 }
 
-/**
- * FFT detail waves (fftwaves.ts). The transform itself is not tunable —
- * its shape comes from each preset's `detail` block — but how often it
- * runs is, because that is the whole of its frame cost.
- */
-export const FFT = {
-  /**
-   * Run the transform every Nth frame. 1 = every frame.
-   *
-   * This is the only knob here that buys frame time, and it buys a lot:
-   * a step is 32 render passes (two cascades x one spectrum + 14
-   * butterfly stages + one resolve). They are tiny — 128x128 each, so
-   * the fill is nothing — but 32 render-target binds and 32 draw calls
-   * per frame is real driver overhead, and it is paid whether or not any
-   * other effect is switched on.
-   *
-   * The field has no frame-to-frame state (each step is a fresh
-   * transform of the same spectrum evolved to the current time), so
-   * skipping steps is safe: the slope texture simply holds its last
-   * contents. The cost is temporal — at 2 the fine sparkle updates at
-   * 30Hz under a 60Hz render.
-   */
-  stepEvery: 1,
-}
 
 /**
  * FRAGMENT ABLATION — measurement scaffolding for the water shader.
@@ -1584,24 +1559,6 @@ export const PROFILE = {
    * refraction magnifies the kinks into streaks at the buoy waterline.
    */
   vertexSlope: false,
-  /**
-   * Splat brightness from per-fragment derivatives (FLAT per warped
-   * triangle) instead of the per-vertex Jacobian trace. Under temporal
-   * accumulation this is the BETTER estimator: noisier per frame but
-   * geometrically honest, and the accumulation integrates the noise
-   * while the per-vertex smoothing just converges to its own blur —
-   * hence default ON (and cheaper: one ray per vertex, not three).
-   */
-  flatCausticSplat: true,
-  /**
-   * PHOTON MODE (wins over flatCausticSplat): each ray is a single
-   * 1-texel point of equal energy, additively accumulated — the map is
-   * a pure ray-density histogram, the sharpest unbiased estimator at
-   * texel resolution. Raw frames are speckle; temporalAA is what makes
-   * it converge, so keep that on. Cheapest splat of the three (no
-   * Jacobian at all — density IS brightness).
-   */
-  pointCausticSplat: false,
   /** Underwater raytrace: refract, sphere + 3 buoy intersections, shade. */
   skipRefraction: false,
   /** Fresnel blend and the sky-gradient reflection. */
@@ -1752,11 +1709,9 @@ export const SEA = {
    *
    * LIVE, like chopOverride — ramp it from gameplay and the sea builds.
    */
-  /**
-   * Use the UNIFIED field instead of the presets. Overrides seaState and
-   * ?sea=; chopOverride still applies on top.
-   */
-  useUnified: false,
+  // The unified field IS the sea now (presets retired from live use);
+  // seaState + transitionSecondsPerUnit stay, to be repurposed for
+  // transitions between SAVED unified-sea values.
   seaState: -1,
   /**
    * Seconds PER UNIT of seaState change. 0 snaps.
@@ -1772,32 +1727,30 @@ export const SEA = {
    * target mid-transition bends the curve instead of restarting it.
    */
   transitionSecondsPerUnit: 25,
-}
-
-/**
- * UNIFIED SEA — the whole ocean on a handful of sliders.
- *
- * The band structure (wavelengths, headings, spreads, per-band slope
- * balance) is FIXED, in UNIFIED_BANDS in waves.ts: interpolating
- * wavelength or heading churns the surface, because both sit inside the
- * (position . direction) * k phase term. What a sea state actually varies
- * is energy and weather, and that is all these knobs drive.
- *
- * `waves` is the one calm-to-storm dial: 0 matches the calm preset's
- * energy, 1 largeSwell's, 2 the storm's — band slopes scale geometrically
- * through those measured landmarks and chop lerps through the presets'
- * values, so froth, foam, droplets and the specular all follow through
- * the systems they already key on.
- *
- * `weather` is deliberately separate: cloud cover is not a function of
- * wave height. It drives sky colour and sun diffusion, which is what the
- * caustics and the specular's clear/overcast blend already read.
- *
- * Compass knobs: 0 north, 90 east, 180 south, 270 west, calibrated so
- * WEST is where the default sun path sets (world azimuth 226). Bearings
- * are the direction the wind/current moves TOWARD.
+  // ---- THE UNIFIED FIELD (formerly its own UNIFIED group) ----
+  /*
+   * The whole ocean on a handful of sliders.
+   *
+   * The band structure (wavelengths, headings, spreads, per-band slope
+   * balance) is FIXED, in UNIFIED_BANDS in waves.ts: interpolating
+   * wavelength or heading churns the surface, because both sit inside the
+   * (position . direction) * k phase term. What a sea state actually varies
+   * is energy and weather, and that is all these knobs drive.
+   *
+   * `waves` is the one calm-to-storm dial: 0 matches the calm preset's
+   * energy, 1 largeSwell's, 2 the storm's — band slopes scale geometrically
+   * through those measured landmarks and chop lerps through the presets'
+   * values, so froth, foam, droplets and the specular all follow through
+   * the systems they already key on.
+   *
+   * `weather` is deliberately separate: cloud cover is not a function of
+   * wave height. It drives sky colour and sun diffusion, which is what the
+   * caustics and the specular's clear/overcast blend already read.
+   *
+   * Compass knobs: 0 north, 90 east, 180 south, 270 west, calibrated so
+   * WEST is where the default sun path sets (world azimuth 226). Bearings
+   * are the direction the wind/current moves TOWARD.
  */
-export const UNIFIED = {
   /** 0 calm .. 1 largeSwell .. 2 storm. */
   waves: 1,
   /** 0 clear blue .. 1 heavy overcast. */
@@ -1825,7 +1778,25 @@ export const UNIFIED = {
   detailMax: 4,
   /** ...and its strength, as RMS slope. */
   detailSlope: 0.055,
+  /**
+   * Run the transform every Nth frame. 1 = every frame.
+   *
+   * This is the only knob here that buys frame time, and it buys a lot:
+   * a step is 32 render passes (two cascades x one spectrum + 14
+   * butterfly stages + one resolve). They are tiny — 128x128 each, so
+   * the fill is nothing — but 32 render-target binds and 32 draw calls
+   * per frame is real driver overhead, and it is paid whether or not any
+   * other effect is switched on.
+   *
+   * The field has no frame-to-frame state (each step is a fresh
+   * transform of the same spectrum evolved to the current time), so
+   * skipping steps is safe: the slope texture simply holds its last
+   * contents. The cost is temporal — at 2 the fine sparkle updates at
+   * 30Hz under a 60Hz render.
+   */
+  stepEvery: 1,
 }
+
 
 /**
  * UNDERWATER — how submerged things are lit, and how the caustic pattern
@@ -1954,7 +1925,7 @@ export const UNDERWATER = {
    * field filling side faces, which real water does even harder than
    * air. 0 restores the hard clamp.
    */
-  wrap: 0.4,
+  wrap: 0.5,
   /**
    * How much light gets deep enough to scatter back — clear vs overcast.
    *
@@ -2066,17 +2037,6 @@ export const CAUSTICS = {
    */
   sourceBlurM: 0.05,
   /**
-   * SPLAT RAY SPACING, metres between refracted rays at the surface.
-   * The resolving power of the whole caustic pattern: filaments narrower
-   * than the ray grid come out grainy or beaded. 0.104 is the density
-   * the pattern was originally tuned at; lower is sharper and costs
-   * splat vertices quadratically. The lattice never drops below 48 rays
-   * a side (the historical minimum — on small windows that floor is
-   * finer than this target, and it is what the look was approved at).
-   * Live — the splat lattice rebuilds on the next frame.
-   */
-  raySpacingM: 0.104,
-  /**
    * PEAK brightness clamp on the splat, as a multiple of neutral. The
    * fold singularities are where the pattern's pointwise brightness
    * genuinely diverges, and the ray lattice sampling that ridge returns
@@ -2155,19 +2115,6 @@ export const CAUSTICS = {
    * redistribute light instead of minting or stealing it.
    */
   ridgeGain: 1.0,
-  /**
-   * How dark a caustic shadow may drive the direct light. Also
-   * insurance: any patch the splat misses reads as pitch shadow rather
-   * than "no data" without a floor. Real troughs are not black either.
-   */
-  floor: 0.35,
-  /**
-   * Sun-diffusion band over which the pattern washes to featureless
-   * light (weather's remaining caustic effect): start = where washing
-   * begins, end = fully flat.
-   */
-  flatStart: 0.35,
-  flatEnd: 1.0,
 }
 
 /**
@@ -2180,8 +2127,8 @@ export const INSPECT = {
   /**
    * ISOLATION SEA: replace the whole banded spectrum with ONE large
    * rolling wave (waves.ts simpleSeaWaves), so behaviour can be judged
-   * against a single readable crest. The sea-preset dial and UNIFIED
-   * knobs are inert while this is on.
+   * against a single readable crest. The SEA group's dials are
+   * inert while this is on.
    */
   simpleSea: false,
   /** Wavelength of the single wave, metres. */
@@ -2399,27 +2346,25 @@ export const BOAT = {
  * controls from that shape alone, which is why there is no per-knob UI
  * metadata to maintain alongside 260 values.
  */
+// Panel display order (GROUP_NAMES is Object.keys of this map).
 const GROUPS = {
   ENABLE,
-  FFT,
-  PROFILE,
-  SEA,
-  UNIFIED,
   BOAT,
-  UNDERWATER,
-  CAUSTICS,
-  FROTH,
-  PLUME,
-  LOOP,
-  OBJWAVE,
-  BOWCREST,
-  CONTACT,
-  SPECULAR,
+  SEA,
   WIND,
   CURRENT,
+  UNDERWATER,
+  CAUSTICS,
+  SPECULAR,
+  LOOP,
+  FROTH,
+  BOWCREST,
+  PLUME,
   DROPLET,
   FOAM,
   MIST,
+  OBJWAVE,
+  PROFILE,
   INSPECT,
 }
 
@@ -2455,7 +2400,6 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
 export const LIVE_GROUPS = new Set([
   'SPECULAR',
   'SEA',
-  'UNIFIED',
   'BOAT',
   'UNDERWATER',
   // Every CAUSTICS knob reaches the scene through a per-frame uniform

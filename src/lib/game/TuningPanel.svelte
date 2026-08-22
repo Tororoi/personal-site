@@ -22,7 +22,7 @@
 -->
 <script lang="ts">
 	import { ENABLE, LIVE_GROUPS, TUNING_DEFAULTS, TUNING_GROUPS } from './tuning';
-	import { CAMERA_AZIMUTH_DEG, computeEnv, ENV, ENV_DEFAULTS } from './env';
+	import { computeEnv, ENV, ENV_DEFAULTS } from './env';
 	import { seaDrive, seaMetrics, SEA_REFERENCE } from './waves';
 	import { game, perf as perfTick } from './state.svelte';
 	import {
@@ -233,7 +233,6 @@
 		'UNDERWATER.ambient': { min: 0, max: 1.2, step: 0.01 },
 		'UNDERWATER.direct': { min: 0, max: 1.5, step: 0.01 },
 		'UNDERWATER.seabedDepthM': { min: 2, max: 60, step: 0.5 },
-		'CAUSTICS.raySpacingM': { min: 0.05, max: 0.3, step: 0.002 },
 		'CAUSTICS.edgeAA': { min: 0, max: 1, step: 0.02 },
 		'CAUSTICS.maxBright': { min: 2, max: 40, step: 0.5 },
 		'CAUSTICS.temporalAA': { min: 0, max: 0.92, step: 0.02 },
@@ -250,7 +249,6 @@
 		'UNDERWATER.rayleighScatter': { min: 0, max: 0.03, step: 0.0002 },
 		'UNDERWATER.mieScatter': { min: 0, max: 0.02, step: 0.0001 },
 		'CAUSTICS.diffuseDepthM': { min: 2, max: 200, step: 1 },
-		'CAUSTICS.floor': { min: 0, max: 1, step: 0.01 },
 		'CAUSTICS.formM': { min: 0.02, max: 6, step: 0.02 },
 		'CAUSTICS.sourceBlurM': { min: 0, max: 0.6, step: 0.005 },
 		'CAUSTICS.contrast': { min: 0.2, max: 4, step: 0.05 },
@@ -267,21 +265,20 @@
 		'UNDERWATER.ambientSkyHue': { min: 0, max: 1, step: 0.01 },
 		'UNDERWATER.wrap': { min: 0, max: 1, step: 0.01 },
 		'UNDERWATER.sphereDepth': { min: -14, max: 6, step: 0.1 },
-		'CAUSTICS.flatStart': { min: 0, max: 1, step: 0.01 },
-		'CAUSTICS.flatEnd': { min: 0, max: 1, step: 0.01 },
 		'BOAT.wakeAmp': { min: 0, max: 0.05, step: 0.001 },
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
-		'UNIFIED.waves': { min: 0, max: 2, step: 0.01 },
-		'UNIFIED.weather': { min: 0, max: 1, step: 0.01 },
-		'UNIFIED.windSpeed': { min: 0, max: 45, step: 0.5 },
-		'UNIFIED.windCompassDeg': { min: 0, max: 360, step: 1 },
-		'UNIFIED.currentCompassDeg': { min: 0, max: 360, step: 1 },
-		'UNIFIED.currentSpeed': { min: 0, max: 4, step: 0.05 },
-		'UNIFIED.timeScale': { min: 0.2, max: 2, step: 0.01 },
-		'UNIFIED.lambdaScale': { min: 0.2, max: 4, step: 0.01 },
-		'UNIFIED.detailMin': { min: 0.1, max: 2, step: 0.01 },
-		'UNIFIED.detailMax': { min: 0.5, max: 8, step: 0.05 },
-		'UNIFIED.detailSlope': { min: 0, max: 0.15, step: 0.001 },
+		'SEA.waves': { min: 0, max: 2, step: 0.01 },
+		'SEA.weather': { min: 0, max: 1, step: 0.01 },
+		'SEA.windSpeed': { min: 0, max: 45, step: 0.5 },
+		'SEA.windCompassDeg': { min: 0, max: 360, step: 1 },
+		'SEA.currentCompassDeg': { min: 0, max: 360, step: 1 },
+		'SEA.currentSpeed': { min: 0, max: 4, step: 0.05 },
+		'SEA.timeScale': { min: 0.2, max: 2, step: 0.01 },
+		'SEA.lambdaScale': { min: 0.2, max: 4, step: 0.01 },
+		'SEA.detailMin': { min: 0.1, max: 2, step: 0.01 },
+		'SEA.detailMax': { min: 0.5, max: 8, step: 0.05 },
+		'SEA.detailSlope': { min: 0, max: 0.15, step: 0.001 },
+		'SEA.stepEvery': { min: 1, max: 6, step: 1 },
 		// Chop thresholds, so they need the chop range — not the 0..1 the
 		// heuristic infers from a default under 1.
 		// Exponent: above 1 is the opposite curve, so leave room for it.
@@ -293,57 +290,13 @@
 
 	/** Explicit bounds for the handful of env knobs, which have real units. */
 	const ENV_RANGE: Record<string, { min: number; max: number; step: number }> = {
-		daySeconds: { min: 10, max: 1200, step: 5 },
-		// Offsets stop well short of 90, where the circle would collapse to
-		// a point at the pole and the arc would have no rise or set at all.
-		sunPathAngleDeg: { min: 0, max: 360, step: 1 },
-		sunPathOffsetDeg: { min: -75, max: 75, step: 1 },
-		moonPathAngleDeg: { min: 0, max: 360, step: 1 },
-		moonPathOffsetDeg: { min: -75, max: 75, step: 1 }
+		daySeconds: { min: 10, max: 1200, step: 5 }
 	};
 
 	/** What each env knob actually does, in one line, shown under its row. */
 	const ENV_HELP: Record<string, string> = {
-		sunPathAngleDeg: 'compass bearing the sun rises from — spins the arc',
-		sunPathOffsetDeg: 'degrees the midday sun falls short of overhead — leans the arc',
-		moonPathAngleDeg: 'same, for the moon',
-		moonPathOffsetDeg: 'same, for the moon',
 		daySeconds: 'real seconds per full day'
 	};
-	// Everything the sun-path knobs imply, so the geometry is readable
-	// instead of something you find by dragging. The glitter path lies on
-	// the sun's azimuth and only reads as vertical when that matches the
-	// camera axis, so the deviation is the number that matters.
-	const D = 180 / Math.PI;
-	const norm360 = (a: number) => ((a % 360) + 360) % 360;
-	const sunGeom = $derived.by(() => {
-		// envTick makes this recompute when a knob moves; ENV is a plain object.
-		void envTick;
-		const angle = ENV.sunPathAngleDeg;
-		const off = ENV.sunPathOffsetDeg;
-		const theta = (phase - 0.25) * Math.PI * 2;
-		const swing = Math.atan2(
-			Math.sin(off / D),
-			Math.cos(off / D) * Math.cos(theta)
-		) * D;
-		const az = norm360(angle + swing);
-		let dev = Math.abs(az - CAMERA_AZIMUTH_DEG);
-		dev = Math.min(dev, 360 - dev, Math.abs(az - 45), 360 - Math.abs(az - 45));
-		const up = computeEnv(phase).lightDir[1] > 0;
-		// Phase where the sweep crosses the camera axis, if it ever does.
-		const c = Math.tan(off / D) / Math.tan((CAMERA_AZIMUTH_DEG - angle) / D);
-		const alignAt = Math.abs(c) <= 1 ? 0.25 + Math.acos(c) / (Math.PI * 2) : null;
-		return {
-			angle,
-			rise: norm360(angle + off),
-			set: norm360(angle + 180 - off),
-			peak: 90 - Math.abs(off),
-			az,
-			dev,
-			up,
-			alignAt
-		};
-	});
 
 	// What the water actually measures, as opposed to the config that
 	// produced it. seaMetrics is a plain object rewritten on each field
@@ -370,13 +323,9 @@
 		};
 	});
 
-	const ENV_KNOBS = [
-		'sunPathAngleDeg',
-		'sunPathOffsetDeg',
-		'moonPathAngleDeg',
-		'moonPathOffsetDeg',
-		'daySeconds'
-	];
+	// The sun/moon path knobs are LOCKED IN (env.ts keeps the values as
+	// constants); only the clock speed remains adjustable.
+	const ENV_KNOBS = ['daySeconds'];
 
 	/** Trim binary-float noise without truncating genuinely fine values. */
 	const show = (n: number) => {
@@ -389,6 +338,150 @@
 		if (!q) return true;
 		return k.toLowerCase().includes(q) || g.toLowerCase().includes(q);
 	};
+	/**
+	 * Section headers WITHIN each group's dropdown — small labels, not
+	 * sub-dropdowns. Order here is the display order; knobs missing from
+	 * a group's map fall to the end unlabelled, so a newly added knob
+	 * can never silently disappear from the panel.
+	 */
+	const KNOB_SECTIONS: Record<string, [string, string[]][]> = {
+		CAUSTICS: [
+			['splat', ['maxBright', 'sourceBlurM']],
+			['depth', ['formM', 'focalM', 'blurPerM', 'diffuseDepthM']],
+			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain']]
+		],
+		UNDERWATER: [
+			['light', ['ambient', 'direct', 'dim', 'glow', 'exposure']],
+			['absorption', ['redRangeM', 'greenRangeM', 'blueRangeM']],
+			['scattering', ['rayleighScatter', 'mieScatter', 'scatterClear', 'scatterOvercast']],
+			['shading', ['wrap', 'ambientSkyHue']],
+			['interface', ['surfaceReflect', 'fresnelGrazing', 'entryLoss']],
+			['seabed', ['seabed', 'seabedDepthM']],
+			['testing', ['sphereDepth', 'rainbowCard']]
+		],
+		BOAT: [
+			['drive', ['thrust', 'reverseThrust', 'propDepthM']],
+			['steering', ['turnRate', 'turnMin', 'turnPivotM', 'yawResponse', 'yawWaterDrag', 'airControl']],
+			['hull', ['dragLinear', 'dragQuad', 'keelGrip']],
+			['waves', ['orbitalMotion', 'slopeSlide', 'slideLambdaM', 'breakPush']],
+			['buoyancy', ['bobPeriod', 'bobZeta', 'maxSubmersion', 'entryDrag']],
+			['swing', ['rollGain', 'rollRighting', 'rollZeta', 'pitchGain', 'pitchRighting', 'pitchZeta']],
+			['trim', ['sternTrim', 'trimPerSpeed', 'trimPerAccel', 'liftPerSpeed', 'liftMax']],
+			['wake', ['wakeAmp', 'wakeOffset']]
+		],
+		SPECULAR: [
+			['core', ['sharpClear', 'sharpOvercast', 'gainClear', 'gainOvercast', 'fresnelMix']],
+			['drive', ['driveSlope', 'driveAmp', 'driveChop', 'driveCurve']],
+			['spike', ['sharpPeak', 'spikeInStart', 'spikeInEnd', 'spikeOutStart', 'spikeOutEnd']],
+			['storm', ['sharpClearStorm', 'sharpOvercastStorm', 'sharpPeakStorm', 'cameraEyeDistanceStorm']],
+			['eye', ['cameraEyeDistance', 'cameraEyeHeight']],
+			['halo', ['haloSharp', 'haloGain', 'haloGainLow', 'anisotropy']],
+			['altitude', ['altHigh', 'altLow', 'fadeAltDeg']]
+		],
+		SEA: [
+			['sea', ['waves', 'weather', 'lambdaScale', 'chopOverride', 'seaState', 'transitionSecondsPerUnit']],
+			['wind', ['windSpeed', 'windCompassDeg']],
+			['current', ['currentSpeed', 'currentCompassDeg']],
+			['tempo', ['timeScale']],
+			['detail', ['detailMin', 'detailMax', 'detailSlope', 'stepEvery']]
+		],
+		FROTH: [
+			['size', ['lattice', 'radiusBase', 'radiusVar', 'sizeCap']],
+			['gates', ['gateJStart', 'gateJFull', 'gateLag', 'gateLagWeight']],
+			['amplitude', ['ampRef', 'ampCurve', 'ampRatioFloor']],
+			['intensity', ['intJStart', 'intJSpan', 'intFloor', 'curveBoost', 'curveStart', 'curveEnd']],
+			['density', ['visStart', 'visFull', 'densMax', 'densMin', 'densStart', 'densEnd', 'densSoft']],
+			['culling', ['cullRadius', 'minPixels']],
+			['pose', ['submersion', 'normalTilt']]
+		],
+		FOAM: [
+			['deposition', ['layPinchStart', 'layPinchFull', 'layMinRadius', 'layFullRadius', 'layRate', 'layBigRolloff', 'layBigStart', 'layBigFull']],
+			['contact', ['contactBand', 'contactBowGain', 'contactFlowFull', 'contactRate', 'contactOverwash', 'contactLift', 'contactChopStart', 'contactChopFull', 'collarWidth', 'collarAlpha', 'collarSoft', 'collarWobble', 'collarWobbleScale', 'collarOverwash', 'collarSubmergeBias', 'collarLiftFade', 'collarSpreadFloor']],
+			['decay', ['decayThin', 'decayThick', 'decayOld', 'dormantDecay', 'evaporation', 'turbJStart', 'turbJFull']],
+			['motion', ['diffusion', 'drift', 'currentCarry']],
+			['growth', ['growStart', 'growFull']],
+			['variety', ['varyScale', 'varySpread', 'varyLife', 'cellLifeVary', 'cellSpreadVary', 'cellMaxSizeVary', 'cellSolidVary', 'cellFadeVary']],
+			['overload', ['overloadStart', 'overloadFull']],
+			['shading', ['lightTint', 'darkFloor', 'skyGain', 'sunGain', 'diffuseBase', 'shapeFloor']],
+			['web', ['densStart', 'densEnd', 'cellFine', 'cellCoarse']]
+		],
+		DROPLET: [
+			['physics', ['maxCount', 'gravity', 'windCarry', 'drag']],
+			['impact', ['impactMinSpeed', 'impactFullSpeed', 'impactCountMin', 'impactCountMax', 'impactCountCurve', 'impactSizeCurve']],
+			['scan', ['scanInterval', 'scanStep', 'scanExtent', 'scanJ', 'scanCoarse', 'scanBand', 'checkSlopeBound', 'checkMaxGap']],
+			['gating', ['exposeMin', 'depthSpan', 'minFroth', 'minLoopLength', 'perFroth', 'maxPerPoint', 'birthStagger']],
+			['launch', ['hopUpMin', 'hopUpVar', 'hopFwdMin', 'hopFwdVar', 'hopFwdSizeFloor', 'hopFwdSpeedFloor', 'launchClearance']],
+			['lifetime', ['sizeMin', 'sizeMax', 'sizeVsFroth', 'growTime', 'dieTime', 'peakHeight', 'peakRise', 'minFlight', 'lifeMax', 'submergeGrace']],
+			['streaks', ['streakPerSpeed', 'streakCap']],
+			['deposit', ['depositBase', 'depositPerSize', 'depositAmount', 'depositBaseBuoy', 'depositPerSizeBuoy', 'depositAmountBuoy']]
+		],
+		PLUME: [
+			['reach', ['reachRadii', 'rootDepth', 'clipFrac']],
+			['burst', ['ampIdle', 'ampFull', 'speedFull', 'burstHeightStart', 'burstHeightFull', 'fallRamp', 'risingStrength']],
+			['motion', ['leanStrength', 'gustLean', 'swayAmp', 'swayRate', 'swayHeightPhase']],
+			['shape', ['widthBase', 'widthGrowth', 'riseBase', 'risePerSpeed']],
+			['wisps', ['wispRows', 'wispFreq', 'wispCut', 'wispCutEnd', 'tatterFreq', 'tatterThresh', 'tatterThreshCap']],
+			['fade', ['bodyBias', 'coherence', 'coherenceScale', 'tipFade', 'edgeFade', 'alpha', 'alphaCull']]
+		],
+		LOOP: [
+			['whiteness', ['backfaceWhite', 'rampWhite', 'whiteFromJ', 'whiteFromTilt', 'whiteFromStretch', 'whiteJRamp', 'whiteTiltStart', 'whiteTiltFull']],
+			['debug', ['thinSk', 'debugThin']],
+			['stretch', ['stretchJRamp', 'stretchDepth', 'stretchFrothR', 'stretchBack', 'stretchDown']],
+			['gate', ['gateStart', 'gateFull']]
+		],
+		BOWCREST: [
+			['geometry', ['arc', 'standoffFrac', 'thickPerWidth', 'lean', 'minRing']],
+			['taper', ['taperPower', 'taperMin', 'rollRate', 'endFade']],
+			['froth', ['frothAlong', 'frothAround', 'frothBase', 'frothRadiusVar', 'frothProud']],
+			['segments', ['segArc', 'segLip']]
+		],
+		MIST: [
+			['sim', ['extent', 'simRes', 'dyeRes', 'pressureIters', 'velDissipation', 'dyeDissipation', 'vorticity']],
+			['gusts', ['windCarry', 'windGrip', 'gustSlide', 'gustSwirl', 'gustGapMin', 'gustGapVar', 'gustDurMin', 'gustDurVar']],
+			['spume', ['spumeRate', 'spumePerFrame', 'spumeCrestShare']],
+			['look', ['opacityGain', 'brightStart', 'brightEnd', 'hover']]
+		],
+		ENABLE: [
+			['water', ['caustics', 'fftDetail', 'objectWave']],
+			['whitewater', ['loopWhite', 'loopStretch', 'froth', 'crestPlumes', 'whitecapEvents', 'bowCrest']],
+			['spray', ['splashDroplets', 'buoySpray', 'dropletFoam']],
+			['foam', ['foamField', 'foamTrail', 'contactFoam', 'contactEmit', 'turbDissipation']],
+			['mist', ['mist', 'mistGusts']],
+			['meta', ['tuningUI', 'gpuProfile', 'perfLog']]
+		],
+		PROFILE: [
+			['shading', ['vertexSlope', 'skipRefraction', 'skipReflection', 'skipSpecular', 'skipFoam', 'skipRipple', 'skipLoopWhite']],
+			['sims', ['skipRippleSim', 'skipCausticSim', 'skipFoamSim']],
+			['hide', ['hideWater', 'hideObjects', 'hideFroth', 'hideSpray']],
+			['canvas', ['noAntialias', 'opaqueCanvas']],
+			['camera', ['perspectiveCamera', 'perspectiveDistance']],
+			['misc', ['skipLandingCheck', 'buoyLog']]
+		],
+		INSPECT: [
+			['sea', ['simpleSea', 'simpleLambdaM', 'simpleAmpM', 'simpleSteepness', 'simpleHeadingDeg']],
+			['camera', ['camYawDeg', 'camElevDeg']]
+		]
+	};
+	/** Prefix marking a header entry in the sectioned knob list. */
+	const SECTION_MARK = '\u00a7';
+	function sectionKnobs(g: string, hits: string[]): string[] {
+		const secs = KNOB_SECTIONS[g];
+		if (!secs || !hits.length) return hits;
+		const out: string[] = [];
+		const used = new Set<string>();
+		for (const [h, keys] of secs) {
+			const sub = keys.filter((k) => hits.includes(k));
+			if (!sub.length) continue;
+			out.push(SECTION_MARK + h);
+			for (const k of sub) {
+				out.push(k);
+				used.add(k);
+			}
+		}
+		out.push(...hits.filter((k) => !used.has(k)));
+		return out;
+	}
+
 	const groupHits = (g: string) => knobNames(g).filter((k) => matches(g, k));
 
 	function toggleGroup(g: string) {
@@ -524,23 +617,6 @@
 					/>
 				</div>
 
-				<div class="geom">
-					<div><span>sun azimuth</span><span>{sunGeom.az.toFixed(0)}&deg;</span></div>
-					<div class:good={sunGeom.dev < 8} class:bad={sunGeom.dev > 25}>
-						<span>off camera axis</span><span>{sunGeom.dev.toFixed(0)}&deg;{sunGeom.up ? '' : ' (sun down)'}</span>
-					</div>
-					<div><span>rises / sets</span><span>{sunGeom.rise.toFixed(0)}&deg; / {sunGeom.set.toFixed(0)}&deg;</span></div>
-					<div><span>peak altitude</span><span>{sunGeom.peak.toFixed(0)}&deg;</span></div>
-					<div class:bad={sunGeom.alignAt === null}>
-						<span>vertical at phase</span>
-						<span>{sunGeom.alignAt === null ? 'never' : sunGeom.alignAt.toFixed(3)}</span>
-					</div>
-					<div>
-						<span>path angle</span>
-						<span>{sunGeom.angle.toFixed(1)}&deg;</span>
-					</div>
-				</div>
-
 				<label class="bool">
 					<input
 						type="checkbox"
@@ -563,16 +639,6 @@
 					>
 				</label>
 
-				<label class="bool">
-					<input
-						type="checkbox"
-						checked={!!envVals.showCausticMap}
-						onchange={(e) => setEnv('showCausticMap', e.currentTarget.checked)}
-					/>
-					<span class="name" class:mod={envVals.showCausticMap !== ENV_DEFAULTS.showCausticMap}
-						>showCausticMap</span
-					>
-				</label>
 
 				{#each ENV_KNOBS as k (k)}
 					{@const r = ENV_RANGE[k]}
@@ -620,7 +686,7 @@
 			{#each GROUP_NAMES as g (g)}
 				{@const hits = groupHits(g)}
 				{#if hits.length}
-					{@const shown = search.trim() ? hits : open.has(g) ? hits : []}
+					{@const shown = sectionKnobs(g, search.trim() ? hits : open.has(g) ? hits : [])}
 					{@const mods = knobNames(g).filter((k) => isModified(g, k)).length}
 					<section class="grp">
 						<h3>
@@ -634,6 +700,9 @@
 						</h3>
 
 						{#each shown as k (k)}
+							{#if k.startsWith(SECTION_MARK)}
+								<div class="shead">{k.slice(1)}</div>
+							{:else}
 							{@const v = valueOf(g, k)}
 							{#if typeof v === 'boolean'}
 								<label class="bool" class:staged={isStaged(g, k)}>
@@ -673,6 +742,7 @@
 									/>
 								</div>
 							{/if}
+							{/if}
 						{/each}
 					</section>
 				{/if}
@@ -682,6 +752,14 @@
 {/if}
 
 <style>
+	.shead {
+		margin: 10px 0 2px;
+		font-size: 10px;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: #6d8296;
+	}
+
 	.reveal,
 	.panel {
 		position: absolute;
@@ -818,9 +896,6 @@
 		padding-top: 3px;
 		border-top: 1px solid #1c2833;
 		color: #55708a;
-	}
-	.geom .bad {
-		color: #d3a34a;
 	}
 
 	.help {

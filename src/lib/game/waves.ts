@@ -21,7 +21,7 @@
  */
 
 import * as THREE from 'three'
-import { CURRENT, INSPECT, SEA, UNIFIED } from './tuning'
+import { CURRENT, INSPECT, SEA } from './tuning'
 
 export type WaveParams = {
   /** Unit direction of travel. */
@@ -305,7 +305,7 @@ export const SEA_PRESETS = {
    * SPECULAR.driveCurve set to 1 (linear) by over 6x.
    *
    * Not a sea to ship — a 145m primary swell barely fits the view. Reach
-   * for it with /?sea=test, or use UNIFIED.lambdaScale to sweep the same
+   * for it with /?sea=test, or use SEA.lambdaScale to sweep the same
    * axis continuously.
    */
   test: {
@@ -736,13 +736,10 @@ export function setSeaPivot(x: number, z: number, t: number) {
 }
 
 export function applySeaState(state: number, chopOverride: number) {
-  const next = cloneField(
-    SEA.useUnified
-      ? unifiedField()
-      : state >= 0
-        ? fieldForSeaState(state)
-        : pickPreset(),
-  )
+  // The unified field is the only live sea now. `state` is kept in the
+  // signature for the coming repurpose: transitions between SAVED
+  // unified-sea values.
+  const next = cloneField(unifiedField())
   if (chopOverride >= 0) next.chop = chopOverride
   Object.assign(activeField, next)
   const fresh = INSPECT.simpleSea ? simpleSeaWaves() : generateWaves(activeField)
@@ -772,8 +769,8 @@ export function applySeaState(state: number, chopOverride: number) {
 /**
  * The unified sea's FIXED band structure. Wavelengths, headings, spreads
  * and the slope BALANCE between bands live here as constants; the
- * UNIFIED.waves dial scales the slopes uniformly, and nothing else about
- * a band ever moves. See the UNIFIED doc in tuning.ts for why.
+ * SEA.waves dial scales the slopes uniformly, and nothing else about
+ * a band ever moves. See the unified-field doc in tuning.ts (SEA group) for why.
  */
 const UNIFIED_BANDS: WaveBand[] = [
   // 1 PRIMARY SWELL
@@ -866,7 +863,7 @@ function energyFactors() {
  * rebuild, which is what makes every knob live.
  */
 export function unifiedField(): WaveFieldConfig {
-  const U = UNIFIED
+  const U = SEA
   const E = energyFactors()
   const w = Math.min(Math.max(U.waves, 0), 2)
   // Geometric through the landmarks: slopes span ~23x calm-to-storm, and
@@ -969,13 +966,7 @@ export function generateWaves(
 }
 
 /** The preset actually in effect this session (after the ?sea= override). */
-export const activeField: WaveFieldConfig = cloneField(
-  SEA.useUnified
-    ? unifiedField()
-    : SEA.seaState >= 0
-      ? fieldForSeaState(SEA.seaState)
-      : pickPreset(),
-)
+export const activeField: WaveFieldConfig = cloneField(unifiedField())
 
 // Test override, applied BEFORE the field is generated: chop sets every
 // wave's Gerstner q below, so it has to land before generateWaves runs.

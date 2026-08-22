@@ -39,7 +39,7 @@
 
 import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
-import { CAUSTICS, PROFILE } from './tuning'
+import { CAUSTICS } from './tuning'
 import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
 /**
@@ -87,22 +87,18 @@ export const CAUSTIC_RESOLUTION =
 // depth-independent.
 const TILES = 20
 /**
- * Rays per tile side for a given target spacing (CAUSTICS.raySpacingM).
- * Sized from the base extent: the dynamic window-sized extent once grew
- * the tiles under a fixed 48-ray grid, and the ~40% coarser lattice was
- * a visible regression in exactly the fine filaments the knobs were
- * tuned for. FLOOR at 48 rays — on smaller windows the target-spacing
- * formula lands below it, and the floor is the density the look was
- * approved at; the knob buys rays above the floor, never sells below.
- * The live extent can still exceed the base under a deep seabed — the
- * pattern is depth-blurred there anyway.
+ * Rays per tile side, holding ~0.104m ray spacing — the density the
+ * pattern was tuned at (the dynamic window-sized extent once grew the
+ * tiles under a fixed 48-ray grid, and the coarser lattice was a visible
+ * regression). Floored at 48 a side: on small windows that is finer than
+ * the target, and it is the density the look was approved at. Was a live
+ * knob (raySpacingM); retired once temporal accumulation + adaptive
+ * receiver taps made density a solved problem rather than a dial.
  */
-function tileGridFor(spacingM: number): number {
-  return Math.min(
-    Math.max(Math.round(CAUSTIC_EXTENT / TILES / Math.max(spacingM, 0.03)), 48),
-    96,
-  )
-}
+const TILE_GRID = Math.min(
+  Math.max(Math.round(CAUSTIC_EXTENT / TILES / 0.104), 48),
+  96,
+)
 /** Vertex budget: cap on simultaneously active tiles (~140k verts). */
 // Budget for the splat region. A LOW sun needs many more tiles: entry
 // points sit sunward of the landing point by depth * tan(zenith), so the
@@ -136,16 +132,10 @@ uniform float uSphereRadius;
 uniform float uPlaneDepth;
 uniform float uTime;
 uniform float uAmp;
-uniform float uRayD; // finite-difference step, half the ray spacing (m)
 uniform float uMaxBright;
 uniform vec2 uJitter; // per-frame lattice offset, world metres
-${
-  PROFILE.pointCausticSplat
-    ? ''
-    : PROFILE.flatCausticSplat
-      ? 'varying vec2 vOld;\nvarying vec2 vNew;'
-      : 'varying float vBright;'
-}
+varying vec2 vOld;
+varying vec2 vNew;
 
 ${wavesGlsl()}
 
@@ -208,37 +198,14 @@ vec3 causticLand(vec2 sxz) {
 void main() {
 	vec2 domainUv = (aTile + uv) / ${TILES}.0;
 	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter + uJitter;
-${
-  PROFILE.pointCausticSplat
-    ? `	// PHOTON mode: one ray, one 1-texel point of unit energy. The map
-	// is the ray-density histogram; brightness emerges from density and
-	// the mean-normalisation sets the scale. Speckle by construction —
-	// temporalAA is the integrator that makes it converge.
-	vec3 land = causticLand(sxz);
-	gl_PointSize = 1.0;`
-    : PROFILE.flatCausticSplat
-      ? `	// FLAT mode (PROFILE.flatCausticSplat): one ray, brightness from
-	// the fragment stage's derivatives — cheap, beaded filaments.
+	// One ray, flat per-triangle brightness from the fragment stage's
+	// derivatives. Under temporal accumulation this is the winning
+	// estimator: geometrically honest per frame, integrated over jittered
+	// lattices. (The per-vertex-interpolated and photon variants were
+	// tried and retired.)
 	vec3 land = causticLand(sxz);
 	vOld = sxz;
-	vNew = land.xz;`
-    : `	// PER-VERTEX brightness, interpolated across the triangles. The old
-	// per-fragment derivative version was constant across each warped
-	// triangle — the whole map was a flat-shaded mosaic at ray-grid
-	// pitch, which read as grain along every thin filament. Here the
-	// warp's Jacobian is finite-differenced at the vertex itself (two
-	// extra ray traces at half the ray spacing) and the rasterizer
-	// interpolates smoothly between vertices — the grain's actual cause,
-	// removed, with no blur anywhere. (PROFILE.flatCausticSplat is the
-	// cheap fallback.)
-	vec3 land = causticLand(sxz);
-	vec3 landU = causticLand(sxz + vec2(uRayD, 0.0));
-	vec3 landV = causticLand(sxz + vec2(0.0, uRayD));
-	vec2 du = landU.xz - land.xz;
-	vec2 dv = landV.xz - land.xz;
-	float newArea = abs(du.x * dv.y - du.y * dv.x);
-	vBright = clamp(uRayD * uRayD / max(newArea, 1e-7), 0.0, uMaxBright);`
-}
+	vNew = land.xz;
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
@@ -278,23 +245,16 @@ void main() {
 	gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);
 }`
 
-const splatFragment = PROFILE.pointCausticSplat
-  ? `
-void main() {
-	// Unit-energy photon; scale is the mean-normalisation's problem.
-	gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
-}`
-  : PROFILE.flatCausticSplat
-  ? `
+const splatFragment = `
 uniform float uMaxBright;
 varying vec2 vOld;
 varying vec2 vNew;
 
 void main() {
-	// FLAT mode: differential-area brightness from screen-space
-	// derivatives — constant per warped triangle. True parallelogram
-	// areas (the 2D cross), not length x length: the axis-product
-	// overestimates sheared patches and speckles fold filaments.
+	// Differential-area brightness from screen-space derivatives —
+	// constant per warped triangle. True parallelogram areas (the 2D
+	// cross), not length x length: the axis-product overestimates
+	// sheared patches and speckles fold filaments.
 	vec2 ox = dFdx(vOld);
 	vec2 oy = dFdy(vOld);
 	vec2 nx = dFdx(vNew);
@@ -302,14 +262,6 @@ void main() {
 	float oldArea = abs(ox.x * oy.y - ox.y * oy.x);
 	float newArea = abs(nx.x * ny.y - nx.y * ny.x);
 	gl_FragColor = vec4(clamp(oldArea / max(newArea, 1e-7), 0.0, uMaxBright), 0.0, 0.0, 1.0);
-}`
-  : `
-varying float vBright;
-
-void main() {
-	// Differential-area brightness (1 = neutral, > 1 focused), computed
-	// per vertex in the splat vertex shader and interpolated here.
-	gl_FragColor = vec4(vBright, 0.0, 0.0, 1.0);
 }`
 
 /** Low-discrepancy sequence for the splat jitter — deterministic, so the
@@ -431,7 +383,7 @@ export class CausticMap {
   private blurMaterial: THREE.ShaderMaterial
   private tileAttr: THREE.InstancedBufferAttribute
   private splatGeometry: THREE.InstancedBufferGeometry
-  private splatMesh!: THREE.Mesh | THREE.Points
+  private splatMesh!: THREE.Mesh
   private tileGrid = 48
   private splatScene: THREE.Scene
 
@@ -439,9 +391,7 @@ export class CausticMap {
   private buildSplatGeometry(grid: number): THREE.InstancedBufferGeometry {
     const base = new THREE.PlaneGeometry(1, 1, grid, grid)
     const geo = new THREE.InstancedBufferGeometry()
-    // Photon mode draws POINTS: no index, or the shared interior vertices
-    // of the triangle grid would each land 4-6 photons.
-    if (!PROFILE.pointCausticSplat) geo.index = base.index
+    geo.index = base.index
     geo.setAttribute('position', base.getAttribute('position'))
     geo.setAttribute('uv', base.getAttribute('uv'))
     geo.setAttribute('aTile', this.tileAttr)
@@ -481,7 +431,7 @@ export class CausticMap {
     )
     this.tileAttr.setUsage(THREE.DynamicDrawUsage)
 
-    this.tileGrid = tileGridFor(CAUSTICS.raySpacingM)
+    this.tileGrid = TILE_GRID
     this.splatGeometry = this.buildSplatGeometry(this.tileGrid)
 
     this.material = new THREE.ShaderMaterial({
@@ -494,7 +444,6 @@ export class CausticMap {
         uSunDir: { value: new THREE.Vector3(0.4, 1, 0.3) },
         uSphereCenter: { value: new THREE.Vector3(3, -6, 2) },
         uSphereRadius: { value: 5 },
-        uRayD: { value: 0.05 },
         uMaxBright: { value: 30 },
         uJitter: { value: new THREE.Vector2(0, 0) },
         uPlaneDepth: { value: CAUSTIC_PLANE_DEPTH },
@@ -514,9 +463,7 @@ export class CausticMap {
     })
 
     this.splatScene = new THREE.Scene()
-    this.splatMesh = PROFILE.pointCausticSplat
-      ? new THREE.Points(this.splatGeometry, this.material)
-      : new THREE.Mesh(this.splatGeometry, this.material)
+    this.splatMesh = new THREE.Mesh(this.splatGeometry, this.material)
     const splatMesh = this.splatMesh
     splatMesh.frustumCulled = false
     this.splatScene.add(splatMesh)
@@ -780,20 +727,6 @@ void main() {
         j.set(0, 0)
       }
     }
-    // Live ray-density knob: rebuild the lattice when it moves.
-    const wantGrid = tileGridFor(CAUSTICS.raySpacingM)
-    if (wantGrid !== this.tileGrid) {
-      const count0 = this.splatGeometry.instanceCount
-      this.splatGeometry.dispose()
-      this.tileGrid = wantGrid
-      this.splatGeometry = this.buildSplatGeometry(wantGrid)
-      this.splatGeometry.instanceCount = count0
-      this.splatMesh.geometry = this.splatGeometry
-    }
-    // Finite-difference step for the per-vertex Jacobian: half the ray
-    // spacing, tracking the live extent.
-    this.material.uniforms.uRayD.value =
-      (0.5 * this.extent) / (TILES * this.tileGrid)
     const tileSize = this.extent / TILES
     const half = this.extent / 2
     const rr = tileSize * R // tile half-diagonal

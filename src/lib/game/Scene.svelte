@@ -62,11 +62,9 @@
 	import {
 		CAUSTICS,
 		BOAT,
-		CONTACT,
 		DROPLET,
 		ENABLE,
 		f,
-		FFT,
 		FOAM,
 		FROTH,
 		LOOP,
@@ -77,7 +75,6 @@
 		SPECULAR,
 		PLUME,
 		SEA,
-		UNIFIED,
 		UNDERWATER,
 		INSPECT } from './tuning';
 	import { plumeFragmentGlsl } from './plume';
@@ -361,7 +358,6 @@
 		uUwGlow: { value: UNDERWATER.glow },
 		uUwSeabedOn: { value: UNDERWATER.seabed ? 1 : 0 },
 		uUwSeabedD: { value: UNDERWATER.seabedDepthM },
-		uUwCausticFloor: { value: CAUSTICS.floor },
 		uUwCausticFocus: { value: CAUSTICS.formM },
 		uCausticMean: { value: null as THREE.Texture | null },
 		uCausticPyr1: { value: null as THREE.Texture | null },
@@ -670,7 +666,6 @@ uniform float uUwDim;
 uniform float uUwGlow;
 uniform float uUwSeabedOn;
 uniform float uUwSeabedD;
-uniform float uUwCausticFloor;
 uniform float uUwCausticFocus;
 uniform float uUwCausticBlur;
 uniform sampler2D uCausticMean;
@@ -895,7 +890,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// caustics are in truth sharpest.
 	light = mix(1.0, light, clamp(depthBelow / max(uUwCausticFocus, 0.01), 0.0, 1.0));
 	// Never let a shadow — real, or merely unsplatted — reach black.
-	light = max(light, uUwCausticFloor);
+	light = max(light, 0.35); // shadow floor (was CAUSTICS.floor; retired)
 	${ENABLE.caustics ? '' : 'light = 1.0; // ENABLE.caustics off: flat direct light'}
 	// Direct light is shadow-modulated only (min with 1); fold brightness
 	// arrives as the additive term, cosine-weighted to true irradiance.
@@ -934,48 +929,6 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// The wave-equation sim that owns uRippleTex's contents.
 	const rippleSim = new RippleSim();
 
-	// DEBUG overlay (ENV.showCausticMap): the RAW caustic map on a
-	// screen-locked quad — mean-normalized, sqrt-toned, nothing else. The
-	// instrument that attributes caustic artifacts to a stage: aliased
-	// HERE means the splat or the map texels; clean here but aliased on
-	// receivers means the beam walk, contrast punch, or pyramids.
-	const causticDebugQuad = ENV.showCausticMap
-		? (() => {
-				const mat = new THREE.ShaderMaterial({
-					uniforms: {
-						uMap: { value: null as THREE.Texture | null },
-						uMean: { value: null as THREE.Texture | null },
-						// Fraction of the map shown: the quad displays the
-						// central DEBUG_MAP_VIEW_M metres so ripple-scale
-						// caustics are actually visible.
-						uZoom: { value: 0.2 }
-					},
-					vertexShader: `
-varying vec2 vUv;
-void main() {
-	vUv = uv;
-	gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}`,
-					fragmentShader: `
-uniform sampler2D uMap;
-uniform sampler2D uMean;
-uniform float uZoom;
-varying vec2 vUv;
-void main() {
-	vec2 zuv = (vUv - 0.5) * uZoom + 0.5;
-	float m = max(texture2D(uMean, vec2(0.5)).r, 0.05);
-	float c = texture2D(uMap, zuv).r / m;
-	gl_FragColor = vec4(vec3(sqrt(c * 0.5)), 1.0);
-}`,
-					depthTest: false,
-					depthWrite: false
-				});
-				const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
-				mesh.renderOrder = 1000;
-				mesh.frustumCulled = false;
-				return mesh;
-		  })()
-		: null;
 
 	// The foam thickness field that owns uFoamTex's contents. Stepped at
 	// HALF frame rate: foam evolves on multi-second timescales, the
@@ -1098,12 +1051,10 @@ void main() {
 			seaEased = target;
 			seaVel = 0;
 		}
-		// Any UNIFIED knob must trigger a rebuild too — that group IS the
-		// field when useUnified is on, so its values belong in the key.
-		// Joining the whole group is cheap next to the rebuild it guards.
-		const key = SEA.useUnified
-			? `U${Object.values(UNIFIED).join(',')},${SEA.chopOverride}`
-			: `${seaEased.toFixed(4)},${SEA.chopOverride}`;
+		// Any UNIFIED knob must trigger a rebuild — that group IS the field
+		// now. Joining the whole group is cheap next to the rebuild it
+		// guards.
+		const key = `U${Object.values(SEA).join(',')}`;
 		if (key === seaApplied) return;
 		seaApplied = key;
 		applySeaState(seaEased, SEA.chopOverride);
@@ -1156,7 +1107,7 @@ void main() {
 	// fresh transform of the same spectrum evolved to the current time — so
 	// it can be skipped or restarted freely.
 	const fftDetail = ENABLE.fftDetail ? makeFftDetail() : null;
-	// Frame counter for FFT.stepEvery. Each step is self-contained, so a
+	// Frame counter for SEA.stepEvery. Each step is self-contained, so a
 	// skipped frame just leaves the last slope texture in place.
 	let fftFrame = 0;
 
@@ -1383,10 +1334,10 @@ float contactFoam(vec3 P) {
 	if (uFoaminess < 0.001) return 0.0;
 	// Value noise, not a product of sines: sines are strictly periodic
 	// and gave the edge one wavelength and one amplitude everywhere.
-	float wob = foamNoise(P.xz * ${f(1 / CONTACT.wobbleScale)}) * 0.6
-		+ foamNoise(P.xz * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
-	float w = ${f(CONTACT.width)} * uFoaminess
-		* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
+	float wob = foamNoise(P.xz * ${f(1 / FOAM.collarWobbleScale)}) * 0.6
+		+ foamNoise(P.xz * ${f(2.7 / FOAM.collarWobbleScale)} + 7.0) * 0.4;
+	float w = ${f(FOAM.collarWidth)} * uFoaminess
+		* mix(${f(1 - FOAM.collarWobble)}, ${f(1 + FOAM.collarWobble)}, wob);
 	float m = 0.0;
 	// SPHERE. Two cases, because height must never be a hard gate: BESIDE
 	// is water alongside, out to w past the silhouette at this height;
@@ -1397,12 +1348,12 @@ float contactFoam(vec3 P) {
 	if (rXZ < SPHERE_R + w) {
 		float dy = P.y - SPHERE_C.y;
 		float ring = sqrt(max(SPHERE_R * SPHERE_R - dy * dy, 0.0));
-		float beside = 1.0 - smoothstep(w * ${f(1 - CONTACT.soft)}, w, max(rXZ - ring, 0.0));
+		float beside = 1.0 - smoothstep(w * ${f(1 - FOAM.collarSoft)}, w, max(rXZ - ring, 0.0));
 		float rc = min(rXZ, SPHERE_R);
 		float topY = SPHERE_C.y + sqrt(max(SPHERE_R * SPHERE_R - rc * rc, 0.0));
 		float over = pow(
-			1.0 - smoothstep(0.0, ${f(CONTACT.overwash)}, max(P.y - topY, 0.0)),
-			${f(CONTACT.submergeBias)}
+			1.0 - smoothstep(0.0, ${f(FOAM.collarOverwash)}, max(P.y - topY, 0.0)),
+			${f(FOAM.collarSubmergeBias)}
 		) * step(rXZ, SPHERE_R);
 		m = max(m, max(beside, over));
 	}
@@ -1418,11 +1369,11 @@ float contactFoam(vec3 P) {
 		float d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
 		if (d > w) continue;
 		float vk = pow(
-			1.0 - smoothstep(0.0, ${f(CONTACT.overwash)}, max(lp.y - BUOY_HALF.y, 0.0)),
-			${f(CONTACT.submergeBias)}
-		) * (1.0 - smoothstep(0.0, ${f(CONTACT.liftFade)}, max(-BUOY_HALF.y - lp.y, 0.0)));
-		float wEff = w * mix(${f(CONTACT.spreadFloor)}, 1.0, vk);
-		m = max(m, (1.0 - smoothstep(wEff * ${f(1 - CONTACT.soft)}, wEff, max(d, 0.0))) * vk);
+			1.0 - smoothstep(0.0, ${f(FOAM.collarOverwash)}, max(lp.y - BUOY_HALF.y, 0.0)),
+			${f(FOAM.collarSubmergeBias)}
+		) * (1.0 - smoothstep(0.0, ${f(FOAM.collarLiftFade)}, max(-BUOY_HALF.y - lp.y, 0.0)));
+		float wEff = w * mix(${f(FOAM.collarSpreadFloor)}, 1.0, vk);
+		m = max(m, (1.0 - smoothstep(wEff * ${f(1 - FOAM.collarSoft)}, wEff, max(d, 0.0))) * vk);
 	}
 	return m;
 }
@@ -1802,7 +1753,7 @@ void main() {
 	// equal edges, which is undefined in GLSL and returns 1, so the
 	// calmest sea got the THICKEST collar.
 	float contactT = ${
-		ENABLE.contactFoam ? `contactFoam(vWorld) * ${f(CONTACT.alpha)}` : '0.0'
+		ENABLE.contactFoam ? `contactFoam(vWorld) * ${f(FOAM.collarAlpha)}` : '0.0'
 	};
 	// One web over both, so a fading collar tears into the same lace the
 	// field does, and overlapping foam draws one pattern rather than two.
@@ -2637,13 +2588,13 @@ void main() {
 	 * here and saturate above it.
 	 *
 	 * DERIVED, never written down. As a hand-copied constant it silently
-	 * went stale the moment CONTACT.width was tuned — the tube shrank,
+	 * went stale the moment FOAM.collarWidth was tuned — the tube shrank,
 	 * the ratio against the stale nominal collapsed, and every mass fell
 	 * under FROTH.cullRadius and vanished. Anything that is a function of
 	 * other knobs has to be computed from them.
 	 */
 	const crestRefThick = Math.max(
-		CONTACT.width * CONTACT_FOAMINESS * BOWCREST.thickPerWidth,
+		FOAM.collarWidth * CONTACT_FOAMINESS * BOWCREST.thickPerWidth,
 		0.001
 	);
 
@@ -2678,10 +2629,10 @@ void bowCrestPlace(
 	vec3 d = vec3(0.0);
 	for (int it = 0; it < 3; it++) {
 		vec2 anchorXZ = SPHERE_C.xz + n * ringW;
-		float wob = foamNoise(anchorXZ * ${f(1 / CONTACT.wobbleScale)}) * 0.6
-			+ foamNoise(anchorXZ * ${f(2.7 / CONTACT.wobbleScale)} + 7.0) * 0.4;
-		collarW = ${f(CONTACT.width)} * uFoaminess
-			* mix(${f(1 - CONTACT.wobble)}, ${f(1 + CONTACT.wobble)}, wob);
+		float wob = foamNoise(anchorXZ * ${f(1 / FOAM.collarWobbleScale)}) * 0.6
+			+ foamNoise(anchorXZ * ${f(2.7 / FOAM.collarWobbleScale)} + 7.0) * 0.4;
+		collarW = ${f(FOAM.collarWidth)} * uFoaminess
+			* mix(${f(1 - FOAM.collarWobble)}, ${f(1 + FOAM.collarWobble)}, wob);
 		target = SPHERE_C.xz + n * (ringW + collarW * ${f(BOWCREST.standoffFrac)});
 		// Damped and clamped: the plain iteration only converges where the
 		// displacement gradient is under 1, and that fails at a fold —
@@ -4214,15 +4165,6 @@ void main() {
 			const halfH = window.innerHeight / 2 / zoom;
 			const ox = -halfW + 62 / zoom;
 			const oy = -halfH + 122 / zoom;
-			if (causticDebugQuad && cam) {
-				// Centered on the boat (screen centre), facing the camera,
-				// sized to most of the screen height.
-				const sPx = Math.min(window.innerWidth, window.innerHeight) * 0.85;
-				const sW = sPx / zoom;
-				causticDebugQuad.scale.set(sW, sW, 1);
-				causticDebugQuad.position.set(boat.x, 6, boat.z);
-				causticDebugQuad.quaternion.copy(cam.quaternion);
-			}
 			hudCompass.group.position.set(
 				boat.x + 0.7071 * ox + -0.374 * oy,
 				0.848 * oy,
@@ -4390,7 +4332,7 @@ void main() {
 			if (!PROFILE.skipRippleSim) rippleSim.step(renderer);
 			lap('gpuRipple');
 			waterUniforms.uRippleTex.value = rippleSim.texture;
-			if (fftDetail && fftFrame++ % FFT.stepEvery === 0) {
+			if (fftDetail && fftFrame++ % SEA.stepEvery === 0) {
 				fftDetail.step(renderer, waveTime);
 				const [a, b] = fftDetail.textures;
 				waterUniforms.uFftA.value = a;
@@ -4404,13 +4346,6 @@ void main() {
 			}
 			lap('gpuCaustic');
 			backdropUniforms.uCausticMap.value = causticMap.texture;
-			if (causticDebugQuad) {
-				const u = (causticDebugQuad.material as THREE.ShaderMaterial).uniforms;
-				u.uMap.value = causticMap.texture;
-				u.uMean.value = causticMap.meanTexture;
-				// Central 24m of the domain, whatever the live extent is.
-				u.uZoom.value = 24 / causticMap.extent;
-			}
 			// One foam-field update per TWO frames (decay + diffusion +
 			// drift + queued deposits), then point the water shader at the
 			// fresh side.
@@ -4541,7 +4476,6 @@ void main() {
 				uwUniforms.uUwGlow.value = UNDERWATER.glow;
 				uwUniforms.uUwSeabedOn.value = UNDERWATER.seabed ? 1 : 0;
 				uwUniforms.uUwSeabedD.value = UNDERWATER.seabedDepthM;
-				uwUniforms.uUwCausticFloor.value = CAUSTICS.floor;
 				uwUniforms.uUwCausticFocus.value = CAUSTICS.formM;
 				uwUniforms.uUwCausticBlur.value = CAUSTICS.blurPerM;
 				uwUniforms.uCausticPyr1.value = causticMap.pyr1Texture;
@@ -4563,8 +4497,8 @@ void main() {
 				uwUniforms.uUwSurfaceReflect.value = UNDERWATER.surfaceReflect;
 				waterUniforms.uCausticFlat.value = smooth01(
 					dif,
-					CAUSTICS.flatStart,
-					CAUSTICS.flatEnd
+					0.35, // was CAUSTICS.flatStart; retired at the tuned value
+					1.0 // was CAUSTICS.flatEnd
 				);
 				waterUniforms.uSpecSharpWash.value = sharp * SPECULAR.haloSharp;
 				waterUniforms.uSpecGain.value =
@@ -4957,9 +4891,6 @@ void main() {
 {/if}
 <T is={boatMesh} />
 <T is={hudCompass.group} />
-{#if causticDebugQuad}
-	<T is={causticDebugQuad} />
-{/if}
 <T is={rainbowMesh} />
 
 {#each PROFILE.hideObjects ? [] : buoys as buoy, i (i)}

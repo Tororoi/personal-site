@@ -74,6 +74,32 @@ if (SAVED.ENV && 'sunPathHeadingDeg' in SAVED.ENV) {
 	saveOverrides(SAVED);
 }
 
+// MIGRATION — UNIFIED merged into SEA (2026-08): the unified field IS the
+// sea now, so its saved overrides keep applying under the new home.
+if (SAVED.UNIFIED) {
+	SAVED.SEA = { ...(SAVED.SEA ?? {}), ...SAVED.UNIFIED };
+	delete SAVED.UNIFIED;
+	saveOverrides(SAVED);
+}
+
+// MIGRATION — FFT's lone knob (stepEvery) moved into SEA's detail block.
+if (SAVED.FFT) {
+	SAVED.SEA = { ...(SAVED.SEA ?? {}), ...SAVED.FFT };
+	delete SAVED.FFT;
+	saveOverrides(SAVED);
+}
+
+// MIGRATION — CONTACT (the collar) merged into FOAM under collar* names.
+if (SAVED.CONTACT) {
+	const collar: Record<string, number | boolean> = {};
+	for (const [k, v] of Object.entries(SAVED.CONTACT)) {
+		collar['collar' + k[0].toUpperCase() + k.slice(1)] = v;
+	}
+	SAVED.FOAM = { ...(SAVED.FOAM ?? {}), ...collar };
+	delete SAVED.CONTACT;
+	saveOverrides(SAVED);
+}
+
 /**
  * Patch one config group in place from the saved set, and hand it back so
  * it can be used as an initialiser.
