@@ -11,6 +11,7 @@
 		waves,
 		wavesGlsl,
 		applySeaState,
+		setSeaPivot,
 		fieldForSeaState,
 		generateWaves,
 		waveUniformA,
@@ -4131,6 +4132,8 @@ void main() {
 				// step too (spray after whitecaps: it reads the freshly
 				// scanned break events).
 				setRippleClock(waveTime);
+				// Live sea edits pivot around the boat, not the origin.
+				setSeaPivot(boat.x, boat.z, waveTime);
 				mark = performance.now();
 				updateWhitecaps(STEP, waveTime);
 				tWhitecaps += -mark + (mark = performance.now());

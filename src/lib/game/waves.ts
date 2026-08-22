@@ -715,6 +715,26 @@ export function onFieldChange(fn: () => void) {
   fieldListeners.push(fn)
 }
 
+/**
+ * The PIVOT for live sea edits. Wave phases are anchored at the world
+ * origin, so regenerating with a rotated wind (or scaled wavelengths)
+ * rotates the whole interference pattern about (0,0) — and out at the
+ * boat, kilometres of lever arm turn a small windCompassDeg nudge into
+ * the sea sliding sideways underfoot. applySeaState re-anchors every
+ * component's phase so its TOTAL phase at this point, at this time, is
+ * unchanged: the water under the boat stays put and the far field turns
+ * around the player instead of the origin. The Scene refreshes it each
+ * fixed step.
+ */
+let pivotX = 0
+let pivotZ = 0
+let pivotT = 0
+export function setSeaPivot(x: number, z: number, t: number) {
+  pivotX = x
+  pivotZ = z
+  pivotT = t
+}
+
 export function applySeaState(state: number, chopOverride: number) {
   const next = cloneField(
     SEA.useUnified
@@ -732,7 +752,17 @@ export function applySeaState(state: number, chopOverride: number) {
         `WAVE_COUNT is baked into the shader, so this needs a reload, not a swap.`,
     )
   }
-  for (let i = 0; i < waves.length; i++) Object.assign(waves[i], fresh[i])
+  const TAU = 2 * Math.PI
+  for (let i = 0; i < waves.length; i++) {
+    const o = waves[i]
+    const n = fresh[i]
+    // Preserve the component's total phase at the pivot (see setSeaPivot):
+    // theta = (p . dir) k - omega t + phase must match old and new.
+    const thetaO = (pivotX * o.dirX + pivotZ * o.dirZ) * o.k - o.omega * pivotT + o.phase
+    const thetaN = (pivotX * n.dirX + pivotZ * n.dirZ) * n.k - n.omega * pivotT + n.phase
+    n.phase = (((n.phase + thetaO - thetaN) % TAU) + TAU) % TAU
+    Object.assign(o, n)
+  }
   maxSurfaceRate = waves.reduce((sum, w) => sum + Math.abs(w.amp * w.omega), 0)
   syncWaveUniforms()
   computeMetrics()
