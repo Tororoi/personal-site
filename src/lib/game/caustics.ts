@@ -711,20 +711,30 @@ void main() {
     const cc = this.material.uniforms.uCenter.value as THREE.Vector2
     this.material.uniforms.uExtent.value = this.extent
     this.material.uniforms.uMaxBright.value = CAUSTICS.maxBright
-    // Jitter the ray lattice when accumulating: sub-spacing Halton
-    // offsets, so successive frames sample different lattice phases.
+    // Ray lattice phase = WORLD ANCHOR + Halton jitter. The lattice used
+    // to ride the domain, whose centre snaps to map texels as the boat
+    // moves — every snap translated the rays by a fraction of the ray
+    // spacing, re-rolling the fold-noise pattern faster than the
+    // accumulation could integrate it: caustics flickered exactly while
+    // the screen moved. The counter-phase below pins lattice points to a
+    // world-fixed grid (the snap-to-spacing residual, bounded by half a
+    // spacing — inside the tile marking's rr pad), so motion no longer
+    // changes what the rays sample; only the deliberate jitter does.
     this.frameIdx = (this.frameIdx + 1) % 1024
     const taa = Math.min(Math.max(CAUSTICS.temporalAA, 0), 0.92)
     {
       const raySp = this.extent / (TILES * this.tileGrid)
+      const cc0 = this.material.uniforms.uCenter.value as THREE.Vector2
+      const phaseX = Math.round(cc0.x / raySp) * raySp - cc0.x
+      const phaseZ = Math.round(cc0.y / raySp) * raySp - cc0.y
       const j = this.material.uniforms.uJitter.value as THREE.Vector2
       if (taa > 0) {
         j.set(
-          (halton(this.frameIdx, 2) - 0.5) * raySp,
-          (halton(this.frameIdx, 3) - 0.5) * raySp,
+          phaseX + (halton(this.frameIdx, 2) - 0.5) * raySp,
+          phaseZ + (halton(this.frameIdx, 3) - 0.5) * raySp,
         )
       } else {
-        j.set(0, 0)
+        j.set(phaseX, phaseZ)
       }
     }
     const tileSize = this.extent / TILES
@@ -1048,7 +1058,14 @@ void main() {
    */
   extent = CAUSTIC_EXTENT
   setExtent(e: number) {
-    this.extent = Math.max(CAUSTIC_EXTENT, Math.ceil(e / 2) * 2)
+    const want = Math.max(CAUSTIC_EXTENT, Math.ceil(e / 2) * 2)
+    // HYSTERESIS: grow immediately (coverage is correctness), shrink only
+    // with 6m of slack. The need is recomputed every frame from inputs
+    // that wiggle under motion (unprojected corners lag the camera by a
+    // frame), and each flip across the 2m quantisation changed the
+    // history's texel<->world mapping — a full temporal reseed, showing
+    // one raw-jitter frame: the intermittent flicker while driving.
+    if (want > this.extent || want < this.extent - 6) this.extent = want
   }
   setViewRect(hw: number, hn: number, hf: number) {
     // Guard: the rotated rect must FIT the domain square, or the trusted
