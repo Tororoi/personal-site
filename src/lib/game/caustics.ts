@@ -119,24 +119,16 @@ uniform float uSphereRadius;
 uniform float uPlaneDepth;
 uniform float uTime;
 uniform float uAmp;
-varying vec2 vOld;
-varying vec2 vNew;
-varying float vWeight;
+uniform float uRayD; // finite-difference step, half the ray spacing (m)
+varying float vBright;
 
 ${wavesGlsl()}
 
 attribute vec2 aTile; // active tile origin, in tile units
 
-void main() {
-	vec2 domainUv = (aTile + uv) / ${TILES}.0;
-	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter;
-
-	// The TRUE surface: full ambient Gerstner displacement plus analytic
-	// tangent normals (this is the wave bands entering caustics,
-	// band-limited by the grid), with the interactive ripples on top.
-	// Rays start where the water actually is: a sphere crown standing
-	// proud of a trough is above every ray origin and gets sky, not
-	// caustics.
+// Trace ONE ray: rest position -> true surface (ambient Gerstner +
+// ripples) -> refract -> land on the reference plane.
+vec3 causticLand(vec2 sxz) {
 	vec3 D = waveDisplacement(sxz, uTime, uAmp);
 	vec3 P = vec3(sxz.x + D.x, D.y, sxz.y + D.z);
 	float txx = 0.0;
@@ -179,26 +171,35 @@ void main() {
 	if (refr.y > -0.01) refr = vec3(0.0, -1.0, 0.0); // grazing guard
 
 	// Beam-space: EVERY ray projects to the reference plane; no receiver
-	// intersection here at all. The one exception is an entry point inside
-	// an exposed crown — not water, so its beam carries no light, which is
-	// precisely the crown's shadow in beam space. It still lands along its
-	// geometric path so its triangles stay sane.
-	vec3 origin = P;
-	// NO crown shadow. It used to be splatted here (zero-weight beams for
-	// entry points inside the sphere's waterline circle), but it was the
-	// only cast shadow in the whole game — the sun has no shadow maps and
-	// nothing above water shades anything — and a binary ray-kill at
-	// splat-grid pitch aliased the circle into radial spokes (the
-	// drip-streaks on the buoy's flank). Underwater differs from above
-	// only by absorption, refraction, caustics and scattering; a lone
-	// hard shadow was not on that list. If cast shadows ever arrive,
-	// they should arrive everywhere at once.
-	vWeight = 1.0;
-	float t = max((origin.y + uPlaneDepth) / max(-refr.y, 0.05), 0.0);
-	vec3 land = origin + refr * t;
+	// intersection here. (No crown shadow either: it was the only cast
+	// shadow in the whole game — the sun has no shadow maps and nothing
+	// above water shades anything — and a binary ray-kill aliased the
+	// waterline circle into radial spokes. If cast shadows ever arrive,
+	// they arrive everywhere at once.)
+	float t = max((P.y + uPlaneDepth) / max(-refr.y, 0.05), 0.0);
+	return P + refr * t;
+}
 
-	vOld = sxz;
-	vNew = land.xz;
+void main() {
+	vec2 domainUv = (aTile + uv) / ${TILES}.0;
+	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter;
+
+	// PER-VERTEX brightness, interpolated across the triangles. The old
+	// per-fragment derivative version was constant across each warped
+	// triangle — the whole map was a flat-shaded mosaic at ray-grid
+	// pitch, which read as grain along every thin filament. Here the
+	// warp's Jacobian is finite-differenced at the vertex itself (two
+	// extra ray traces at half the ray spacing) and the rasterizer
+	// interpolates smoothly between vertices — the grain's actual cause,
+	// removed, with no blur anywhere.
+	vec3 land = causticLand(sxz);
+	vec3 landU = causticLand(sxz + vec2(uRayD, 0.0));
+	vec3 landV = causticLand(sxz + vec2(0.0, uRayD));
+	vec2 du = landU.xz - land.xz;
+	vec2 dv = landV.xz - land.xz;
+	float newArea = abs(du.x * dv.y - du.y * dv.x);
+	vBright = clamp(uRayD * uRayD / max(newArea, 1e-7), 0.0, 30.0);
+
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
@@ -239,19 +240,12 @@ void main() {
 }`
 
 const splatFragment = `
-varying vec2 vOld;
-varying vec2 vNew;
-varying float vWeight;
+varying float vBright;
 
 void main() {
-	// Differential-area brightness: how much refraction concentrated this
-	// patch of light. 1 = neutral, > 1 focused, < 1 spread. Zero-weight
-	// beams (crown-blocked) splat darkness by contributing nothing.
-	float oldArea = length(dFdx(vOld)) * length(dFdy(vOld));
-	float newArea = length(dFdx(vNew)) * length(dFdy(vNew));
-	float brightness = clamp(oldArea / max(newArea, 1e-7), 0.0, 30.0);
-	brightness *= vWeight;
-	gl_FragColor = vec4(brightness, 0.0, 0.0, 1.0);
+	// Differential-area brightness (1 = neutral, > 1 focused), computed
+	// per vertex in the splat vertex shader and interpolated here.
+	gl_FragColor = vec4(vBright, 0.0, 0.0, 1.0);
 }`
 
 export class CausticMap {
@@ -330,6 +324,7 @@ export class CausticMap {
         uSunDir: { value: new THREE.Vector3(0.4, 1, 0.3) },
         uSphereCenter: { value: new THREE.Vector3(3, -6, 2) },
         uSphereRadius: { value: 5 },
+        uRayD: { value: 0.05 },
         uPlaneDepth: { value: CAUSTIC_PLANE_DEPTH },
         uTime: { value: 0 },
         uAmp: { value: 1 },
@@ -519,6 +514,9 @@ void main() {
 
     const cc = this.material.uniforms.uCenter.value as THREE.Vector2
     this.material.uniforms.uExtent.value = this.extent
+    // Finite-difference step for the per-vertex Jacobian: half the ray
+    // spacing, tracking the live extent.
+    this.material.uniforms.uRayD.value = (0.5 * this.extent) / (TILES * TILE_GRID)
     const tileSize = this.extent / TILES
     const half = this.extent / 2
     const rr = tileSize * R // tile half-diagonal
