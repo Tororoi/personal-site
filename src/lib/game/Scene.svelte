@@ -2190,6 +2190,8 @@ void main() {
 		uniforms: {
 			// SHARED with the foam: a droplet is foam that is airborne.
 			uColor: waterUniforms.uFoamColor,
+			uStreakPerSpeed: { value: DROPLET.streakPerSpeed },
+			uStreakCap: { value: DROPLET.streakCap },
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
 			uSkyZenith: waterUniforms.uSkyZenith,
@@ -2207,6 +2209,8 @@ attribute vec3 aVel;
 varying float vViewZ;
 varying vec2 vDir;
 varying float vStretch;
+uniform float uStreakPerSpeed;
+uniform float uStreakCap;
 void main() {
 	vec4 view = modelViewMatrix * vec4(position, 1.0);
 	vViewZ = -view.z;
@@ -2217,7 +2221,7 @@ void main() {
 	vec4 c1 = projectionMatrix * (view + vec4(aVel, 0.0));
 	vec2 d = c1.xy / max(c1.w, 0.0001) - c0.xy / max(c0.w, 0.0001);
 	float sp = length(aVel);
-	vStretch = min(1.0 + sp * ${f(DROPLET.streakPerSpeed)}, ${f(DROPLET.streakCap)});
+	vStretch = min(1.0 + sp * uStreakPerSpeed, uStreakCap);
 	vDir = length(d) > 0.00001 ? normalize(d) : vec2(1.0, 0.0);
 	// Same cull as the froth masses — see the note there. This one has
 	// been invisible only by luck: a spent droplet's last position is at or
@@ -3895,7 +3899,7 @@ void main() {
 		// the hull about that point displaces the centre sideways and
 		// sweeps the stern on a long arm — the rudder-kick a turntable
 		// spin lacks. Water-only; an airborne hull spins about its mass.
-		if (boat.wet && BOAT.turnPivotM > 0) {
+		if (boat.wet && BOAT.turnPivotM > 0 && !BOAT.pinned) {
 			boat.x += (Math.cos(headingBefore) - fwdX) * BOAT.turnPivotM;
 			boat.z += (Math.sin(headingBefore) - fwdZ) * BOAT.turnPivotM;
 		}
@@ -3924,6 +3928,14 @@ void main() {
 		// HUD speedometer: speed over ground (the vector's magnitude, not
 		// the forward projection — a drifting or surfing boat is still
 		// travelling). 1 m/s = 1.9438 knots.
+		// PINNED (BOAT.pinned): a moored test hull. Zeroing the velocity —
+		// not just skipping the integration — keeps every downstream
+		// consumer honest: drag maths, knots, course, trim and wake all
+		// read a genuinely stationary boat.
+		if (BOAT.pinned) {
+			boat.vx = 0;
+			boat.vz = 0;
+		}
 		game.knots = Math.hypot(boat.vx, boat.vz) * 1.9438;
 		if (game.knots > 0.4) boat.course = Math.atan2(boat.vz, boat.vx);
 		boat.x += boat.vx * dt;
@@ -4211,6 +4223,8 @@ void main() {
 				mark = performance.now();
 				updateWhitecaps(STEP, waveTime);
 				tWhitecaps += -mark + (mark = performance.now());
+				sprayMaterial.uniforms.uStreakPerSpeed.value = DROPLET.streakPerSpeed;
+				sprayMaterial.uniforms.uStreakCap.value = DROPLET.streakCap;
 				updateSpray(STEP, waveTime);
 				tSpray += -mark + (mark = performance.now());
 				advanceCurrent(STEP, waveTime);

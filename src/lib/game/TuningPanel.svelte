@@ -279,6 +279,7 @@
 		'SEA.detailMax': { min: 0.5, max: 8, step: 0.05 },
 		'SEA.detailSlope': { min: 0, max: 0.15, step: 0.001 },
 		'SEA.stepEvery': { min: 1, max: 6, step: 1 },
+		'DROPLET.maxCount': { min: 0, max: 8192, step: 64 },
 		// Chop thresholds, so they need the chop range — not the 0..1 the
 		// heuristic infers from a default under 1.
 		// Exponent: above 1 is the opposite curve, so leave room for it.
@@ -360,7 +361,7 @@
 			['testing', ['sphereDepth', 'rainbowCard']]
 		],
 		BOAT: [
-			['drive', ['thrust', 'reverseThrust', 'propDepthM']],
+			['drive', ['pinned', 'thrust', 'reverseThrust', 'propDepthM']],
 			['steering', ['turnRate', 'turnMin', 'turnPivotM', 'yawResponse', 'yawWaterDrag', 'airControl']],
 			['hull', ['dragLinear', 'dragQuad', 'keelGrip']],
 			['waves', ['orbitalMotion', 'slopeSlide', 'slideLambdaM', 'breakPush']],

@@ -35,22 +35,19 @@ import { injectRipple } from './ripples'
 import { waves, maxSurfaceRate, SIN_TABLE, COS_TABLE, TRIG_SCALE, TRIG_MASK, type SurfaceSample, onFieldChange } from './waves'
 import { events, MAX_EVENTS, oceanHeight, sampleOcean, windVector, sampleOceanInto } from './whitecaps'
 
-export const MAX_SPRAY = DROPLET.maxCount
+// Hard pool ceiling — buffers and pool are sized once, here, and the
+// LIVE DROPLET.maxCount knob caps how much of the pool alloc() may use
+// (particles above a lowered cap simply age out).
+export const MAX_SPRAY = 8192
 
-const GRAVITY = DROPLET.gravity
 /**
  * Fraction of the wind a flying droplet feels. TEMP: zero — wind is OFF
  * for the loop-splash study; flights are pure gravity arcs. (The tuned
  * value before the study was 0.08.)
  */
-const WIND_CARRY = DROPLET.windCarry
 /** 1/s relaxation of velocity toward the carried wind (air drag). */
-const DRAG = DROPLET.drag
 /** Hard lifetime cap, seconds (safety net; landing is the real death). */
-const LIFE_MAX = DROPLET.lifeMax
 /** Art-scaled droplet radii, meters. */
-const SIZE_MIN = DROPLET.sizeMin
-const SIZE_MAX = DROPLET.sizeMax
 /** Burst size when a crest first lets go, scaled by windFactor. */
 const BURST_BASE = 20
 const BURST_WIND = 36
@@ -94,15 +91,15 @@ const WIND_FULL = 15
  * random offset makes a coarse grid find thin lines over a few passes),
  * with a bonus chance at the LARGER parts of the loop (deeper J).
  */
-const LOOP_SCAN_INTERVAL = DROPLET.scanInterval
-const LOOP_SCAN_STEP = DROPLET.scanStep
 /**
  * Half-extent of the emission scan, metres. Set from the Scene to match
  * the FROTH field's own window-derived extent: a fixed 40 m left froth
  * in the outer corners of a wide window unscanned, so it never threw
  * droplets. Falls back to the tuning value before the Scene reports in.
  */
-let LOOP_SCAN_EXTENT: number = DROPLET.scanExtent
+let SCENE_SCAN_HALF = 0
+/** Live: the wider of the Scene-reported window half and the knob. */
+const LOOP_SCAN_EXTENT = () => Math.max(SCENE_SCAN_HALF, DROPLET.scanExtent)
 
 let SCAN_CX = 0
 let SCAN_CZ = 0
@@ -114,7 +111,7 @@ export function setScanCenter(x: number, z: number) {
 }
 
 export function setScanExtent(halfMetres: number) {
-  LOOP_SCAN_EXTENT = Math.max(halfMetres, DROPLET.scanExtent)
+  SCENE_SCAN_HALF = halfMetres
 }
 
 /**
@@ -412,18 +409,12 @@ function inView(x: number, z: number) {
   return true
 }
 /** Same J test as the white loop render. */
-const LOOP_J = DROPLET.scanJ
-/** Bonus-emission depth scale: J this far below LOOP_J = guaranteed extra. */
-const LOOP_DEPTH_SPAN = DROPLET.depthSpan
+/** Bonus-emission depth scale: J this far below DROPLET.scanJ = guaranteed extra. */
 /**
  * The hop, RELATIVE to the loop: droplets inherit the loop's advance
  * velocity as their base (pinned to its frame), and these constants are
  * the small extra thrown AHEAD of it. Barely up, slightly forward.
  */
-const LOOP_UP_MIN = DROPLET.hopUpMin
-const LOOP_UP_VAR = DROPLET.hopUpVar
-const LOOP_FORWARD_MIN = DROPLET.hopFwdMin
-const LOOP_FORWARD_VAR = DROPLET.hopFwdVar
 /**
  * Cover droplets SURF: the fold pattern travels at the phase velocity of
  * the dominant wave, so the boil advects at exactly that velocity to
@@ -644,9 +635,13 @@ let allocFails = 0
 let culledYoung = 0
 
 function alloc(): SprayParticle | undefined {
-  const p = sprayParticles.find((p) => p.size === 0)
-  if (!p) allocFails++
-  return p
+  // Only the first maxCount slots are allocatable — the live budget cap.
+  const cap = Math.min(DROPLET.maxCount, MAX_SPRAY)
+  for (let i = 0; i < cap; i++) {
+    if (sprayParticles[i].size === 0) return sprayParticles[i]
+  }
+  allocFails++
+  return undefined
 }
 
 // Debug: flicker forensics — pool pressure vs spawn-buried insta-culls.
@@ -670,7 +665,7 @@ if (typeof window !== 'undefined') {
   // Debug: the exact quad the scan is culled to, in world XZ.
   ;(window as unknown as Record<string, unknown>).scanQuad = () => ({
     quad: viewQuad ? [...viewQuad] : null,
-    extent: LOOP_SCAN_EXTENT,
+    extent: LOOP_SCAN_EXTENT(),
   })
 }
 
@@ -699,7 +694,7 @@ function launch(
   p.vy = vy
   p.vz = vz
   p.birth = t
-  p.size = SIZE_MIN + Math.random() * (SIZE_MIN + (SIZE_MAX - SIZE_MIN) * sizeK - SIZE_MIN)
+  p.size = DROPLET.sizeMin + Math.random() * (DROPLET.sizeMin + (DROPLET.sizeMax - DROPLET.sizeMin) * sizeK - DROPLET.sizeMin)
   p.impact = impact
   p.loop = false
   p.crown = 0
@@ -939,7 +934,7 @@ function cellKey(ix: number, iz: number) {
 
 function markHotCells() {
   hotCells.clear()
-  const step = LOOP_SCAN_STEP
+  const step = DROPLET.scanStep
   const band = DROPLET.scanBand
   for (const tr of loopTracks) {
     // Walk the crest line the track spans, and sweep across it.
@@ -976,30 +971,30 @@ function scanLoopSplash(t: number) {
     censusLive.blockedFroth = 0
     censusLive.blockedExpose = 0
     censusLive.blockedPeak = 0
-    scanJx = Math.random() * LOOP_SCAN_STEP
-    scanJz = Math.random() * LOOP_SCAN_STEP
+    scanJx = Math.random() * DROPLET.scanStep
+    scanJz = Math.random() * DROPLET.scanStep
     markHotCells()
   }
   const jx = scanJx
   const jz = scanJz
-  const span = 2 * LOOP_SCAN_EXTENT
-  const x0 = SCAN_CX - LOOP_SCAN_EXTENT + (span * scanSlice) / SCAN_SLICES
-  const x1 = SCAN_CX - LOOP_SCAN_EXTENT + (span * (scanSlice + 1)) / SCAN_SLICES
+  const span = 2 * LOOP_SCAN_EXTENT()
+  const x0 = SCAN_CX - LOOP_SCAN_EXTENT() + (span * scanSlice) / SCAN_SLICES
+  const x1 = SCAN_CX - LOOP_SCAN_EXTENT() + (span * (scanSlice + 1)) / SCAN_SLICES
   for (
     let x = x0 + jx;
     x < x1;
-    x += LOOP_SCAN_STEP
+    x += DROPLET.scanStep
   ) {
     for (
-      let z = SCAN_CZ - LOOP_SCAN_EXTENT + jz;
-      z <= SCAN_CZ + LOOP_SCAN_EXTENT;
-      z += LOOP_SCAN_STEP
+      let z = SCAN_CZ - LOOP_SCAN_EXTENT() + jz;
+      z <= SCAN_CZ + LOOP_SCAN_EXTENT();
+      z += DROPLET.scanStep
     ) {
       if (!inView(x, z)) continue
       // ADAPTIVE: full resolution only near a known loop; elsewhere
       // every Nth cell, which is enough to catch a new one forming.
-      const ix = Math.floor(x / LOOP_SCAN_STEP)
-      const iz = Math.floor(z / LOOP_SCAN_STEP)
+      const ix = Math.floor(x / DROPLET.scanStep)
+      const iz = Math.floor(z / DROPLET.scanStep)
       const coarse =
         ((ix % SCAN_COARSE) + SCAN_COARSE) % SCAN_COARSE === 0 &&
         ((iz % SCAN_COARSE) + SCAN_COARSE) % SCAN_COARSE === 0
@@ -1009,7 +1004,7 @@ function scanLoopSplash(t: number) {
       }
       censusLive.sampled++
       const s1 = sampleOceanInto(scanCoarse, x, z, t, 1, 1)
-      if (s1.jacobian > LOOP_J) continue
+      if (s1.jacobian > DROPLET.scanJ) continue
       censusLive.recorded++
       // Qualifying points get a REFINED sample for their ANCHOR: the
       // 1-iteration rest inversion is centimeter-grade on calm water but
@@ -1023,7 +1018,7 @@ function scanLoopSplash(t: number) {
       // shallow grazes stay at 4 while the deepest inversions throw 16
       // (2x the old flat-bonus max). Stochastic rounding keeps the
       // fractional part honest instead of stair-stepping.
-      const depth = Math.min((LOOP_J - s1.jacobian) / LOOP_DEPTH_SPAN, 1)
+      const depth = Math.min((DROPLET.scanJ - s1.jacobian) / DROPLET.depthSpan, 1)
       const raw = 4 * Math.pow(2, 2 * depth)
       let count = Math.floor(raw)
       if (Math.random() < raw - count) count++
@@ -1161,15 +1156,15 @@ function scanLoopSplash(t: number) {
     const oz0 = orbLen > 0.01 ? orb.z / orbLen : thz
     for (let k = 0; k < count; k++) {
       const forward =
-        (LOOP_FORWARD_MIN + Math.random() * LOOP_FORWARD_VAR) * sizeK * speedK
+        (DROPLET.hopFwdMin + Math.random() * DROPLET.hopFwdVar) * sizeK * speedK
       // A droplet can never be larger than a fraction of the mass that
       // threw it — tiny froth was shedding droplets bigger than itself.
-      const sizeCap = Math.max(frothR * DROPLET.sizeVsFroth, SIZE_MIN)
+      const sizeCap = Math.max(frothR * DROPLET.sizeVsFroth, DROPLET.sizeMin)
       const size = Math.min(
-        SIZE_MIN + Math.random() * (SIZE_MAX - SIZE_MIN),
+        DROPLET.sizeMin + Math.random() * (DROPLET.sizeMax - DROPLET.sizeMin),
         sizeCap,
       )
-      const up = LOOP_UP_MIN + Math.random() * LOOP_UP_VAR
+      const up = DROPLET.hopUpMin + Math.random() * DROPLET.hopUpVar
       // Start on the froth ball's LEADING FACE, not at its centre: the
       // mass is a metre across and opaque, so a droplet born at the
       // centre is simply inside it — invisible until it has travelled
@@ -1500,7 +1495,7 @@ export function updateSpray(dt: number, t: number) {
   cost.emit += c1 - c0
 
   coverScanClock += dt
-  if (coverScanClock >= LOOP_SCAN_INTERVAL / SCAN_SLICES) {
+  if (coverScanClock >= DROPLET.scanInterval / SCAN_SLICES) {
     coverScanClock = 0
     scanLoopSplash(t)
     if (scanSlice === 0) refreshInjectors(t)
@@ -1518,7 +1513,7 @@ export function updateSpray(dt: number, t: number) {
   for (let i = 0; i < sprayParticles.length; i++) {
     const p = sprayParticles[i]
     if (p.size === 0) continue
-    if (t - p.birth > LIFE_MAX) {
+    if (t - p.birth > DROPLET.lifeMax) {
       p.size = 0
       continue
     }
@@ -1554,7 +1549,7 @@ export function updateSpray(dt: number, t: number) {
       p.az += fr.vz * dt
       p.ox += p.rvx * dt
       p.oz += p.rvz * dt
-      p.vy -= GRAVITY * dt
+      p.vy -= DROPLET.gravity * dt
       p.y += p.vy * dt
       p.x = p.ax + fr.swayX + p.ox
       p.z = p.az + fr.swayZ + p.oz
@@ -1564,14 +1559,14 @@ export function updateSpray(dt: number, t: number) {
       p.vz = fr.vz + p.rvz
     } else {
       // Drag toward the carried wind; gravity owns the vertical. With
-      // the wind study OFF (WIND_CARRY 0) drag would relax droplets
+      // the wind study OFF (DROPLET.windCarry 0) drag would relax droplets
       // toward a world-still frame and bleed launch velocity — skip it.
-      if (WIND_CARRY > 0) {
-        const k = Math.min(DRAG * dt, 1)
-        p.vx += (wind.x * WIND_CARRY - p.vx) * k
-        p.vz += (wind.z * WIND_CARRY - p.vz) * k
+      if (DROPLET.windCarry > 0) {
+        const k = Math.min(DROPLET.drag * dt, 1)
+        p.vx += (wind.x * DROPLET.windCarry - p.vx) * k
+        p.vz += (wind.z * DROPLET.windCarry - p.vz) * k
       }
-      p.vy -= GRAVITY * dt
+      p.vy -= DROPLET.gravity * dt
       p.x += p.vx * dt
       p.y += p.vy * dt
       p.z += p.vz * dt

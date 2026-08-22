@@ -2160,6 +2160,13 @@ export const INSPECT = {
  * submersion) with its own constants, plus drive. All live.
  */
 export const BOAT = {
+  /**
+   * PIN the hull's world position: horizontal velocity is zeroed every
+   * step, so no force — thrust, waves, surf, slide, current — moves it.
+   * It still heaves, rolls, pitches and steers in place: a moored test
+   * boat, for watching a spot without drifting off it.
+   */
+  pinned: false,
   /** m/s^2 at full throttle. */
   thrust: 6.0,
   reverseThrust: 1.5,
@@ -2405,4 +2412,15 @@ export const LIVE_GROUPS = new Set([
   // Every CAUSTICS knob reaches the scene through a per-frame uniform
   // (or the map's own per-step property), so the whole group is live.
   'CAUSTICS',
+  // Pure CPU groups: every knob is read fresh inside per-frame functions
+  // (whitecaps.ts gust machinery, current.ts meander), nothing baked.
+  'WIND',
+  'CURRENT',
+  // CPU particles, de-cached for liveness: the pool allocates at a hard
+  // ceiling (MAX_SPRAY) and maxCount is a live cap on alloc(); the
+  // streak pair reaches the spray shader as uniforms.
+  'DROPLET',
 ])
+// Of the staged remainder: ENABLE/PROFILE gate shader COMPILATION;
+// LOOP/FROTH/BOWCREST/PLUME/FOAM/MIST/OBJWAVE interpolate into GLSL as
+// literals; INSPECT re-bakes geometry and the camera axis.
