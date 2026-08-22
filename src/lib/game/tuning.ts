@@ -1586,12 +1586,22 @@ export const PROFILE = {
   vertexSlope: false,
   /**
    * Splat brightness from per-fragment derivatives (FLAT per warped
-   * triangle) instead of the per-vertex Jacobian trace. Cheaper by two
-   * ray evaluations per splat vertex (~3x less splat vertex ALU), but
-   * thin filaments come out as beaded triangle steps instead of smooth
-   * gradients. The perf/quality A/B for the caustic splat.
+   * triangle) instead of the per-vertex Jacobian trace. Under temporal
+   * accumulation this is the BETTER estimator: noisier per frame but
+   * geometrically honest, and the accumulation integrates the noise
+   * while the per-vertex smoothing just converges to its own blur —
+   * hence default ON (and cheaper: one ray per vertex, not three).
    */
-  flatCausticSplat: false,
+  flatCausticSplat: true,
+  /**
+   * PHOTON MODE (wins over flatCausticSplat): each ray is a single
+   * 1-texel point of equal energy, additively accumulated — the map is
+   * a pure ray-density histogram, the sharpest unbiased estimator at
+   * texel resolution. Raw frames are speckle; temporalAA is what makes
+   * it converge, so keep that on. Cheapest splat of the three (no
+   * Jacobian at all — density IS brightness).
+   */
+  pointCausticSplat: false,
   /** Underwater raytrace: refract, sphere + 3 buoy intersections, shade. */
   skipRefraction: false,
   /** Fresnel blend and the sky-gradient reflection. */
@@ -2091,15 +2101,6 @@ export const CAUSTICS = {
    * extent or lattice change. 0 disables jitter and accumulation both.
    */
   temporalAA: 0.75,
-  /**
-   * SUBPIXEL caustic taps per underwater pixel, 1..256. Rounded to a
-   * square grid (1, 4, 9, 16, ... 256) spread across the pixel's true
-   * footprint on the receiver (hardware derivatives). 1 = single point
-   * sample; more taps integrate the refraction-magnified footprint that
-   * point sampling shimmers over. Cost is linear in taps on every
-   * underwater pixel.
-   */
-  subSamples: 9, // converged by eye: no appreciable gain past 9
   /**
    * EDGE-DIRECTED ANTIALIAS on the splatted map, 0..1. Where the map has
    * a strong gradient (a filament border), texels are blended ALONG the

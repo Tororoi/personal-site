@@ -49,6 +49,7 @@ export const perf = $state({
 	gpuFft: 0,
 	gpuCaustic: 0,
 	gpuFoam: 0,
+	gpuMain: 0,
 	/** Foam field capacity estimate — foam's cost tracks its coverage. */
 	foam: 0,
 	/** Live spray droplets this frame (alpha-blended, so overdraw). */

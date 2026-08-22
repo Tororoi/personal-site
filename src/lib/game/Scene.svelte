@@ -1,6 +1,6 @@
 <script lang="ts">
 	import * as THREE from 'three';
-	import { T, useTask, useThrelte } from '@threlte/core';
+	import { T, useStage, useTask, useThrelte } from '@threlte/core';
 	import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 	import { onDestroy } from 'svelte';
 	import { bakeSdfAtlas } from './sdf';
@@ -35,7 +35,7 @@
 		sampleOceanTracked } from './whitecaps';
 	import { fftSlopeGlsl, makeFftDetail } from './fftwaves';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock, rippleDisplayGain, injectRippleOver } from './ripples';
-	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CausticMap } from './caustics';
+	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CAUSTIC_RESOLUTION, CausticMap } from './caustics';
 	import {
 		emitImpactSpray,
 		MAX_SPRAY,
@@ -89,7 +89,7 @@
 
 	let { active = true }: { active?: boolean } = $props();
 
-	const { scene, renderer, camera } = useThrelte();
+	const { scene, renderer, camera, renderStage } = useThrelte();
 
 	const mobile = window.innerWidth < 720;
 	// The signed-off wireframe tuning view is one URL away: /?wire (composes
@@ -375,7 +375,6 @@
 		uUwSurfaceReflect: { value: UNDERWATER.surfaceReflect },
 		uUwFresnelGraze: { value: UNDERWATER.fresnelGrazing },
 		uUwEntryLoss: { value: UNDERWATER.entryLoss },
-		uUwSubN: { value: 4 },
 		/** Where the caustic map holds real data; see caustics.ts. */
 		uCausticValid: { value: new THREE.Vector4(0, 0, 0, 0) },
 		uCausticValidF: { value: 0 }
@@ -751,7 +750,6 @@ uniform float uUwAmbTint;
 uniform float uUwWrap;
 uniform float uUwSurfaceReflect;
 uniform float uUwFresnelGraze;
-uniform float uUwSubN; // taps per footprint axis (subSamples, square grid)
 uniform vec4 uCausticValid;   // xy = rect centre (world xz), z = right half-extent, w = near
 uniform float uCausticValidF; // far (up-screen) half-extent
 
@@ -849,11 +847,17 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 			ddx *= 2.4 / dpm;
 			ddy *= 2.4 / dpm;
 		}
+		// ADAPTIVE tap count: the footprint's size in MAP TEXELS decides
+		// how many samples the integral needs. One tap where the pixel
+		// spans less than a texel (most flat-on water — the bulk of the
+		// screen), ramping to 3x3 (the by-eye convergence point; more
+		// bought nothing) where refraction magnifies the footprint.
+		float ftex = dpm * (${CAUSTIC_RESOLUTION}.0 / uCausticExtent);
+		int n = int(clamp(ftex * 0.5 + 0.5, 1.0, 3.0));
 		float acc = 0.0;
-		int n = int(uUwSubN + 0.5);
-		for (int i = 0; i < 16; i++) {
+		for (int i = 0; i < 3; i++) {
 			if (i >= n) break;
-			for (int j = 0; j < 16; j++) {
+			for (int j = 0; j < 3; j++) {
 				if (j >= n) break;
 				vec3 Pi = P + ((float(i) + 0.5) / float(n) - 0.5) * ddx
 					+ ((float(j) + 0.5) / float(n) - 0.5) * ddy;
@@ -3520,12 +3524,26 @@ void main() {
 		profGl.finish();
 		profT = performance.now();
 	}
-	function lap(key: 'gpuRipple' | 'gpuFft' | 'gpuCaustic' | 'gpuFoam') {
+	function lap(key: 'gpuRipple' | 'gpuFft' | 'gpuCaustic' | 'gpuFoam' | 'gpuMain') {
 		if (!profGl) return;
 		profGl.finish();
 		const now = performance.now();
 		perf[key] = now - profT;
 		profT = now;
+	}
+	// The MAIN scene render (where the water fragment — refraction,
+	// shadeUnderwater, the subpixel caustic taps — actually runs) happens
+	// in Threlte's render stage, after the sim task. A post-render stage
+	// closes the last lap around it, so map GENERATION (gpuCaustic) and
+	// map CONSUMPTION (gpuMain) are finally separate numbers.
+	if (ENABLE.gpuProfile) {
+		const postRenderStage = useStage('gpu-profile-post', { after: renderStage });
+		useTask(
+			() => {
+				lap('gpuMain');
+			},
+			{ stage: postRenderStage }
+		);
 	}
 
 	// ---------- The player's boat ----------
@@ -4530,10 +4548,6 @@ void main() {
 				uwUniforms.uCausticPyr2.value = causticMap.pyr2Texture;
 				uwUniforms.uUwCausticFocal.value = CAUSTICS.focalM;
 				uwUniforms.uUwCausticContrast.value = CAUSTICS.contrast;
-				uwUniforms.uUwSubN.value = Math.min(
-					Math.max(Math.round(Math.sqrt(CAUSTICS.subSamples)), 1),
-					16
-				);
 				causticMap.sourceBlurM = CAUSTICS.sourceBlurM;
 				uwUniforms.uUwExposure.value = UNDERWATER.exposure;
 				// Clear light drives deep and returns blue; overcast light is

@@ -139,7 +139,13 @@ uniform float uAmp;
 uniform float uRayD; // finite-difference step, half the ray spacing (m)
 uniform float uMaxBright;
 uniform vec2 uJitter; // per-frame lattice offset, world metres
-${PROFILE.flatCausticSplat ? 'varying vec2 vOld;\nvarying vec2 vNew;' : 'varying float vBright;'}
+${
+  PROFILE.pointCausticSplat
+    ? ''
+    : PROFILE.flatCausticSplat
+      ? 'varying vec2 vOld;\nvarying vec2 vNew;'
+      : 'varying float vBright;'
+}
 
 ${wavesGlsl()}
 
@@ -203,8 +209,15 @@ void main() {
 	vec2 domainUv = (aTile + uv) / ${TILES}.0;
 	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter + uJitter;
 ${
-  PROFILE.flatCausticSplat
-    ? `	// FLAT mode (PROFILE.flatCausticSplat): one ray, brightness from
+  PROFILE.pointCausticSplat
+    ? `	// PHOTON mode: one ray, one 1-texel point of unit energy. The map
+	// is the ray-density histogram; brightness emerges from density and
+	// the mean-normalisation sets the scale. Speckle by construction —
+	// temporalAA is the integrator that makes it converge.
+	vec3 land = causticLand(sxz);
+	gl_PointSize = 1.0;`
+    : PROFILE.flatCausticSplat
+      ? `	// FLAT mode (PROFILE.flatCausticSplat): one ray, brightness from
 	// the fragment stage's derivatives — cheap, beaded filaments.
 	vec3 land = causticLand(sxz);
 	vOld = sxz;
@@ -265,7 +278,13 @@ void main() {
 	gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);
 }`
 
-const splatFragment = PROFILE.flatCausticSplat
+const splatFragment = PROFILE.pointCausticSplat
+  ? `
+void main() {
+	// Unit-energy photon; scale is the mean-normalisation's problem.
+	gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+}`
+  : PROFILE.flatCausticSplat
   ? `
 uniform float uMaxBright;
 varying vec2 vOld;
@@ -412,7 +431,7 @@ export class CausticMap {
   private blurMaterial: THREE.ShaderMaterial
   private tileAttr: THREE.InstancedBufferAttribute
   private splatGeometry: THREE.InstancedBufferGeometry
-  private splatMesh!: THREE.Mesh
+  private splatMesh!: THREE.Mesh | THREE.Points
   private tileGrid = 48
   private splatScene: THREE.Scene
 
@@ -420,7 +439,9 @@ export class CausticMap {
   private buildSplatGeometry(grid: number): THREE.InstancedBufferGeometry {
     const base = new THREE.PlaneGeometry(1, 1, grid, grid)
     const geo = new THREE.InstancedBufferGeometry()
-    geo.index = base.index
+    // Photon mode draws POINTS: no index, or the shared interior vertices
+    // of the triangle grid would each land 4-6 photons.
+    if (!PROFILE.pointCausticSplat) geo.index = base.index
     geo.setAttribute('position', base.getAttribute('position'))
     geo.setAttribute('uv', base.getAttribute('uv'))
     geo.setAttribute('aTile', this.tileAttr)
@@ -493,7 +514,9 @@ export class CausticMap {
     })
 
     this.splatScene = new THREE.Scene()
-    this.splatMesh = new THREE.Mesh(this.splatGeometry, this.material)
+    this.splatMesh = PROFILE.pointCausticSplat
+      ? new THREE.Points(this.splatGeometry, this.material)
+      : new THREE.Mesh(this.splatGeometry, this.material)
     const splatMesh = this.splatMesh
     splatMesh.frustumCulled = false
     this.splatScene.add(splatMesh)

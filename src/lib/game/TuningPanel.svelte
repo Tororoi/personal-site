@@ -237,7 +237,6 @@
 		'CAUSTICS.edgeAA': { min: 0, max: 1, step: 0.02 },
 		'CAUSTICS.maxBright': { min: 2, max: 40, step: 0.5 },
 		'CAUSTICS.temporalAA': { min: 0, max: 0.92, step: 0.02 },
-		'CAUSTICS.subSamples': { min: 1, max: 256, step: 1 },
 		'INSPECT.simpleLambdaM': { min: 8, max: 120, step: 1 },
 		'INSPECT.simpleAmpM': { min: 0.05, max: 3, step: 0.05 },
 		'INSPECT.simpleSteepness': { min: 0, max: 1.3, step: 0.01 },
