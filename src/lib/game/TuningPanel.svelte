@@ -233,6 +233,7 @@
 		'UNDERWATER.ambient': { min: 0, max: 1.2, step: 0.01 },
 		'UNDERWATER.direct': { min: 0, max: 1.5, step: 0.01 },
 		'UNDERWATER.seabedDepthM': { min: 2, max: 60, step: 0.5 },
+		'CAUSTICS.raySpacingM': { min: 0.05, max: 0.3, step: 0.002 },
 		'INSPECT.simpleLambdaM': { min: 8, max: 120, step: 1 },
 		'INSPECT.simpleAmpM': { min: 0.05, max: 3, step: 0.05 },
 		'INSPECT.simpleSteepness': { min: 0, max: 1.3, step: 0.01 },

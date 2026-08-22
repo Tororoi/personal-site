@@ -2048,6 +2048,17 @@ export const CAUSTICS = {
    */
   sourceBlurM: 0.05,
   /**
+   * SPLAT RAY SPACING, metres between refracted rays at the surface.
+   * The resolving power of the whole caustic pattern: filaments narrower
+   * than the ray grid come out grainy or beaded. 0.104 is the density
+   * the pattern was originally tuned at; lower is sharper and costs
+   * splat vertices quadratically. The lattice never drops below 48 rays
+   * a side (the historical minimum — on small windows that floor is
+   * finer than this target, and it is what the look was approved at).
+   * Live — the splat lattice rebuilds on the next frame.
+   */
+  raySpacingM: 0.104,
+  /**
    * FOCAL DEPTH, metres below mean water level, where the pattern is
    * sharpest. GATES blurPerM: the floor's blur authority is
    * (floorDepth - focalM) x blurPerM. Physically f ~ 0.24 x wavelength
@@ -2062,7 +2073,7 @@ export const CAUSTICS = {
    * depth. Measured against depth below MEAN water level, so a passing
    * swell does not swing the seabed between sharp and soft.
    */
-  blurPerM: 0.2,
+  blurPerM: 0.1,
   /**
    * FORMATION ramp, metres: refracted rays need a little distance to
    * converge, so there is no pattern at the very interface; it fades in

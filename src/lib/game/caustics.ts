@@ -39,6 +39,7 @@
 
 import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
+import { CAUSTICS } from './tuning'
 import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
 /**
@@ -56,7 +57,8 @@ const viewHalfAxis = (() => {
   // mobile/zoom split; caustics can't import Scene (cycle).
   const zoom = window.innerWidth < 720 ? 18 : 26
   return (
-    0.71 * (window.innerWidth / zoom / 2) + 1.34 * (window.innerHeight / zoom / 2)
+    0.71 * (window.innerWidth / zoom / 2) +
+    1.34 * (window.innerHeight / zoom / 2)
   )
 })()
 /**
@@ -84,8 +86,23 @@ export const CAUSTIC_RESOLUTION =
 // spacing-to-texel ratio stays constant, so splat density per texel is
 // depth-independent.
 const TILES = 20
-/** Rays per tile side: 5m tile / 48 = 0.104m spacing, the approved density. */
-const TILE_GRID = 48
+/**
+ * Rays per tile side for a given target spacing (CAUSTICS.raySpacingM).
+ * Sized from the base extent: the dynamic window-sized extent once grew
+ * the tiles under a fixed 48-ray grid, and the ~40% coarser lattice was
+ * a visible regression in exactly the fine filaments the knobs were
+ * tuned for. FLOOR at 48 rays — on smaller windows the target-spacing
+ * formula lands below it, and the floor is the density the look was
+ * approved at; the knob buys rays above the floor, never sells below.
+ * The live extent can still exceed the base under a deep seabed — the
+ * pattern is depth-blurred there anyway.
+ */
+function tileGridFor(spacingM: number): number {
+  return Math.min(
+    Math.max(Math.round(CAUSTIC_EXTENT / TILES / Math.max(spacingM, 0.03)), 48),
+    96,
+  )
+}
 /** Vertex budget: cap on simultaneously active tiles (~140k verts). */
 // Budget for the splat region. A LOW sun needs many more tiles: entry
 // points sit sunward of the landing point by depth * tan(zenith), so the
@@ -272,7 +289,21 @@ export class CausticMap {
   private blurMaterial: THREE.ShaderMaterial
   private tileAttr: THREE.InstancedBufferAttribute
   private splatGeometry: THREE.InstancedBufferGeometry
+  private splatMesh!: THREE.Mesh
+  private tileGrid = 48
   private splatScene: THREE.Scene
+
+  /** One ray lattice tile; rebuilt live when raySpacingM moves. */
+  private buildSplatGeometry(grid: number): THREE.InstancedBufferGeometry {
+    const base = new THREE.PlaneGeometry(1, 1, grid, grid)
+    const geo = new THREE.InstancedBufferGeometry()
+    geo.index = base.index
+    geo.setAttribute('position', base.getAttribute('position'))
+    geo.setAttribute('uv', base.getAttribute('uv'))
+    geo.setAttribute('aTile', this.tileAttr)
+    geo.instanceCount = 0
+    return geo
+  }
   private blurScene: THREE.Scene
   private splatCamera: THREE.OrthographicCamera
   private clearColor = new THREE.Color(0, 0, 0)
@@ -305,14 +336,8 @@ export class CausticMap {
     )
     this.tileAttr.setUsage(THREE.DynamicDrawUsage)
 
-    const base = new THREE.PlaneGeometry(1, 1, TILE_GRID, TILE_GRID)
-    const geo = new THREE.InstancedBufferGeometry()
-    geo.index = base.index
-    geo.setAttribute('position', base.getAttribute('position'))
-    geo.setAttribute('uv', base.getAttribute('uv'))
-    geo.setAttribute('aTile', this.tileAttr)
-    geo.instanceCount = 0
-    this.splatGeometry = geo
+    this.tileGrid = tileGridFor(CAUSTICS.raySpacingM)
+    this.splatGeometry = this.buildSplatGeometry(this.tileGrid)
 
     this.material = new THREE.ShaderMaterial({
       uniforms: {
@@ -342,7 +367,8 @@ export class CausticMap {
     })
 
     this.splatScene = new THREE.Scene()
-    const splatMesh = new THREE.Mesh(this.splatGeometry, this.material)
+    this.splatMesh = new THREE.Mesh(this.splatGeometry, this.material)
+    const splatMesh = this.splatMesh
     splatMesh.frustumCulled = false
     this.splatScene.add(splatMesh)
 
@@ -467,10 +493,12 @@ void main() {
       depthWrite: false,
     })
     this.meanScene = new THREE.Scene()
-    const meanQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.meanMaterial)
+    const meanQuad = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this.meanMaterial,
+    )
     meanQuad.frustumCulled = false
     this.meanScene.add(meanQuad)
-
   }
 
   get pyr1Texture(): THREE.Texture {
@@ -514,9 +542,20 @@ void main() {
 
     const cc = this.material.uniforms.uCenter.value as THREE.Vector2
     this.material.uniforms.uExtent.value = this.extent
+    // Live ray-density knob: rebuild the lattice when it moves.
+    const wantGrid = tileGridFor(CAUSTICS.raySpacingM)
+    if (wantGrid !== this.tileGrid) {
+      const count0 = this.splatGeometry.instanceCount
+      this.splatGeometry.dispose()
+      this.tileGrid = wantGrid
+      this.splatGeometry = this.buildSplatGeometry(wantGrid)
+      this.splatGeometry.instanceCount = count0
+      this.splatMesh.geometry = this.splatGeometry
+    }
     // Finite-difference step for the per-vertex Jacobian: half the ray
     // spacing, tracking the live extent.
-    this.material.uniforms.uRayD.value = (0.5 * this.extent) / (TILES * TILE_GRID)
+    this.material.uniforms.uRayD.value =
+      (0.5 * this.extent) / (TILES * this.tileGrid)
     const tileSize = this.extent / TILES
     const half = this.extent / 2
     const rr = tileSize * R // tile half-diagonal
@@ -582,7 +621,9 @@ void main() {
     if (count > 0) {
       this.validCenter.set(cc.x, cc.y)
       const dm =
-        idx.length > count ? Math.max(Math.min(keys[idx[count - 1]], 1) - 0.03, 0) : 1
+        idx.length > count
+          ? Math.max(Math.min(keys[idx[count - 1]], 1) - 0.03, 0)
+          : 1
       this.validHw = this.viewHw * dm
       this.validHn = Math.max(bHalf * dm - bMid, 0)
       this.validHf = Math.max(bMid + bHalf * dm, 0)
@@ -707,7 +748,8 @@ void main() {
         // 0.7071 x the smaller half-extent.
         const R2 = 0.70710678
         const bc = (this.validHf - this.validHn) / 2
-        const sHalf = Math.min(this.validHw, (this.validHn + this.validHf) / 2) * R2
+        const sHalf =
+          Math.min(this.validHw, (this.validHn + this.validHf) / 2) * R2
         const mx = this.validCenter.x - R2 * bc
         const mz = this.validCenter.y - R2 * bc
         rect.set(
@@ -823,7 +865,9 @@ void main() {
       Math.round(x / texel) * texel,
       Math.round(z / texel) * texel,
     )
-    ;(this.material.uniforms.uRippleCenter.value as THREE.Vector2).copy(rippleCenter)
+    ;(this.material.uniforms.uRippleCenter.value as THREE.Vector2).copy(
+      rippleCenter,
+    )
   }
 
   dispose() {
