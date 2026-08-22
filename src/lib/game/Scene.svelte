@@ -375,6 +375,7 @@
 		uUwSurfaceReflect: { value: UNDERWATER.surfaceReflect },
 		uUwFresnelGraze: { value: UNDERWATER.fresnelGrazing },
 		uUwEntryLoss: { value: UNDERWATER.entryLoss },
+		uUwSubN: { value: 4 },
 		/** Where the caustic map holds real data; see caustics.ts. */
 		uCausticValid: { value: new THREE.Vector4(0, 0, 0, 0) },
 		uCausticValidF: { value: 0 }
@@ -750,6 +751,7 @@ uniform float uUwAmbTint;
 uniform float uUwWrap;
 uniform float uUwSurfaceReflect;
 uniform float uUwFresnelGraze;
+uniform float uUwSubN; // taps per footprint axis (subSamples, square grid)
 uniform vec4 uCausticValid;   // xy = rect centre (world xz), z = right half-extent, w = near
 uniform float uCausticValidF; // far (up-screen) half-extent
 
@@ -765,6 +767,18 @@ float causticValidity(vec2 beamXZ) {
 	float b = (-d.x - d.y) * 0.70711;
 	float m = max(a - uCausticValid.z, max(-b - uCausticValid.w, b - uCausticValidF));
 	return 1.0 - smoothstep(-3.0, 0.0, m);
+}
+
+// One caustic tap at a receiver point: beam walk to the reference plane,
+// then the depth-defocus pyramid blend. Factored out so the footprint
+// supersampler below can afford as many taps as the look wants.
+float causticTapAt(vec3 Pi, vec3 refrLight, float t1, float t2) {
+	vec2 bxz = Pi.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - Pi.y) / refrLight.y);
+	vec2 cuvI = clamp((bxz - uCausticCenter) / uCausticExtent + 0.5, 0.002, 0.998);
+	float c0 = texture2D(uCausticMap, cuvI).r;
+	float c1 = texture2D(uCausticPyr1, cuvI).r;
+	float c2 = texture2D(uCausticPyr2, cuvI).r;
+	return mix(mix(c0, c1, t1), c2, t2);
 }
 
 vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow, float graze) {
@@ -817,12 +831,36 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 		+ min((1.0 / max(graze, 0.05) - 1.0) * 0.08, 2.0);
 	float caustic;
 	{
-		float c0 = texture2D(uCausticMap, cuvC).r;
-		float c1 = texture2D(uCausticPyr1, cuvC).r;
-		float c2 = texture2D(uCausticPyr2, cuvC).r;
 		float t1 = clamp(spreadM / 0.5, 0.0, 1.0);
 		float t2 = clamp((spreadM - 0.5) / 1.5, 0.0, 1.0);
-		caustic = mix(mix(c0, c1, t1), c2, t2);
+		// SUBPIXEL SAMPLING: hardware derivatives of the hit position give
+		// this pixel's true footprint on the receiver — through the
+		// refraction lens it can span many map texels, and one point
+		// sample of that footprint shimmers. A stratified grid of taps
+		// integrates it (TAPS x TAPS; 2 = rotated-grid quad); averaging
+		// happens in linear light before the mean-normalise, so energy
+		// is exact.
+		// Clamped: at object silhouettes the derivative jumps metres in
+		// one pixel, and taps across that would be noise, not integration.
+		vec3 ddx = dFdx(P);
+		vec3 ddy = dFdy(P);
+		float dpm = max(length(ddx), length(ddy));
+		if (dpm > 2.4) {
+			ddx *= 2.4 / dpm;
+			ddy *= 2.4 / dpm;
+		}
+		float acc = 0.0;
+		int n = int(uUwSubN + 0.5);
+		for (int i = 0; i < 16; i++) {
+			if (i >= n) break;
+			for (int j = 0; j < 16; j++) {
+				if (j >= n) break;
+				vec3 Pi = P + ((float(i) + 0.5) / float(n) - 0.5) * ddx
+					+ ((float(j) + 0.5) / float(n) - 0.5) * ddy;
+				acc += causticTapAt(Pi, refrLight, t1, t2);
+			}
+		}
+		caustic = acc / float(n * n);
 	}
 	// SELF-NORMALIZE by the map's mean over the splatted rect (a 1x1
 	// reduction target, refreshed each step — NOT a mip read; mips on the
@@ -1515,7 +1553,22 @@ void main() {
 	float waterPath = 0.0;
 	${PROFILE.skipRefraction ? `vec3 transmitted = uFloorColor * (0.1 + 0.32 * uLightI);` : `
 	vec3 refr = refract(eye, normal, 0.7519);
-	vec3 oc = vWorld - SPHERE_C;
+	// PER-PIXEL EXACT ENTRY POSITION. vWorld interpolates across 0.5m
+	// quads, so the refracted ray's ORIGIN — and everything the raytrace
+	// hits from it — inherited quad-scale kinks (doubling the mesh
+	// visibly cleaned the bright caustics; this buys the same fix for
+	// one wave loop instead of 4x the vertices). vRest interpolates
+	// EXACTLY (it is linear in the mesh), so re-displacing it here gives
+	// the true analytic surface point, ripples included. The blend is
+	// self-guarding: wherever the rasterized mesh carries displacement
+	// this recompute does not model (loop-stretch folds, whitecap churn,
+	// object waves), pExact diverges from vWorld and the entry falls
+	// back to the mesh — the refracted image never detaches from the
+	// geometry it has to line up with.
+	vec3 pExact = vec3(vRest.x, 0.0, vRest.y) + waveDisplacement(vRest, uTime, uAmp);
+	applyRipples(pExact, pExact.xz);
+	vec3 pEntry = mix(pExact, vWorld, smoothstep(0.04, 0.25, distance(pExact, vWorld)));
+	vec3 oc = pEntry - SPHERE_C;
 	float b = dot(oc, refr);
 	float c = dot(oc, oc) - SPHERE_R * SPHERE_R;
 	float disc = b * b - c;
@@ -1526,13 +1579,13 @@ void main() {
 		float th = -b - sqrt(disc);
 		if (th > 0.0) {
 			tHit = th;
-			hitN = normalize(vWorld + refr * th - SPHERE_C);
+			hitN = normalize(pEntry + refr * th - SPHERE_C);
 		}
 	}
 	// Buoys are in the intersection list too; nearest hit wins.
 	for (int i = 0; i < 3; i++) {
 		vec3 bn;
-		float tb = buoyHit(uBuoyInv[i], vWorld, refr, bn);
+		float tb = buoyHit(uBuoyInv[i], pEntry, refr, bn);
 		if (tb > 0.0 && (tHit < 0.0 || tb < tHit)) {
 			tHit = tb;
 			hitN = bn;
@@ -1541,14 +1594,14 @@ void main() {
 	}
 	{
 		vec3 bn;
-		float tb = boatHit(vWorld, refr, bn);
+		float tb = boatHit(pEntry, refr, bn);
 		if (tb > 0.0 && (tHit < 0.0 || tb < tHit)) {
 			// Project the analytic hit through the camera and read the
 			// boat's actual rendered image there. The polytope shapes the
 			// refraction; the texture carries every modelled detail. Alpha
 			// zero means the ray passed through the bound's slack beside
 			// the real hull — not a hit at all.
-			vec3 bp = vWorld + refr * tb;
+			vec3 bp = pEntry + refr * tb;
 			vec4 bclip = uProj * viewMatrix * vec4(bp, 1.0);
 			vec2 buv = (bclip.xy / bclip.w) * 0.5 + 0.5;
 			vec4 bimg = texture2D(uBoatTex, buv);
@@ -1561,7 +1614,7 @@ void main() {
 	}
 	{
 		vec3 ralb;
-		float tr = rainbowHit(vWorld, refr, ralb);
+		float tr = rainbowHit(pEntry, refr, ralb);
 		if (tr > 0.0 && (tHit < 0.0 || tr < tHit)) {
 			tHit = tr;
 			hitN = vec3(0.0, 1.0, 0.0);
@@ -1570,9 +1623,9 @@ void main() {
 	}
 	vec3 transmitted;
 	if (tHit > 0.0) {
-		vec3 P = vWorld + refr * tHit;
+		vec3 P = pEntry + refr * tHit;
 		waterPath = tHit;
-		transmitted = shadeUnderwater(P, hitN, albedo, tHit, max(vWorld.y - P.y, 0.0), abs(dot(refr, hitN)));
+		transmitted = shadeUnderwater(P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)));
 	} else if (uUwSeabedOn > 0.5 && refr.y < -0.001) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
@@ -1580,11 +1633,11 @@ void main() {
 		// knobs entirely and carried no caustics; the panel then read as
 		// "only affects the sphere". Intersect the refracted ray with the
 		// caustic plane and shade it like any other submerged surface.
-		float tFloor = (-uUwSeabedD - vWorld.y) / refr.y;
-		vec3 Pf = vWorld + refr * tFloor;
+		float tFloor = (-uUwSeabedD - pEntry.y) / refr.y;
+		vec3 Pf = pEntry + refr * tFloor;
 		waterPath = tFloor;
 		transmitted = shadeUnderwater(
-			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(vWorld.y - Pf.y, 0.0), abs(refr.y));
+			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(pEntry.y - Pf.y, 0.0), abs(refr.y));
 	} else {
 		// Seabed off, total internal reflection, or a grazing ray with no
 		// floor ahead: the water column alone. uwVolume() is its
@@ -4477,6 +4530,10 @@ void main() {
 				uwUniforms.uCausticPyr2.value = causticMap.pyr2Texture;
 				uwUniforms.uUwCausticFocal.value = CAUSTICS.focalM;
 				uwUniforms.uUwCausticContrast.value = CAUSTICS.contrast;
+				uwUniforms.uUwSubN.value = Math.min(
+					Math.max(Math.round(Math.sqrt(CAUSTICS.subSamples)), 1),
+					16
+				);
 				causticMap.sourceBlurM = CAUSTICS.sourceBlurM;
 				uwUniforms.uUwExposure.value = UNDERWATER.exposure;
 				// Clear light drives deep and returns blue; overcast light is

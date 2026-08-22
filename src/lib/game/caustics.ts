@@ -85,7 +85,7 @@ export const CAUSTIC_RESOLUTION =
 // extent, and ray spacing (tileSize / TILE_GRID) scales with it — the
 // spacing-to-texel ratio stays constant, so splat density per texel is
 // depth-independent.
-const TILES = 50
+const TILES = 20
 /**
  * Rays per tile side for a given target spacing (CAUSTICS.raySpacingM).
  * Sized from the base extent: the dynamic window-sized extent once grew
@@ -137,6 +137,8 @@ uniform float uPlaneDepth;
 uniform float uTime;
 uniform float uAmp;
 uniform float uRayD; // finite-difference step, half the ray spacing (m)
+uniform float uMaxBright;
+uniform vec2 uJitter; // per-frame lattice offset, world metres
 ${PROFILE.flatCausticSplat ? 'varying vec2 vOld;\nvarying vec2 vNew;' : 'varying float vBright;'}
 
 ${wavesGlsl()}
@@ -199,15 +201,15 @@ vec3 causticLand(vec2 sxz) {
 
 void main() {
 	vec2 domainUv = (aTile + uv) / ${TILES}.0;
-	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter;
+	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter + uJitter;
 ${
-	PROFILE.flatCausticSplat
-		? `	// FLAT mode (PROFILE.flatCausticSplat): one ray, brightness from
+  PROFILE.flatCausticSplat
+    ? `	// FLAT mode (PROFILE.flatCausticSplat): one ray, brightness from
 	// the fragment stage's derivatives — cheap, beaded filaments.
 	vec3 land = causticLand(sxz);
 	vOld = sxz;
 	vNew = land.xz;`
-		: `	// PER-VERTEX brightness, interpolated across the triangles. The old
+    : `	// PER-VERTEX brightness, interpolated across the triangles. The old
 	// per-fragment derivative version was constant across each warped
 	// triangle — the whole map was a flat-shaded mosaic at ray-grid
 	// pitch, which read as grain along every thin filament. Here the
@@ -222,7 +224,7 @@ ${
 	vec2 du = landU.xz - land.xz;
 	vec2 dv = landV.xz - land.xz;
 	float newArea = abs(du.x * dv.y - du.y * dv.x);
-	vBright = clamp(uRayD * uRayD / max(newArea, 1e-7), 0.0, 30.0);`
+	vBright = clamp(uRayD * uRayD / max(newArea, 1e-7), 0.0, uMaxBright);`
 }
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
@@ -265,6 +267,7 @@ void main() {
 
 const splatFragment = PROFILE.flatCausticSplat
   ? `
+uniform float uMaxBright;
 varying vec2 vOld;
 varying vec2 vNew;
 
@@ -279,7 +282,7 @@ void main() {
 	vec2 ny = dFdy(vNew);
 	float oldArea = abs(ox.x * oy.y - ox.y * oy.x);
 	float newArea = abs(nx.x * ny.y - nx.y * ny.x);
-	gl_FragColor = vec4(clamp(oldArea / max(newArea, 1e-7), 0.0, 30.0), 0.0, 0.0, 1.0);
+	gl_FragColor = vec4(clamp(oldArea / max(newArea, 1e-7), 0.0, uMaxBright), 0.0, 0.0, 1.0);
 }`
   : `
 varying float vBright;
@@ -288,6 +291,90 @@ void main() {
 	// Differential-area brightness (1 = neutral, > 1 focused), computed
 	// per vertex in the splat vertex shader and interpolated here.
 	gl_FragColor = vec4(vBright, 0.0, 0.0, 1.0);
+}`
+
+/** Low-discrepancy sequence for the splat jitter — deterministic, so the
+ * screenshot harness reproduces frame-for-frame (never Math.random). */
+function halton(i: number, base: number): number {
+  let f = 1
+  let r = 0
+  while (i > 0) {
+    f /= base
+    r += f * (i % base)
+    i = Math.floor(i / base)
+  }
+  return r
+}
+
+// ---- Temporal accumulation ----
+// The fresh splat blends UNDER the scrolled history: with the lattice
+// jittered per frame, this integrates the fold-overlap wedge noise away
+// (Monte Carlo over lattice phases — the fold singularity is integrable,
+// so the average converges to the true finite brightness).
+const accumFragment = `
+uniform sampler2D uHist;
+uniform sampler2D uCur;
+uniform float uAlpha;
+uniform vec2 uScroll;
+uniform float uTexelT;
+varying vec2 vUv;
+void main() {
+	vec2 huv = vUv + uScroll;
+	float inH =
+		huv.x > 0.0 && huv.x < 1.0 && huv.y > 0.0 && huv.y < 1.0 ? 1.0 : 0.0;
+	float h = texture2D(uHist, huv).r;
+	float c = texture2D(uCur, vUv).r;
+	// NEIGHBOURHOOD CLAMP: waves move the pattern through the domain, and
+	// unclamped history dragged bright filaments into decaying trails
+	// ("trailing glitter"). Clamp the history into the current frame's
+	// local brightness range (plus a pad for the jitter's own variance):
+	// stale-bright history over now-dark water is rejected within a
+	// frame, while history inside the local range keeps integrating the
+	// lattice noise.
+	float cl = texture2D(uCur, vUv - vec2(uTexelT, 0.0)).r;
+	float cr = texture2D(uCur, vUv + vec2(uTexelT, 0.0)).r;
+	float cd = texture2D(uCur, vUv - vec2(0.0, uTexelT)).r;
+	float cu = texture2D(uCur, vUv + vec2(0.0, uTexelT)).r;
+	float mn = min(c, min(min(cl, cr), min(cd, cu)));
+	float mx = max(c, max(max(cl, cr), max(cd, cu)));
+	float pad = 0.35 * (mx - mn) + 0.05;
+	float hc = clamp(h, mn - pad, mx + pad);
+	gl_FragColor = vec4(mix(c, hc, uAlpha * inH), 0.0, 0.0, 1.0);
+}`
+
+// ---- Edge-directed antialias ----
+// The map's aliasing is the staircase along filament borders: warped
+// splat triangles rasterize their edges in one-texel steps. FXAA-style
+// repair, specialized for a single-channel HDR map: measure the local
+// gradient, and blend ONLY along the isoline (perpendicular to the
+// gradient). Nothing crosses an edge, so the filament's width and peak
+// survive exactly; flat regions fail the edge test and pass through
+// untouched. Not a blur in any direction that matters.
+const edgeAAFragment = `
+uniform sampler2D uSrc;
+uniform float uTexelAA;
+uniform float uAA;
+varying vec2 vUv;
+void main() {
+	float c = texture2D(uSrc, vUv).r;
+	float l = texture2D(uSrc, vUv - vec2(uTexelAA, 0.0)).r;
+	float r = texture2D(uSrc, vUv + vec2(uTexelAA, 0.0)).r;
+	float d = texture2D(uSrc, vUv - vec2(0.0, uTexelAA)).r;
+	float u = texture2D(uSrc, vUv + vec2(0.0, uTexelAA)).r;
+	vec2 g = vec2(r - l, u - d);
+	float gm = length(g);
+	// Scale-invariant edge metric: gradient against local level, so a
+	// dim filament's border counts as much as a bright one's.
+	float level = 0.25 * (l + r + d + u) + 0.5;
+	float w = uAA * smoothstep(0.0005, 0.025, gm / level);
+	if (w < 0.001) {
+		gl_FragColor = vec4(c, 0.0, 0.0, 1.0);
+		return;
+	}
+	vec2 t = vec2(-g.y, g.x) * (uTexelAA / max(gm, 1e-6));
+	float a = texture2D(uSrc, vUv + t).r;
+	float b = texture2D(uSrc, vUv - t).r;
+	gl_FragColor = vec4(mix(c, (c + a + b) / 3.0, w), 0.0, 0.0, 1.0);
 }`
 
 export class CausticMap {
@@ -304,6 +391,17 @@ export class CausticMap {
   sourceBlurM = 0
 
   private target: THREE.WebGLRenderTarget
+  private histA: THREE.WebGLRenderTarget
+  private histB: THREE.WebGLRenderTarget
+  private accumMaterial: THREE.ShaderMaterial
+  private accumScene: THREE.Scene
+  private histSeeded = false
+  private prevCenter = new THREE.Vector2()
+  private prevExtent = 0
+  private prevGrid = 0
+  private frameIdx = 0
+  private aaTarget: THREE.WebGLRenderTarget
+  private aaMaterial: THREE.ShaderMaterial
   private blurTarget: THREE.WebGLRenderTarget
   private blurQuarterA: THREE.WebGLRenderTarget
   private blurQuarterB: THREE.WebGLRenderTarget
@@ -330,6 +428,7 @@ export class CausticMap {
     return geo
   }
   private blurScene: THREE.Scene
+  private aaScene: THREE.Scene
   private splatCamera: THREE.OrthographicCamera
   private clearColor = new THREE.Color(0, 0, 0)
   private savedClearColor = new THREE.Color()
@@ -375,6 +474,8 @@ export class CausticMap {
         uSphereCenter: { value: new THREE.Vector3(3, -6, 2) },
         uSphereRadius: { value: 5 },
         uRayD: { value: 0.05 },
+        uMaxBright: { value: 30 },
+        uJitter: { value: new THREE.Vector2(0, 0) },
         uPlaneDepth: { value: CAUSTIC_PLANE_DEPTH },
         uTime: { value: 0 },
         uAmp: { value: 1 },
@@ -412,6 +513,71 @@ export class CausticMap {
       depthBuffer: false,
       stencilBuffer: false,
     } as const
+    const histOpts = {
+      type: THREE.HalfFloatType,
+      format: THREE.RedFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    } as const
+    this.histA = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION,
+      CAUSTIC_RESOLUTION,
+      histOpts,
+    )
+    this.histB = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION,
+      CAUSTIC_RESOLUTION,
+      histOpts,
+    )
+    this.accumMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uHist: { value: null },
+        uCur: { value: null },
+        uAlpha: { value: 0 },
+        uScroll: { value: new THREE.Vector2(0, 0) },
+        uTexelT: { value: 1 / CAUSTIC_RESOLUTION },
+        uRegion: { value: new THREE.Vector4(0, 0, 1, 1) },
+      },
+      vertexShader: blurVertex,
+      fragmentShader: accumFragment,
+      depthTest: false,
+      depthWrite: false,
+    })
+    this.accumScene = new THREE.Scene()
+    const accumMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this.accumMaterial,
+    )
+    accumMesh.frustumCulled = false
+    this.accumScene.add(accumMesh)
+
+    this.aaTarget = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION,
+      CAUSTIC_RESOLUTION,
+      {
+        type: THREE.HalfFloatType,
+        format: THREE.RedFormat,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+        stencilBuffer: false,
+      },
+    )
+    this.aaMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uSrc: { value: null },
+        uRegion: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uTexelAA: { value: 1 / CAUSTIC_RESOLUTION },
+        uAA: { value: CAUSTICS.edgeAA },
+      },
+      vertexShader: blurVertex,
+      fragmentShader: edgeAAFragment,
+      depthTest: false,
+      depthWrite: false,
+    })
+
     this.blurTarget = new THREE.WebGLRenderTarget(
       CAUSTIC_RESOLUTION / 2,
       CAUSTIC_RESOLUTION / 2,
@@ -472,6 +638,13 @@ export class CausticMap {
     )
     blurMesh.frustumCulled = false
     this.blurScene.add(blurMesh)
+    this.aaScene = new THREE.Scene()
+    const aaMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this.aaMaterial,
+    )
+    aaMesh.frustumCulled = false
+    this.aaScene.add(aaMesh)
     const meanOpts = {
       type: THREE.HalfFloatType,
       format: THREE.RedFormat,
@@ -567,6 +740,23 @@ void main() {
 
     const cc = this.material.uniforms.uCenter.value as THREE.Vector2
     this.material.uniforms.uExtent.value = this.extent
+    this.material.uniforms.uMaxBright.value = CAUSTICS.maxBright
+    // Jitter the ray lattice when accumulating: sub-spacing Halton
+    // offsets, so successive frames sample different lattice phases.
+    this.frameIdx = (this.frameIdx + 1) % 1024
+    const taa = Math.min(Math.max(CAUSTICS.temporalAA, 0), 0.92)
+    {
+      const raySp = this.extent / (TILES * this.tileGrid)
+      const j = this.material.uniforms.uJitter.value as THREE.Vector2
+      if (taa > 0) {
+        j.set(
+          (halton(this.frameIdx, 2) - 0.5) * raySp,
+          (halton(this.frameIdx, 3) - 0.5) * raySp,
+        )
+      } else {
+        j.set(0, 0)
+      }
+    }
     // Live ray-density knob: rebuild the lattice when it moves.
     const wantGrid = tileGridFor(CAUSTICS.raySpacingM)
     if (wantGrid !== this.tileGrid) {
@@ -673,6 +863,84 @@ void main() {
     renderer.clear(true, false, false)
     renderer.autoClear = false
     renderer.render(this.splatScene, this.splatCamera)
+
+    // Edge-directed antialias (see edgeAAFragment): repair the filament
+    // staircase before anything downstream reads the map. Runs over the
+    // splatted tile box plus a margin, and skips outright at 0.
+    if (CAUSTICS.edgeAA > 0 && count > 0) {
+      const u0 = (Math.max(tx0 - 1, 0) / TILES) * 2 - 1
+      const u1 = (Math.min(tx1 + 2, TILES) / TILES) * 2 - 1
+      const v0 = (Math.max(tz0 - 1, 0) / TILES) * 2 - 1
+      const v1 = (Math.min(tz1 + 2, TILES) / TILES) * 2 - 1
+      const aaU = this.aaMaterial.uniforms
+      ;(aaU.uRegion.value as THREE.Vector4).set(
+        (u0 + u1) / 2,
+        (v0 + v1) / 2,
+        (u1 - u0) / 2,
+        (v1 - v0) / 2,
+      )
+      aaU.uAA.value = CAUSTICS.edgeAA
+      const blurU = this.blurMaterial.uniforms
+      ;(blurU.uRegion.value as THREE.Vector4).copy(
+        aaU.uRegion.value as THREE.Vector4,
+      )
+      // AA into the scratch, then an identity copy back (the 13-tap blur
+      // at step 0 sums to 1): this.target stays the canonical map every
+      // downstream consumer reads.
+      aaU.uSrc.value = this.target.texture
+      renderer.setRenderTarget(this.aaTarget)
+      renderer.clear(true, false, false)
+      renderer.render(this.aaScene, this.splatCamera)
+      blurU.uSrc.value = this.aaTarget.texture
+      ;(blurU.uStep.value as THREE.Vector2).set(0, 0)
+      renderer.setRenderTarget(this.target)
+      renderer.clear(true, false, false)
+      renderer.render(this.blurScene, this.splatCamera)
+    }
+
+    // TEMPORAL ACCUMULATION (see accumFragment): blend the jittered
+    // fresh splat under the scrolled history, then copy the result back
+    // so every downstream consumer — diffusion, pyramids, mean,
+    // receivers, the debug overlay — reads the integrated map. The
+    // history reseeds whenever its texel<->world mapping changes.
+    if (taa > 0 && count > 0) {
+      const cc3 = this.material.uniforms.uCenter.value as THREE.Vector2
+      const invalid =
+        !this.histSeeded ||
+        this.prevExtent !== this.extent ||
+        this.prevGrid !== this.tileGrid ||
+        Math.abs(cc3.x - this.prevCenter.x) +
+          Math.abs(cc3.y - this.prevCenter.y) >
+          0.2 * this.extent
+      const aU = this.accumMaterial.uniforms
+      ;(aU.uScroll.value as THREE.Vector2).set(
+        (cc3.x - this.prevCenter.x) / this.extent,
+        (cc3.y - this.prevCenter.y) / this.extent,
+      )
+      aU.uAlpha.value = invalid ? 0 : taa
+      aU.uHist.value = this.histB.texture
+      aU.uCur.value = this.target.texture
+      renderer.setRenderTarget(this.histA)
+      renderer.clear(true, false, false)
+      renderer.render(this.accumScene, this.splatCamera)
+      // Identity copy back (13-tap blur at step 0 sums to 1).
+      const blurU2 = this.blurMaterial.uniforms
+      ;(blurU2.uRegion.value as THREE.Vector4).set(0, 0, 1, 1)
+      ;(blurU2.uStep.value as THREE.Vector2).set(0, 0)
+      blurU2.uSrc.value = this.histA.texture
+      renderer.setRenderTarget(this.target)
+      renderer.clear(true, false, false)
+      renderer.render(this.blurScene, this.splatCamera)
+      const swap = this.histA
+      this.histA = this.histB
+      this.histB = swap
+      this.histSeeded = true
+      this.prevCenter.copy(cc3)
+      this.prevExtent = this.extent
+      this.prevGrid = this.tileGrid
+    } else {
+      this.histSeeded = false
+    }
 
     // Sun-diffusion blur (see the shader comment). Radius = angular
     // spread x plane depth, capped at a practical kernel — the receiver
@@ -909,6 +1177,11 @@ void main() {
     this.blurQuarterB.dispose()
     this.material.dispose()
     this.blurMaterial.dispose()
+    this.aaTarget.dispose()
+    this.aaMaterial.dispose()
+    this.histA.dispose()
+    this.histB.dispose()
+    this.accumMaterial.dispose()
     this.splatGeometry.dispose()
   }
 }

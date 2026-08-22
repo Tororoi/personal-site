@@ -2067,6 +2067,49 @@ export const CAUSTICS = {
    */
   raySpacingM: 0.104,
   /**
+   * PEAK brightness clamp on the splat, as a multiple of neutral. The
+   * fold singularities are where the pattern's pointwise brightness
+   * genuinely diverges, and the ray lattice sampling that ridge returns
+   * speckle between "large" and this clamp — the aliasing that only
+   * shows on the BRIGHTEST caustics. A real sun is an extended source
+   * (~0.5 deg), which physically bounds peak concentration to roughly
+   * order ten: lower clamps saturate the ridge into a solid bright core
+   * instead of sparkle. 30 was the historical value.
+   */
+  maxBright: 30,
+  /**
+   * TEMPORAL ACCUMULATION, 0..0.92: weight of the running history the
+   * fresh splat blends under each frame. The map's residual aliasing is
+   * fold-overlap wedge noise — the ray lattice sampling near-singular
+   * filaments returns lattice-dependent structure no post-filter can
+   * repair. With this on, the lattice is JITTERED each frame (Halton,
+   * deterministic) and the history integrates the samples: structured
+   * error becomes noise, noise averages away, and on frozen water the
+   * pattern converges to the true integrated brightness. Higher = longer
+   * memory = smoother but laggier under fast seas; 0.75 is ~4 frames.
+   * The history scrolls with the travelling domain and reseeds on any
+   * extent or lattice change. 0 disables jitter and accumulation both.
+   */
+  temporalAA: 0.75,
+  /**
+   * SUBPIXEL caustic taps per underwater pixel, 1..256. Rounded to a
+   * square grid (1, 4, 9, 16, ... 256) spread across the pixel's true
+   * footprint on the receiver (hardware derivatives). 1 = single point
+   * sample; more taps integrate the refraction-magnified footprint that
+   * point sampling shimmers over. Cost is linear in taps on every
+   * underwater pixel.
+   */
+  subSamples: 9, // converged by eye: no appreciable gain past 9
+  /**
+   * EDGE-DIRECTED ANTIALIAS on the splatted map, 0..1. Where the map has
+   * a strong gradient (a filament border), texels are blended ALONG the
+   * isoline only — the staircase smooths while the profile ACROSS the
+   * filament (width, peak) is untouched, and flat regions pass through
+   * unchanged. This is FXAA's core idea specialized to the map: it is
+   * not a blur — no energy crosses an edge. 0 skips the pass.
+   */
+  edgeAA: 1,
+  /**
    * FOCAL DEPTH, metres below mean water level, where the pattern is
    * sharpest. GATES blurPerM: the floor's blur authority is
    * (floorDepth - focalM) x blurPerM. Physically f ~ 0.24 x wavelength
