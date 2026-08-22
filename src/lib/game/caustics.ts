@@ -39,7 +39,7 @@
 
 import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
-import { CAUSTICS } from './tuning'
+import { CAUSTICS, PROFILE } from './tuning'
 import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
 /**
@@ -85,7 +85,7 @@ export const CAUSTIC_RESOLUTION =
 // extent, and ray spacing (tileSize / TILE_GRID) scales with it — the
 // spacing-to-texel ratio stays constant, so splat density per texel is
 // depth-independent.
-const TILES = 20
+const TILES = 50
 /**
  * Rays per tile side for a given target spacing (CAUSTICS.raySpacingM).
  * Sized from the base extent: the dynamic window-sized extent once grew
@@ -114,7 +114,7 @@ function tileGridFor(spacingM: number): number {
 // rect on a large window wants ~200+ tiles, and the centre-out priority
 // means an overrun clips the least-visible corners instead of sweeping
 // bands off a receiver.
-const MAX_TILES = 256
+const MAX_TILES = 1024
 const IOR = (1 / 1.33).toFixed(4)
 /**
  * Depth of the beam-space reference plane, meters below rest. Brightness
@@ -137,7 +137,7 @@ uniform float uPlaneDepth;
 uniform float uTime;
 uniform float uAmp;
 uniform float uRayD; // finite-difference step, half the ray spacing (m)
-varying float vBright;
+${PROFILE.flatCausticSplat ? 'varying vec2 vOld;\nvarying vec2 vNew;' : 'varying float vBright;'}
 
 ${wavesGlsl()}
 
@@ -200,23 +200,30 @@ vec3 causticLand(vec2 sxz) {
 void main() {
 	vec2 domainUv = (aTile + uv) / ${TILES}.0;
 	vec2 sxz = (domainUv - 0.5) * uExtent + uCenter;
-
-	// PER-VERTEX brightness, interpolated across the triangles. The old
+${
+	PROFILE.flatCausticSplat
+		? `	// FLAT mode (PROFILE.flatCausticSplat): one ray, brightness from
+	// the fragment stage's derivatives — cheap, beaded filaments.
+	vec3 land = causticLand(sxz);
+	vOld = sxz;
+	vNew = land.xz;`
+		: `	// PER-VERTEX brightness, interpolated across the triangles. The old
 	// per-fragment derivative version was constant across each warped
 	// triangle — the whole map was a flat-shaded mosaic at ray-grid
 	// pitch, which read as grain along every thin filament. Here the
 	// warp's Jacobian is finite-differenced at the vertex itself (two
 	// extra ray traces at half the ray spacing) and the rasterizer
 	// interpolates smoothly between vertices — the grain's actual cause,
-	// removed, with no blur anywhere.
+	// removed, with no blur anywhere. (PROFILE.flatCausticSplat is the
+	// cheap fallback.)
 	vec3 land = causticLand(sxz);
 	vec3 landU = causticLand(sxz + vec2(uRayD, 0.0));
 	vec3 landV = causticLand(sxz + vec2(0.0, uRayD));
 	vec2 du = landU.xz - land.xz;
 	vec2 dv = landV.xz - land.xz;
 	float newArea = abs(du.x * dv.y - du.y * dv.x);
-	vBright = clamp(uRayD * uRayD / max(newArea, 1e-7), 0.0, 30.0);
-
+	vBright = clamp(uRayD * uRayD / max(newArea, 1e-7), 0.0, 30.0);`
+}
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
@@ -256,7 +263,25 @@ void main() {
 	gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);
 }`
 
-const splatFragment = `
+const splatFragment = PROFILE.flatCausticSplat
+  ? `
+varying vec2 vOld;
+varying vec2 vNew;
+
+void main() {
+	// FLAT mode: differential-area brightness from screen-space
+	// derivatives — constant per warped triangle. True parallelogram
+	// areas (the 2D cross), not length x length: the axis-product
+	// overestimates sheared patches and speckles fold filaments.
+	vec2 ox = dFdx(vOld);
+	vec2 oy = dFdy(vOld);
+	vec2 nx = dFdx(vNew);
+	vec2 ny = dFdy(vNew);
+	float oldArea = abs(ox.x * oy.y - ox.y * oy.x);
+	float newArea = abs(nx.x * ny.y - nx.y * ny.x);
+	gl_FragColor = vec4(clamp(oldArea / max(newArea, 1e-7), 0.0, 30.0), 0.0, 0.0, 1.0);
+}`
+  : `
 varying float vBright;
 
 void main() {

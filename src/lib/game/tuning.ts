@@ -1584,6 +1584,14 @@ export const PROFILE = {
    * refraction magnifies the kinks into streaks at the buoy waterline.
    */
   vertexSlope: false,
+  /**
+   * Splat brightness from per-fragment derivatives (FLAT per warped
+   * triangle) instead of the per-vertex Jacobian trace. Cheaper by two
+   * ray evaluations per splat vertex (~3x less splat vertex ALU), but
+   * thin filaments come out as beaded triangle steps instead of smooth
+   * gradients. The perf/quality A/B for the caustic splat.
+   */
+  flatCausticSplat: false,
   /** Underwater raytrace: refract, sphere + 3 buoy intersections, shade. */
   skipRefraction: false,
   /** Fresnel blend and the sky-gradient reflection. */

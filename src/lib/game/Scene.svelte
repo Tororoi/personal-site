@@ -892,6 +892,49 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// The wave-equation sim that owns uRippleTex's contents.
 	const rippleSim = new RippleSim();
 
+	// DEBUG overlay (ENV.showCausticMap): the RAW caustic map on a
+	// screen-locked quad — mean-normalized, sqrt-toned, nothing else. The
+	// instrument that attributes caustic artifacts to a stage: aliased
+	// HERE means the splat or the map texels; clean here but aliased on
+	// receivers means the beam walk, contrast punch, or pyramids.
+	const causticDebugQuad = ENV.showCausticMap
+		? (() => {
+				const mat = new THREE.ShaderMaterial({
+					uniforms: {
+						uMap: { value: null as THREE.Texture | null },
+						uMean: { value: null as THREE.Texture | null },
+						// Fraction of the map shown: the quad displays the
+						// central DEBUG_MAP_VIEW_M metres so ripple-scale
+						// caustics are actually visible.
+						uZoom: { value: 0.2 }
+					},
+					vertexShader: `
+varying vec2 vUv;
+void main() {
+	vUv = uv;
+	gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`,
+					fragmentShader: `
+uniform sampler2D uMap;
+uniform sampler2D uMean;
+uniform float uZoom;
+varying vec2 vUv;
+void main() {
+	vec2 zuv = (vUv - 0.5) * uZoom + 0.5;
+	float m = max(texture2D(uMean, vec2(0.5)).r, 0.05);
+	float c = texture2D(uMap, zuv).r / m;
+	gl_FragColor = vec4(vec3(sqrt(c * 0.5)), 1.0);
+}`,
+					depthTest: false,
+					depthWrite: false
+				});
+				const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+				mesh.renderOrder = 1000;
+				mesh.frustumCulled = false;
+				return mesh;
+		  })()
+		: null;
+
 	// The foam thickness field that owns uFoamTex's contents. Stepped at
 	// HALF frame rate: foam evolves on multi-second timescales, the
 	// dt-aware step keeps every clock wall-clock true across skipped
@@ -4100,6 +4143,15 @@ void main() {
 			const halfH = window.innerHeight / 2 / zoom;
 			const ox = -halfW + 62 / zoom;
 			const oy = -halfH + 122 / zoom;
+			if (causticDebugQuad && cam) {
+				// Centered on the boat (screen centre), facing the camera,
+				// sized to most of the screen height.
+				const sPx = Math.min(window.innerWidth, window.innerHeight) * 0.85;
+				const sW = sPx / zoom;
+				causticDebugQuad.scale.set(sW, sW, 1);
+				causticDebugQuad.position.set(boat.x, 6, boat.z);
+				causticDebugQuad.quaternion.copy(cam.quaternion);
+			}
 			hudCompass.group.position.set(
 				boat.x + 0.7071 * ox + -0.374 * oy,
 				0.848 * oy,
@@ -4281,6 +4333,13 @@ void main() {
 			}
 			lap('gpuCaustic');
 			backdropUniforms.uCausticMap.value = causticMap.texture;
+			if (causticDebugQuad) {
+				const u = (causticDebugQuad.material as THREE.ShaderMaterial).uniforms;
+				u.uMap.value = causticMap.texture;
+				u.uMean.value = causticMap.meanTexture;
+				// Central 24m of the domain, whatever the live extent is.
+				u.uZoom.value = 24 / causticMap.extent;
+			}
 			// One foam-field update per TWO frames (decay + diffusion +
 			// drift + queued deposits), then point the water shader at the
 			// fresh side.
@@ -4827,6 +4886,9 @@ void main() {
 {/if}
 <T is={boatMesh} />
 <T is={hudCompass.group} />
+{#if causticDebugQuad}
+	<T is={causticDebugQuad} />
+{/if}
 <T is={rainbowMesh} />
 
 {#each PROFILE.hideObjects ? [] : buoys as buoy, i (i)}

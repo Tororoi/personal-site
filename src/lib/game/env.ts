@@ -69,7 +69,15 @@ const ENV_BASE = {
 	 * together they make any moment reproducible, which is what the
 	 * deterministic test harness (?freeze / ?tod URL params) is built on.
 	 */
-	freezeWaves: false
+	freezeWaves: false,
+	/**
+	 * DEBUG: paint the raw caustic map on the water in world space —
+	 * mean-normalized only, no contrast, no pyramids, no beam walk. The
+	 * instrument for attributing caustic artifacts to a stage: if the
+	 * map looks clean here, the problem is receiver-side; if it is
+	 * aliased here, it is the splat or the map texels. Reload to apply.
+	 */
+	showCausticMap: false
 };
 
 /**

@@ -560,6 +560,17 @@
 					>
 				</label>
 
+				<label class="bool">
+					<input
+						type="checkbox"
+						checked={!!envVals.showCausticMap}
+						onchange={(e) => setEnv('showCausticMap', e.currentTarget.checked)}
+					/>
+					<span class="name" class:mod={envVals.showCausticMap !== ENV_DEFAULTS.showCausticMap}
+						>showCausticMap</span
+					>
+				</label>
+
 				{#each ENV_KNOBS as k (k)}
 					{@const r = ENV_RANGE[k]}
 					<div class="knob">
