@@ -492,8 +492,11 @@
 		uProj: { value: new THREE.Matrix4() },
 		uBoatSdf: { value: null as THREE.Texture | null },
 		// Test whale centre; shared by reference with the caustics splat.
-		uWhaleC: { value: new THREE.Vector3(-8, -8, 2) },
+		uWhaleC: { value: new THREE.Vector3(-8, -4, 2) },
 		uWhaleOn: { value: UNDERWATER.whale ? 1 : 0 },
+		// Hull submergence 0-1 (see boatSub) — fades the collar and
+		// cross-fades the hull's shadow to the analytic leg.
+		uBoatSub: { value: 0 },
 		SPHERE_C: sphereCUniform,
 		...rainbowUniforms,
 		...uwUniforms,
@@ -1249,6 +1252,10 @@ uniform vec3 uWhaleC;
 uniform float uWhaleOn;
 #define WHALE_AX vec3(6.0, 1.6, 2.2)
 #define WHALE_COLOR vec3(0.34, 0.4, 0.47)
+// Hull submergence 0-1: fades the collar (a submerged hull has no
+// waterline) and scales the analytic hull shadow IN as the map's
+// floater channel fades it out (see caustics.ts / uwObjectShadow).
+uniform float uBoatSub;
 
 /**
  * The rainbow test card — a horizontal rectangle of six hard-edged
@@ -1461,7 +1468,8 @@ float boatContact(vec3 P) {
 	float w = ${f(FOAM.collarWidth)} * uFoaminess
 		* mix(${f(1 - FOAM.collarWobble)}, ${f(1 + FOAM.collarWobble)}, wob);
 	float d = boatSdfAt(lp);
-	return 1.0 - smoothstep(w * ${f(1 - FOAM.collarSoft)}, w, max(d, 0.0));
+	// (1 - uBoatSub): a submerged hull has no waterline to collar.
+	return (1.0 - smoothstep(w * ${f(1 - FOAM.collarSoft)}, w, max(d, 0.0))) * (1.0 - uBoatSub);
 }
 
 float boatHit(vec3 ro, vec3 rd, out vec3 nWorld) {
@@ -1550,6 +1558,31 @@ float uwObjectShadow(vec3 Q, vec3 upSun, float objRecv) {
 			float dd = (length(ow + dw * bw) - 1.0) * 1.6;
 			float ext = bw * uUwCausticBlur;
 			v *= smoothstep(-0.5 * ext, 0.35 + ext, dd);
+		}
+	}
+	// The SUBMERGED hull, scaled in by uBoatSub exactly as the map's
+	// floater channel scales it out (caustics.ts): the reclassification
+	// cross-fade. Ahead-only ray (tN clamped, tF > 0), so a hull BELOW
+	// a receiver cannot cast on it — the depth-correctness the channel
+	// never had. Skipped for the hull's own pixels.
+	if (uBoatSub > 0.001 && abs(objRecv - 2.0) > 0.25) {
+		vec3 o = (uBoatInv * vec4(Q + upSun * 0.25, 1.0)).xyz;
+		vec3 d = normalize((uBoatInv * vec4(upSun, 0.0)).xyz);
+		vec3 invD = 1.0 / d;
+		vec3 s0 = (uBoatSdfMin - o) * invD;
+		vec3 s1 = (uBoatSdfMin + uBoatSdfSize - o) * invD;
+		vec3 tmin3 = min(s0, s1);
+		vec3 tmax3 = max(s0, s1);
+		float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
+		float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
+		if (tN <= tF && tF > 0.0) {
+			float minD = 1e9;
+			for (int i = 0; i < 12; i++) {
+				float t = mix(max(tN, 0.0), tF, (float(i) + 0.5) / 12.0);
+				minD = min(minD, boatSdfAt(o + d * t));
+			}
+			float ext = max(tN, 0.0) * uUwCausticBlur;
+			v *= mix(1.0, smoothstep(-0.5 * ext, 0.12 + ext, minD), uBoatSub);
 		}
 	}
 	return v;
@@ -3606,6 +3639,17 @@ void main() {
 	let propSpin = 0;
 	const SPIN_UP_TAU = 0.15;
 	const SPIN_DOWN_TAU = 1.2;
+	// SUBMERGENCE, 0 (any part of the hull above water) to 1 (deck fully
+	// under by ~0.6m). One scalar drives everything that should die as
+	// the boat goes under — wake ripple, motor foam, the collar — AND the
+	// shadow reclassification: a submerged hull cross-fades from the
+	// caustic map's floater channel (depth-blind: it shadowed the
+	// sphere's top from BELOW) to the analytic receiver-side leg, which
+	// is ahead-only and therefore depth-correct. Both ends are soft, so
+	// the fade never snaps.
+	let boatSub = 0;
+	// Local-space top of the hull (set from the SDF bake's box).
+	let boatHullTopY = 1.0;
 	const orbScratch = { x: 0, z: 0 };
 	const slideScratch = { x: 0, z: 0 };
 	const boatKeys = { fwd: false, back: false, left: false, right: false };
@@ -3833,6 +3877,7 @@ void main() {
 		waterUniforms.uBoatSdf.value = tex;
 		waterUniforms.uBoatSdfMin.value.copy(bake.min);
 		waterUniforms.uBoatSdfSize.value.copy(bake.size);
+		boatHullTopY = bake.min.y + bake.size.y;
 		// The caustic shadow channels trace the same bake through the
 		// water material's own matrices (by reference — one pose).
 		causticMap.setOccluders(
@@ -4011,7 +4056,9 @@ void main() {
 			(spinTarget - propSpin) *
 			Math.min(dt / (Math.abs(spinTarget) > Math.abs(propSpin) ? SPIN_UP_TAU : SPIN_DOWN_TAU), 1);
 		if (propUnder && Math.abs(propSpin) > 0.02 && BOAT.centerWakeFoam > 0) {
-			const amp = BOAT.centerWakeFoam * Math.abs(propSpin) * dt;
+			// Faded with submergence: prop bubbles from a shallow hull
+			// reach the surface; from a sunk one they dissolve on the way.
+			const amp = BOAT.centerWakeFoam * Math.abs(propSpin) * dt * (1 - boatSub);
 			for (let k = 0; k < 2; k++) {
 				const back = k * 0.9;
 				const wx = boat.x - fwdX * back + (Math.random() - 0.5) * 0.6;
@@ -4264,10 +4311,25 @@ void main() {
 			boat.rollT += boat.rollW * dt;
 		}
 
+		// SUBMERGENCE: ramps over the LAST 0.6m of hull still above the
+		// water, hitting 1 exactly as the deck goes under — by full
+		// submergence the transition is complete, not still finishing
+		// half a metre down. Tilt is ignored: the ramp is smooth and
+		// half a metre wide, so pose error moves the fade a frame or
+		// two, never pops it.
+		{
+			const deckY = boatMesh.position.y + boatHullTopY;
+			const s = (surfaceHeight(boat.x, boat.z, waveTime) - deckY) / 0.6 + 1;
+			boatSub = THREE.MathUtils.smoothstep(s, 0, 1);
+		}
+
 		// WAKE: a continuous quiet poke at the stern. The wave equation
 		// turns the moving disturbance into the trailing V by itself.
-		if (!airborne && Math.abs(boat.speed) > 0.6) {
-			const amp = BOAT.wakeAmp * Math.min(Math.abs(boat.speed) / 5, 1);
+		// Faded out with submergence: a hull under the surface displaces
+		// the column, not the interface.
+		if (!airborne && Math.abs(boat.speed) > 0.6 && boatSub < 0.999) {
+			const amp =
+				BOAT.wakeAmp * Math.min(Math.abs(boat.speed) / 5, 1) * (1 - boatSub);
 			if (amp > 0.002) {
 				injectRipple(
 					boat.x + Math.cos(boat.heading) * BOAT.wakeOffset,
@@ -4309,6 +4371,8 @@ void main() {
 		// half must not lag the rasterized half.
 		boatMesh.updateMatrixWorld();
 		waterUniforms.uBoatInv.value.copy(boatMesh.matrixWorld).invert();
+		waterUniforms.uBoatSub.value = boatSub;
+		causticMap.setBoatSubmerged(boatSub);
 		renderBoatImage();
 
 		// CAMERA + TRAVELLING WINDOWS. The camera translates with the boat

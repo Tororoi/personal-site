@@ -2010,8 +2010,10 @@ export const UNDERWATER = {
    * inheriting the boat's SDF + image machinery.
    */
   whale: false,
-  /** Whale centre height, metres (negative = below the surface). */
-  whaleY: -8,
+  /** Whale centre height, metres (negative = below the surface). Keep
+   * it above -(seabedDepthM - 1.6) or it spawns buried in the floor —
+   * hidden, and correctly casting nothing. */
+  whaleY: -4,
   whaleX: -8,
   whaleZ: 2,
   /**

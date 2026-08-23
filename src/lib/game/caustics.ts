@@ -167,6 +167,12 @@ uniform vec3 uWhaleC;
 uniform float uWhaleOn;
 // Must match Scene.svelte's water shader: the test whale's semi-axes.
 #define WHALE_AX vec3(6.0, 1.6, 2.2)
+// Hull submergence 0-1: fades the hull OUT of the floater channel (B)
+// as the water shader's analytic leg fades it in — the submerged-boat
+// reclassification cross-fade. The seabed channel (G) keeps the hull
+// at any depth: the floor is below everything, so the map's
+// depth-blindness cannot hurt it.
+uniform float uBoatSub;
 // World y of the seabed (-1e5 when it's off): occlusion on the
 // refracted leg stops HERE, not at the reference plane. The map is
 // evaluated at the plane's depth, but light that already landed on a
@@ -339,8 +345,13 @@ void main() {
 	float hullV = boatShadowVis(gEntry, inc);
 	float buoyV = 1.0;
 	for (int i = 0; i < 3; i++) buoyV *= buoyShadowVis(uBuoyInv[i], gEntry, inc);
-	// The refracted leg is truncated at the seabed (see uSeabedY).
-	float tOcc = min(gLandT, (gEntry.y - uSeabedY) / max(-gRefr.y, 0.05));
+	// The refracted leg is truncated at the SEABED (see uSeabedY) — and
+	// only there. It was once also min'd with the travel to the 6m
+	// reference plane, which silently erased every caster below 6m: a
+	// whale at 8m over a 12m floor cast nothing. The map is EVALUATED at
+	// the plane, but its occlusion must cover the full column its one
+	// real reader (the seabed) sits under.
+	float tOcc = (gEntry.y - uSeabedY) / max(-gRefr.y, 0.05);
 	float deepV = min(sphereRayVis(gEntry, -inc, 1e5), sphereRayVis(gEntry, gRefr, tOcc))
 		* cardShadowVis(gEntry, gRefr, tOcc)
 		* whaleRayVis(gEntry, gRefr, tOcc);
@@ -351,7 +362,7 @@ void main() {
 	// depth-correct per receiver where the map cannot be, and putting
 	// them here too would double-shadow.
 	vVisAll = hullV * buoyV * deepV;
-	vVisFloat = hullV * buoyV;
+	vVisFloat = mix(hullV, 1.0, uBoatSub) * buoyV;
 	vVisNoHull = buoyV;
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
@@ -626,6 +637,7 @@ export class CausticMap {
         uCardOn: { value: 0 },
         uWhaleC: { value: new THREE.Vector3(0, -1e5, 0) },
         uWhaleOn: { value: 0 },
+        uBoatSub: { value: 0 },
         uSeabedY: { value: -1e5 },
         uTime: { value: 0 },
         uAmp: { value: 1 },
@@ -1339,6 +1351,11 @@ void main() {
 
   get meanTexture(): THREE.Texture {
     return this.meanTarget.texture
+  }
+
+  /** Hull submergence 0-1, from the Scene each frame (see uBoatSub). */
+  setBoatSubmerged(v: number) {
+    this.material.uniforms.uBoatSub.value = v
   }
 
   /** Sphere centre height, live from the tuning panel. The rainbow card
