@@ -1622,6 +1622,14 @@ export const PROFILE = {
    */
   skipRippleSim: false,
   skipCausticSim: false,
+  /**
+   * Caustic map resolution (desktop; phones fix 2048). The map is RGBA
+   * half-float and every generator pass walks all of it, so cost goes as
+   * the SQUARE: 3072 -> 2048 is 2.25x cheaper map generation. Judge the
+   * caustic sharpness by eye at each; the temporal integration and
+   * edge AA carry a lot of the apparent resolution.
+   */
+  causticMapRes: 3072,
   skipFoamSim: false,
   /**
    * Stop DRAWING the sprite clouds while leaving them simulating.

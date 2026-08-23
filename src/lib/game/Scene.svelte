@@ -362,6 +362,9 @@
 		uUwCausticFocus: { value: CAUSTICS.formM },
 		uCausticMean: { value: null as THREE.Texture | null },
 		uCausticPyr1: { value: null as THREE.Texture | null },
+		uCausticShadow: { value: null as THREE.Texture | null },
+		uCausticShadowL1: { value: null as THREE.Texture | null },
+		uCausticShadowL2: { value: null as THREE.Texture | null },
 		uCausticPyr2: { value: null as THREE.Texture | null },
 		uUwCausticFocal: { value: CAUSTICS.focalM },
 		uUwCausticContrast: { value: CAUSTICS.contrast },
@@ -691,6 +694,12 @@ uniform float uUwCausticFocus;
 uniform float uUwCausticBlur;
 uniform sampler2D uCausticMean;
 uniform sampler2D uCausticPyr1;
+// The half-res RGBA shadow map and its blurred level (caustics.ts, the
+// splat split note): R clean, G/B/A shadowed light from the SAME rays,
+// so shadow is a ratio of this map's own channels.
+uniform sampler2D uCausticShadow;
+uniform sampler2D uCausticShadowL1;
+uniform sampler2D uCausticShadowL2;
 uniform sampler2D uCausticPyr2;
 uniform float uUwCausticFocal;
 uniform float uUwCausticContrast;
@@ -786,16 +795,14 @@ float causticValidity(vec2 beamXZ) {
 // One caustic tap at a receiver point: beam walk to the reference plane,
 // then the depth-defocus pyramid blend. Factored out so the footprint
 // supersampler below can afford as many taps as the look wants.
-// All four channels: R clean, G shadowed by every occluder, B shadowed
-// by the surface floaters only, A shadowed by everything except the
-// hull (see caustics.ts's splatFragment).
-vec4 causticTapAt(vec3 Pi, vec3 refrLight, float t1, float t2) {
+// One PATTERN tap. Only this runs inside the supersample loop — the
+// pyramid levels and the shadow map are smooth fields, sampled ONCE per
+// pixel (see the caustic block in shadeUnderwater); supersampling them
+// was pure bandwidth.
+float causticTapAt(vec3 Pi, vec3 refrLight) {
 	vec2 bxz = Pi.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - Pi.y) / refrLight.y);
 	vec2 cuvI = clamp((bxz - uCausticCenter) / uCausticExtent + 0.5, 0.002, 0.998);
-	vec4 c0 = texture2D(uCausticMap, cuvI);
-	vec4 c1 = texture2D(uCausticPyr1, cuvI);
-	vec4 c2 = texture2D(uCausticPyr2, cuvI);
-	return mix(mix(c0, c1, t1), c2, t2);
+	return texture2D(uCausticMap, cuvI).r;
 }
 
 // objRecv picks the shadow channel (the reference's receiver rule,
@@ -872,7 +879,6 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 			ddx *= 2.4 / dpm;
 			ddy *= 2.4 / dpm;
 		}
-		vec4 accC = vec4(0.0);
 		// ADAPTIVE tap count: the footprint's size in MAP TEXELS decides
 		// how many samples the integral needs. One tap where the pixel
 		// spans less than a texel (most flat-on water — the bulk of the
@@ -880,23 +886,36 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 		// bought nothing) where refraction magnifies the footprint.
 		float ftex = dpm * (${CAUSTIC_RESOLUTION}.0 / uCausticExtent);
 		int n = int(clamp(ftex * 0.5 + 0.5, 1.0, 3.0));
+		float acc0 = 0.0;
 		for (int i = 0; i < 3; i++) {
 			if (i >= n) break;
 			for (int j = 0; j < 3; j++) {
 				if (j >= n) break;
 				vec3 Pi = P + ((float(i) + 0.5) / float(n) - 0.5) * ddx
 					+ ((float(j) + 0.5) / float(n) - 0.5) * ddy;
-				accC += causticTapAt(Pi, refrLight, t1, t2);
+				acc0 += causticTapAt(Pi, refrLight);
 			}
 		}
-		vec4 cC = accC / float(n * n);
-		// Channel choice, blended toward clean by the castShadow dial:
-		// seabed (0) reads G, the hull (2) reads A, every other body
-		// reads B. The hybrid analytic leg then adds what no channel
-		// carries — underwater casters onto objects.
-		float sh = objRecv < 0.5 ? cC.g : (abs(objRecv - 2.0) < 0.25 ? cC.a : cC.b);
-		if (objRecv > 0.5) sh *= uwObjectShadow(P, -refrLight, objRecv);
-		caustic = mix(cC.r, sh, uUwShadowK);
+		// Supersampled SHARP pattern blended down the pyramid (smooth
+		// levels: one tap each suffices).
+		float m1 = texture2D(uCausticPyr1, cuvC).r;
+		float m2 = texture2D(uCausticPyr2, cuvC).r;
+		float clean = mix(mix(acc0 / float(n * n), m1, t1), m2, t2);
+		// Shadow as a RATIO of shadowed to clean light IN THE SHADOW MAP:
+		// the same rays feed numerator and denominator, so the filament
+		// structure and the lattice noise both divide out, leaving the
+		// pure visibility field — smooth, half-res, single-tap. Channel
+		// choice: seabed (0) reads G, the hull (2) reads A, every other
+		// body reads B; the hybrid analytic leg then adds what no
+		// channel carries — underwater casters onto objects. No rays
+		// landed (r ~ 0): unshadowed, never dark.
+		vec4 sm = mix(
+			mix(texture2D(uCausticShadow, cuvC), texture2D(uCausticShadowL1, cuvC), t1),
+			texture2D(uCausticShadowL2, cuvC), t2);
+		float shCh = objRecv < 0.5 ? sm.g : (abs(objRecv - 2.0) < 0.25 ? sm.a : sm.b);
+		float vis = sm.r > 1e-3 ? clamp(shCh / sm.r, 0.0, 1.0) : 1.0;
+		if (objRecv > 0.5) vis *= uwObjectShadow(P, -refrLight, objRecv);
+		caustic = clean * mix(1.0, vis, uUwShadowK);
 	}
 	// SELF-NORMALIZE by the map's mean over the splatted rect (a 1x1
 	// reduction target, refreshed each step — NOT a mip read; mips on the
@@ -1229,6 +1248,9 @@ uniform float uHeightScale;
 varying float vHeight;
 varying vec3 vWorld;
 varying vec2 vRest;
+// Surface position BEFORE ripples: the fragment re-applies ripples per
+// pixel on top of this (see pExact) instead of re-summing every wave.
+varying vec3 vWaveP;
 varying vec2 vSlope;
 varying float vOverhang;
 uniform float uDomAmp;
@@ -1644,7 +1666,13 @@ void main() {
 	// object waves), pExact diverges from vWorld and the entry falls
 	// back to the mesh — the refracted image never detaches from the
 	// geometry it has to line up with.
-	vec3 pExact = vec3(vRest.x, 0.0, vRest.y) + waveDisplacement(vRest, uTime, uAmp);
+	// The wave part of the entry point is INTERPOLATED (vWaveP): each
+	// Gerstner band's interpolation error over a 0.5m quad is amp*(k*dx)^2/8
+	// — under a millimetre for every band, so re-summing the waves per
+	// pixel (a full WAVE_COUNT sin/cos loop, ~5ms of the frame at 4Mpx)
+	// bought nothing. What DID kink at quad scale was the ripples, whose
+	// wavelength is the quad itself — so only they are re-applied here.
+	vec3 pExact = vWaveP;
 	applyRipples(pExact, pExact.xz);
 	vec3 pEntry = mix(pExact, vWorld, smoothstep(0.04, 0.25, distance(pExact, vWorld)));
 	vec3 oc = pEntry - SPHERE_C;
@@ -1969,6 +1997,9 @@ varying float vHeight;
 varying float vJacobian;
 varying vec3 vWorld;
 varying vec2 vRest;
+// Surface position BEFORE ripples: the fragment re-applies ripples per
+// pixel on top of this (see pExact) instead of re-summing every wave.
+varying vec3 vWaveP;
 varying vec2 vSlope;
 varying float vOverhang;
 varying float vLoopSk;
@@ -2107,6 +2138,7 @@ void main() {
 	// water's material coordinates, making them swim with the passing waves
 	// instead of staying where the object poked. Ripples are pure smooth
 	// displacement, no whiteness.
+	vWaveP = p;
 	applyRipples(p, p.xz);
 	vWorld = p;
 	// Rest (material) coordinates for surface-riding decals: foam is
@@ -4717,6 +4749,9 @@ void main() {
 				uwUniforms.uUwCausticBlur.value = CAUSTICS.blurPerM;
 				uwUniforms.uUwShadowK.value = Math.min(Math.max(CAUSTICS.castShadow, 0), 1);
 				uwUniforms.uCausticPyr1.value = causticMap.pyr1Texture;
+				uwUniforms.uCausticShadow.value = causticMap.shadowTexture;
+				uwUniforms.uCausticShadowL1.value = causticMap.shadowL1Texture;
+				uwUniforms.uCausticShadowL2.value = causticMap.shadowL2Texture;
 				uwUniforms.uCausticPyr2.value = causticMap.pyr2Texture;
 				uwUniforms.uUwCausticFocal.value = CAUSTICS.focalM;
 				uwUniforms.uUwCausticContrast.value = CAUSTICS.contrast;

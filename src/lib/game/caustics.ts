@@ -40,7 +40,7 @@
 import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
 import { sdfAtlasGlsl } from './sdf'
-import { CAUSTICS, UNDERWATER } from './tuning'
+import { CAUSTICS, PROFILE, UNDERWATER } from './tuning'
 import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
 /**
@@ -73,7 +73,7 @@ const viewHalfAxis = (() => {
  */
 export const CAUSTIC_EXTENT = Math.max(80, Math.ceil(2 * (viewHalfAxis + 16)))
 export const CAUSTIC_RESOLUTION =
-  typeof window !== 'undefined' && window.innerWidth < 720 ? 2048 : 3072
+  typeof window !== 'undefined' && window.innerWidth < 720 ? 2048 : PROFILE.causticMapRes
 /**
  * ACTIVE-TILE splatting: the domain divides into TILES x TILES tiles and
  * only tiles over the receivers (the sphere, later fish) are splatted each
@@ -121,27 +121,11 @@ const IOR = (1 / 1.33).toFixed(4)
  */
 export const CAUSTIC_PLANE_DEPTH = 6
 
-const splatVertex = `
-uniform sampler2D uRippleTex;
-uniform vec2 uCenter;
-uniform float uExtent;
-uniform vec2 uRippleCenter;
-uniform float uRippleExtent;
+// ---- Occluder tests for the shadow pass (fragment stage) ----
+const occluderGlsl = `
 uniform vec3 uSunDir;
 uniform vec3 uSphereCenter;
 uniform float uSphereRadius;
-uniform float uPlaneDepth;
-uniform float uTime;
-uniform float uAmp;
-uniform float uMaxBright;
-uniform vec2 uJitter; // per-frame lattice offset, world metres
-varying vec2 vOld;
-varying vec2 vNew;
-varying float vVisAll;
-varying float vVisFloat;
-varying float vVisNoHull;
-
-${wavesGlsl()}
 ${sdfAtlasGlsl}
 
 // ---- Cast-shadow visibility, IN THE MAP (the reference's system) ----
@@ -180,11 +164,6 @@ uniform float uBoatSub;
 // shallow floor kept casting from its underground half, and the extra
 // shadow sat displaced down-sun of the visible body.
 uniform float uSeabedY;
-
-// Entry point, refracted direction and travel of the last traced ray.
-vec3 gEntry;
-vec3 gRefr;
-float gLandT;
 
 // Hull on the sun line through the entry point: the hull straddles the
 // waterline, so one line covers topsides and draft (the bend over its
@@ -268,13 +247,51 @@ float cardShadowVis(vec3 P, vec3 rd, float tMax) {
 	return smoothstep(0.0, 0.2, max(q.x, q.y));
 }
 
+`
+
+const splatVertex = `
+uniform sampler2D uRippleTex;
+uniform vec2 uCenter;
+uniform float uExtent;
+uniform vec2 uRippleCenter;
+uniform float uRippleExtent;
+uniform vec3 uSunDir;
+uniform vec3 uSphereCenter;
+uniform float uSphereRadius;
+uniform float uPlaneDepth;
+uniform float uTime;
+uniform float uAmp;
+uniform float uMaxBright;
+uniform vec2 uJitter; // per-frame lattice offset, world metres
+varying vec2 vOld;
+varying vec2 vNew;
+
+${wavesGlsl()}
+
+// Entry point, refracted direction and travel of the last traced ray.
+vec3 gEntry;
+vec3 gRefr;
+float gLandT;
+
+// ---- SHADOW PASS: hand the ray to the fragment stage, which tests the
+// occluders PER TEXEL (per-vertex visibility interpolated across the
+// coarse shadow lattice faceted every soft edge). ----
+#ifdef SHADOW_PASS
+varying vec3 vEntry;
+varying vec3 vRefr;
+varying float vLandT;
+#endif
+
 attribute vec2 aTile; // active tile origin, in tile units
 
 // Trace ONE ray: rest position -> true surface (ambient Gerstner +
 // ripples) -> refract -> land on the reference plane.
 vec3 causticLand(vec2 sxz) {
-	vec3 D = waveDisplacement(sxz, uTime, uAmp);
-	vec3 P = vec3(sxz.x + D.x, D.y, sxz.y + D.z);
+	// ONE wave loop for displacement AND tangents: each sin/cos pair is
+	// computed once and feeds both (waveDisplacement() ran a second
+	// identical loop per vertex — with 1-3M splat vertices a frame, that
+	// was tens of millions of transcendentals for nothing).
+	vec3 D = vec3(0.0);
 	float txx = 0.0;
 	float txy = 0.0;
 	float txz = 0.0;
@@ -286,14 +303,19 @@ vec3 causticLand(vec2 sxz) {
 		float theta = (sxz.x * a.x + sxz.y * a.y) * a.z - a.w * uTime + b.z;
 		float sn = sin(theta);
 		float cs = cos(theta);
-		float qak = b.y * b.x * uAmp * a.z;
-		float ak = b.x * uAmp * a.z;
+		float amp = b.x * uAmp;
+		D.x += b.y * amp * a.x * cs;
+		D.z += b.y * amp * a.y * cs;
+		D.y += amp * sn;
+		float qak = b.y * amp * a.z;
+		float ak = amp * a.z;
 		txx -= qak * a.x * a.x * sn;
 		txy += ak * a.x * cs;
 		txz -= qak * a.x * a.y * sn;
 		tzy += ak * a.y * cs;
 		tzz -= qak * a.y * a.y * sn;
 	}
+	vec3 P = vec3(sxz.x + D.x, D.y, sxz.y + D.z);
 	vec3 Tu = vec3(1.0 + txx, txy, txz);
 	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
 	vec3 Na = cross(Tv, Tu);
@@ -337,33 +359,11 @@ void main() {
 	vec3 land = causticLand(sxz);
 	vOld = sxz;
 	vNew = land.xz;
-	// Surface floaters block the SUN line through the entry point;
-	// submerged bodies block the REFRACTED leg. The sphere tests both
-	// legs (it can be dialed from seabed to airborne), min-combined so
-	// a breaching sphere doesn't double-darken where the legs overlap.
-	vec3 inc = -normalize(uSunDir);
-	float hullV = boatShadowVis(gEntry, inc);
-	float buoyV = 1.0;
-	for (int i = 0; i < 3; i++) buoyV *= buoyShadowVis(uBuoyInv[i], gEntry, inc);
-	// The refracted leg is truncated at the SEABED (see uSeabedY) — and
-	// only there. It was once also min'd with the travel to the 6m
-	// reference plane, which silently erased every caster below 6m: a
-	// whale at 8m over a 12m floor cast nothing. The map is EVALUATED at
-	// the plane, but its occlusion must cover the full column its one
-	// real reader (the seabed) sits under.
-	float tOcc = (gEntry.y - uSeabedY) / max(-gRefr.y, 0.05);
-	float deepV = min(sphereRayVis(gEntry, -inc, 1e5), sphereRayVis(gEntry, gRefr, tOcc))
-		* cardShadowVis(gEntry, gRefr, tOcc)
-		* whaleRayVis(gEntry, gRefr, tOcc);
-	// Channel roles: G (everything) is the seabed's; B (floaters) is the
-	// generic object channel; A (buoys only) is the hull's. Underwater
-	// casters are DELIBERATELY absent from B and A — object receivers
-	// get them from the analytic leg (uwObjectShadow, Scene), which is
-	// depth-correct per receiver where the map cannot be, and putting
-	// them here too would double-shadow.
-	vVisAll = hullV * buoyV * deepV;
-	vVisFloat = mix(hullV, 1.0, uBoatSub) * buoyV;
-	vVisNoHull = buoyV;
+#ifdef SHADOW_PASS
+	vEntry = gEntry;
+	vRefr = gRefr;
+	vLandT = gLandT;
+#endif
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
@@ -407,9 +407,12 @@ const splatFragment = `
 uniform float uMaxBright;
 varying vec2 vOld;
 varying vec2 vNew;
-varying float vVisAll;
-varying float vVisFloat;
-varying float vVisNoHull;
+#ifdef SHADOW_PASS
+varying vec3 vEntry;
+varying vec3 vRefr;
+varying float vLandT;
+${occluderGlsl}
+#endif
 
 void main() {
 	// Differential-area brightness from screen-space derivatives —
@@ -431,7 +434,38 @@ void main() {
 	// honestly missing light, never a repaint. ALPHA IS DATA from here
 	// on: every downstream pass must carry vec4 with NoBlending, and
 	// the splat clear must zero alpha.
-	gl_FragColor = vec4(b, b * vVisAll, b * vVisFloat, b * vVisNoHull);
+#ifdef SHADOW_PASS
+	// Surface floaters block the SUN line through the entry point;
+	// submerged bodies block the REFRACTED leg. The sphere tests both
+	// legs (it can be dialed from seabed to airborne), min-combined so
+	// a breaching sphere doesn't double-darken where the legs overlap.
+	vec3 inc = -normalize(uSunDir);
+	float hullV = boatShadowVis(vEntry, inc);
+	float buoyV = 1.0;
+	for (int i = 0; i < 3; i++) buoyV *= buoyShadowVis(uBuoyInv[i], vEntry, inc);
+	// The refracted leg is truncated at the SEABED (see uSeabedY) — and
+	// only there. It was once also min'd with the travel to the 6m
+	// reference plane, which silently erased every caster below 6m: a
+	// whale at 8m over a 12m floor cast nothing. The map is EVALUATED at
+	// the plane, but its occlusion must cover the full column its one
+	// real reader (the seabed) sits under.
+	float tOcc = (vEntry.y - uSeabedY) / max(-normalize(vRefr).y, 0.05);
+	float deepV = min(sphereRayVis(vEntry, -inc, 1e5), sphereRayVis(vEntry, normalize(vRefr), tOcc))
+		* cardShadowVis(vEntry, normalize(vRefr), tOcc)
+		* whaleRayVis(vEntry, normalize(vRefr), tOcc);
+	// Channel roles: G (everything) is the seabed's; B (floaters) is the
+	// generic object channel; A (buoys only) is the hull's. Underwater
+	// casters are DELIBERATELY absent from B and A — object receivers
+	// get them from the analytic leg (uwObjectShadow, Scene), which is
+	// depth-correct per receiver where the map cannot be, and putting
+	// them here too would double-shadow.
+	float vAll = hullV * buoyV * deepV;
+	float vFloat = mix(hullV, 1.0, uBoatSub) * buoyV;
+	float vNoHull = buoyV;
+	gl_FragColor = vec4(b, b * vAll, b * vFloat, b * vNoHull);
+#else
+	gl_FragColor = vec4(b, 0.0, 0.0, 1.0);
+#endif
 }`
 
 /** Low-discrepancy sequence for the splat jitter — deterministic, so the
@@ -522,6 +556,18 @@ void main() {
 	gl_FragColor = mix(c, (c + a + b) / 3.0, w);
 }`
 
+// ONE-TAP COPY. The chain's "identity copies" (accumulated history back
+// to the canonical map, edge-AA result back to it) went through the
+// 13-tap blur kernel at step 0 — thirteen full-res RGBA16F fetches per
+// texel, ~1GB of reads a frame at 3072^2, to move data unchanged. This
+// is the honest move.
+const copyFragment = `
+uniform sampler2D uSrc;
+varying vec2 vUv;
+void main() {
+	gl_FragColor = texture2D(uSrc, vUv);
+}`
+
 export class CausticMap {
   /**
    * SOURCE BLUR of the caustic pattern, metres of Gaussian sigma at the
@@ -547,6 +593,45 @@ export class CausticMap {
   private frameIdx = 0
   private aaTarget: THREE.WebGLRenderTarget
   private aaMaterial: THREE.ShaderMaterial
+  /**
+   * THE SPLAT SPLIT. The pattern needs resolution (Tom judges 3072-4096
+   * by eye for focused filaments); the shadow fields are soft and need
+   * none of it — yet carrying them in the pattern map made every
+   * full-res pass an 8-byte-per-texel RGBA walk. So the same rays splat
+   * TWICE: the pattern into the R16F chain at full resolution (accum,
+   * AA, pyramids), and the shadow channels into this half-res RGBA map
+   * from a second material (SHADOW_PASS define) on a coarser lattice.
+   * Receivers take shadow as the ratio sum(b*vis)/sum(b) of THIS map's
+   * own channels — the same rays, so lattice noise cancels in the ratio
+   * and the shadow map needs no accumulation and no AA of its own; one
+   * blurred level gives it depth diffusion.
+   */
+  private shadowMaterial: THREE.ShaderMaterial
+  private shadowGeometry: THREE.InstancedBufferGeometry
+  private shadowScene: THREE.Scene
+  private shadowTarget: THREE.WebGLRenderTarget
+  // The shadow map's own defocus pyramid — the same rungs as the
+  // pattern's (L1 ~0.5m, L2 ~2m), blended by the same t1/t2. Two rungs
+  // are not optional: with only sharp + 2m mixed by t2, nothing
+  // softened until 0.5m of spread and beyond it a crisp edge sat inside
+  // a soft halo — read as "never blurs with depth".
+  private shadowL1: THREE.WebGLRenderTarget
+  private shadowL2: THREE.WebGLRenderTarget
+  private shadowScratch: THREE.WebGLRenderTarget
+  private copyMaterial: THREE.ShaderMaterial
+  private copyScene: THREE.Scene
+  /**
+   * The CANONICAL map: whichever target holds the latest stage's result.
+   * Each pass reads canon and writes its own target, then becomes canon
+   * — no copy-backs. (Two full-res copies a frame were ~a quarter of
+   * the map generator's cost; the map is 3072^2 RGBA16F, so every pass
+   * over it is a 75MB write and 8 bytes per fetch.)
+   */
+  private canon!: THREE.WebGLRenderTarget
+  /** Splat-box region (tile box + one tile margin) in NDC: centre xy,
+   *  half-size zw. Everything splatted lies inside it, so a cleared
+   *  target plus a region draw is a COMPLETE result. */
+  private region = new THREE.Vector4(0, 0, 1, 1)
   private blurTarget: THREE.WebGLRenderTarget
   private blurQuarterA: THREE.WebGLRenderTarget
   private blurQuarterB: THREE.WebGLRenderTarget
@@ -584,10 +669,10 @@ export class CausticMap {
       CAUSTIC_RESOLUTION,
       {
         type: THREE.HalfFloatType,
-        // RGBA since cast shadows: R clean brightness, G shadowed by all
-        // occluders, B shadowed by floaters only (see splatFragment).
-        // The single-channel bandwidth saving retired with them.
-        format: THREE.RGBAFormat,
+        // Single channel again: the shadow fields live in their own
+        // half-res map (see the splat split note), so this whole chain
+        // moves 2-byte texels.
+        format: THREE.RedFormat,
         // No mip chain: depth softening now comes from an explicit blur
         // pyramid (below) — driver mipmap generation on half-float
         // targets silently no-ops on some renderers, and regenerating
@@ -598,6 +683,8 @@ export class CausticMap {
         stencilBuffer: false,
       },
     )
+
+    this.canon = this.target
 
     // One aTile instance attribute shared by both passes: which tiles are
     // active this frame.
@@ -610,8 +697,9 @@ export class CausticMap {
     this.tileGrid = TILE_GRID
     this.splatGeometry = this.buildSplatGeometry(this.tileGrid)
 
-    this.material = new THREE.ShaderMaterial({
-      uniforms: {
+    // ONE uniforms object for both splat materials: every per-frame
+    // setter reaches the shadow pass for free.
+    const splatUniforms = {
         uRippleTex: { value: null },
         uCenter: { value: new THREE.Vector2(0, 0) },
         uExtent: { value: CAUSTIC_EXTENT },
@@ -644,7 +732,9 @@ export class CausticMap {
         // Shared with every other wave material; see waveUniformA.
         uWaveA: { value: waveUniformA },
         uWaveB: { value: waveUniformB },
-      },
+    }
+    this.material = new THREE.ShaderMaterial({
+      uniforms: splatUniforms,
       vertexShader: splatVertex,
       fragmentShader: splatFragment,
       // EXPLICIT One/One addition. THREE.AdditiveBlending is
@@ -664,6 +754,32 @@ export class CausticMap {
       // Folded triangles invert their winding; both faces must splat.
       side: THREE.DoubleSide,
     })
+    this.shadowMaterial = new THREE.ShaderMaterial({
+      uniforms: splatUniforms,
+      defines: { SHADOW_PASS: '' },
+      vertexShader: splatVertex,
+      fragmentShader: splatFragment,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneFactor,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneFactor,
+      depthTest: false,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    })
+    // Coarser lattice: the splat is TRIANGLES, so coverage stays complete
+    // at any grid; a coarser one only makes visibility vary linearly over
+    // bigger patches, which soft shadow fields don't mind. Quarter the
+    // vertex work of the pattern pass.
+    this.shadowGeometry = this.buildSplatGeometry(
+      Math.max(Math.round(this.tileGrid / 2), 16),
+    )
+    this.shadowScene = new THREE.Scene()
+    const shadowMesh = new THREE.Mesh(this.shadowGeometry, this.shadowMaterial)
+    shadowMesh.frustumCulled = false
+    this.shadowScene.add(shadowMesh)
 
     this.splatScene = new THREE.Scene()
     this.splatMesh = new THREE.Mesh(this.splatGeometry, this.material)
@@ -680,7 +796,7 @@ export class CausticMap {
     // only this allocation changes).
     const blurTargetOpts = {
       type: THREE.HalfFloatType,
-      format: THREE.RGBAFormat,
+      format: THREE.RedFormat,
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: false,
@@ -688,7 +804,7 @@ export class CausticMap {
     } as const
     const histOpts = {
       type: THREE.HalfFloatType,
-      format: THREE.RGBAFormat,
+      format: THREE.RedFormat,
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: false,
@@ -734,11 +850,7 @@ export class CausticMap {
       CAUSTIC_RESOLUTION,
       {
         type: THREE.HalfFloatType,
-        // RGBA like every stage since the shadow channels: this is the
-        // texture receivers actually sample when edgeAA is on, and a
-        // single-channel target here silently zeroed G/B — every
-        // receiver reads a shadow channel, so the sea went causticless.
-        format: THREE.RGBAFormat,
+        format: THREE.RedFormat,
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         depthBuffer: false,
@@ -759,6 +871,44 @@ export class CausticMap {
       depthTest: false,
       depthWrite: false,
     })
+
+    // Shadow map: half the pattern resolution, RGBA; plus a blurred
+    // level (quarter res) for depth diffusion. Small passes.
+    const shadowOpts = {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    } as const
+    this.shadowTarget = new THREE.WebGLRenderTarget(
+      CAUSTIC_RESOLUTION / 2,
+      CAUSTIC_RESOLUTION / 2,
+      shadowOpts,
+    )
+    const q = CAUSTIC_RESOLUTION / 4
+    this.shadowL1 = new THREE.WebGLRenderTarget(q, q, shadowOpts)
+    this.shadowL2 = new THREE.WebGLRenderTarget(q, q, shadowOpts)
+    this.shadowScratch = new THREE.WebGLRenderTarget(q, q, shadowOpts)
+    this.copyMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uSrc: { value: null },
+        uRegion: { value: new THREE.Vector4(0, 0, 1, 1) },
+      },
+      vertexShader: blurVertex,
+      fragmentShader: copyFragment,
+      blending: THREE.NoBlending,
+      depthTest: false,
+      depthWrite: false,
+    })
+    this.copyScene = new THREE.Scene()
+    const copyMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(2, 2),
+      this.copyMaterial,
+    )
+    copyMesh.frustumCulled = false
+    this.copyScene.add(copyMesh)
 
     this.blurTarget = new THREE.WebGLRenderTarget(
       CAUSTIC_RESOLUTION / 2,
@@ -881,6 +1031,20 @@ void main() {
     this.meanScene.add(meanQuad)
   }
 
+  /** Half-res RGBA shadow map: R clean, G/B/A shadowed light (see the
+   *  splat split note). Receivers take ratios of its own channels. */
+  get shadowTexture(): THREE.Texture {
+    return this.shadowTarget.texture
+  }
+
+  /** The shadow map's defocus rungs (~0.5m and ~2m sigma). */
+  get shadowL1Texture(): THREE.Texture {
+    return this.shadowL1.texture
+  }
+  get shadowL2Texture(): THREE.Texture {
+    return this.shadowL2.texture
+  }
+
   get pyr1Texture(): THREE.Texture {
     return this.pyr1.texture
   }
@@ -890,7 +1054,22 @@ void main() {
   }
 
   get texture(): THREE.Texture {
-    return this.target.texture
+    return this.canon.texture
+  }
+
+  /** One-tap copy (or bilinear 2x2-box downsample when dst is smaller). */
+  private copyTo(
+    renderer: THREE.WebGLRenderer,
+    src: THREE.WebGLRenderTarget,
+    dst: THREE.WebGLRenderTarget,
+    region: THREE.Vector4,
+  ) {
+    const u = this.copyMaterial.uniforms
+    u.uSrc.value = src.texture
+    ;(u.uRegion.value as THREE.Vector4).copy(region)
+    renderer.setRenderTarget(dst)
+    renderer.clear(true, false, false)
+    renderer.render(this.copyScene, this.splatCamera)
   }
 
   /**
@@ -1010,6 +1189,7 @@ void main() {
     }
     this.tileAttr.needsUpdate = true
     this.splatGeometry.instanceCount = count
+    this.shadowGeometry.instanceCount = count
     // The rect the receivers may trust this frame. The map is CLEAR
     // (zero) outside the splatted tiles, and zero reads as full caustic
     // shadow — any receiver sampling beyond must fade to neutral instead
@@ -1048,39 +1228,35 @@ void main() {
     renderer.clear(true, false, false)
     renderer.autoClear = false
     renderer.render(this.splatScene, this.splatCamera)
+    // The shadow pass: same rays, same jitter, its own half-res map.
+    renderer.setRenderTarget(this.shadowTarget)
+    renderer.clear(true, false, false)
+    renderer.render(this.shadowScene, this.splatCamera)
 
     // Edge-directed antialias (see edgeAAFragment): repair the filament
     // staircase before anything downstream reads the map. Runs over the
     // splatted tile box plus a margin, and skips outright at 0.
-    if (CAUSTICS.edgeAA > 0 && count > 0) {
+    this.canon = this.target
+    if (count > 0) {
       const u0 = (Math.max(tx0 - 1, 0) / TILES) * 2 - 1
       const u1 = (Math.min(tx1 + 2, TILES) / TILES) * 2 - 1
       const v0 = (Math.max(tz0 - 1, 0) / TILES) * 2 - 1
       const v1 = (Math.min(tz1 + 2, TILES) / TILES) * 2 - 1
+      this.region.set((u0 + u1) / 2, (v0 + v1) / 2, (u1 - u0) / 2, (v1 - v0) / 2)
+    } else {
+      this.region.set(0, 0, 1, 1)
+    }
+    if (CAUSTICS.edgeAA > 0 && count > 0) {
       const aaU = this.aaMaterial.uniforms
-      ;(aaU.uRegion.value as THREE.Vector4).set(
-        (u0 + u1) / 2,
-        (v0 + v1) / 2,
-        (u1 - u0) / 2,
-        (v1 - v0) / 2,
-      )
+      ;(aaU.uRegion.value as THREE.Vector4).copy(this.region)
       aaU.uAA.value = CAUSTICS.edgeAA
-      const blurU = this.blurMaterial.uniforms
-      ;(blurU.uRegion.value as THREE.Vector4).copy(
-        aaU.uRegion.value as THREE.Vector4,
-      )
-      // AA into the scratch, then an identity copy back (the 13-tap blur
-      // at step 0 sums to 1): this.target stays the canonical map every
-      // downstream consumer reads.
-      aaU.uSrc.value = this.target.texture
+      // AA into its own target, which then IS the canonical map (cleared,
+      // region drawn: complete). No copy back.
+      aaU.uSrc.value = this.canon.texture
       renderer.setRenderTarget(this.aaTarget)
       renderer.clear(true, false, false)
       renderer.render(this.aaScene, this.splatCamera)
-      blurU.uSrc.value = this.aaTarget.texture
-      ;(blurU.uStep.value as THREE.Vector2).set(0, 0)
-      renderer.setRenderTarget(this.target)
-      renderer.clear(true, false, false)
-      renderer.render(this.blurScene, this.splatCamera)
+      this.canon = this.aaTarget
     }
 
     // TEMPORAL ACCUMULATION (see accumFragment): blend the jittered
@@ -1104,18 +1280,16 @@ void main() {
       )
       aU.uAlpha.value = invalid ? 0 : taa
       aU.uHist.value = this.histB.texture
-      aU.uCur.value = this.target.texture
+      aU.uCur.value = this.canon.texture
+      // Region draw over a cleared target (the history is read at a
+      // scrolled uv, which can reach anywhere in the previous frame's
+      // target, so the region only bounds what is WRITTEN). The result
+      // becomes canon; the un-blurred history chain stays its own pair.
+      ;(aU.uRegion.value as THREE.Vector4).copy(this.region)
       renderer.setRenderTarget(this.histA)
       renderer.clear(true, false, false)
       renderer.render(this.accumScene, this.splatCamera)
-      // Identity copy back (13-tap blur at step 0 sums to 1).
-      const blurU2 = this.blurMaterial.uniforms
-      ;(blurU2.uRegion.value as THREE.Vector4).set(0, 0, 1, 1)
-      ;(blurU2.uStep.value as THREE.Vector2).set(0, 0)
-      blurU2.uSrc.value = this.histA.texture
-      renderer.setRenderTarget(this.target)
-      renderer.clear(true, false, false)
-      renderer.render(this.blurScene, this.splatCamera)
+      this.canon = this.histA
       const swap = this.histA
       this.histA = this.histB
       this.histB = swap
@@ -1165,20 +1339,22 @@ void main() {
         renderer.render(this.blurScene, this.splatCamera)
       }
 
+      const region = blurU.uRegion.value as THREE.Vector4
       if (sigmaTexels <= 5) {
         // Narrow blur: taps are dense enough against full-res content.
-        pass(this.target, this.blurTarget, step, 0)
+        pass(this.canon, this.blurTarget, step, 0)
         pass(this.blurTarget, this.target, 0, step)
       } else {
         // Wide blur: prefilter down to quarter res (two bilinear 2x2
-        // boxes — the zero-step "blur" is an identity copy through the
-        // minifying bilinear fetch), blur there, upsample on the way
-        // back. Same sigma in UV space; no aliasing.
-        pass(this.target, this.blurTarget, 0, 0)
-        pass(this.blurTarget, this.blurQuarterA, 0, 0)
+        // boxes — a one-tap copy through the minifying bilinear fetch),
+        // blur there, upsample on the way back. Same sigma in UV space;
+        // no aliasing.
+        this.copyTo(renderer, this.canon, this.blurTarget, region)
+        this.copyTo(renderer, this.blurTarget, this.blurQuarterA, region)
         pass(this.blurQuarterA, this.blurQuarterB, step, 0)
         pass(this.blurQuarterB, this.target, 0, step)
       }
+      this.canon = this.target
     }
 
     // Build the defocus pyramid (see the pyr1/pyr2 declarations). Full-
@@ -1202,15 +1378,24 @@ void main() {
       }
       // L1: ~0.5m world sigma. Kernel taps sit at sigma/2 spacing in UV.
       const s1 = 0.5 / this.extent / 2
-      pass(this.target, this.blurTarget, 0, 0)
-      pass(this.blurTarget, this.blurQuarterA, 0, 0)
+      const full = blurU.uRegion.value as THREE.Vector4
+      this.copyTo(renderer, this.canon, this.blurTarget, full)
+      this.copyTo(renderer, this.blurTarget, this.blurQuarterA, full)
       pass(this.blurQuarterA, this.blurQuarterB, s1, 0)
       pass(this.blurQuarterB, this.pyr1, 0, s1)
       // L2: ~2m total; additional sigma on top of L1's 0.5m.
       const s2 = Math.sqrt(2.0 * 2.0 - 0.5 * 0.5) / this.extent / 2
-      pass(this.pyr1, this.pyr2, 0, 0)
+      this.copyTo(renderer, this.pyr1, this.pyr2, full)
       pass(this.pyr2, this.pyrScratch, s2, 0)
       pass(this.pyrScratch, this.pyr2, 0, s2)
+      // Shadow map's rungs at quarter res, same sigmas as the pattern's.
+      this.copyTo(renderer, this.shadowTarget, this.shadowScratch, full)
+      pass(this.shadowScratch, this.shadowL1, s1, 0)
+      pass(this.shadowL1, this.shadowScratch, 0, s1)
+      // (scratch now holds L1; keep L1 there and build L2 from it)
+      this.copyTo(renderer, this.shadowScratch, this.shadowL1, full)
+      pass(this.shadowL1, this.shadowScratch, s2, 0)
+      pass(this.shadowScratch, this.shadowL2, 0, s2)
     }
 
     // Reduce the splatted rect to its mean, for receiver normalisation.
@@ -1238,6 +1423,7 @@ void main() {
           (sHalf / this.extent) * 0.8,
           (sHalf / this.extent) * 0.8,
         )
+        this.meanMaterial.uniforms.uMap.value = this.canon.texture
         this.meanMaterial.uniforms.uPrevMean.value = this.meanTarget.texture
         this.meanMaterial.uniforms.uMeanBlend.value = this.meanSeeded ? 0.08 : 1
         this.meanSeeded = true
@@ -1402,6 +1588,12 @@ void main() {
     this.material.dispose()
     this.blurMaterial.dispose()
     this.aaTarget.dispose()
+    this.shadowTarget.dispose()
+    this.shadowL1.dispose()
+    this.shadowL2.dispose()
+    this.shadowScratch.dispose()
+    this.shadowGeometry.dispose()
+    this.shadowMaterial.dispose()
     this.aaMaterial.dispose()
     this.histA.dispose()
     this.histB.dispose()
