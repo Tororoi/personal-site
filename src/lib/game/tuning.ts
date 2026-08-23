@@ -651,7 +651,6 @@ export const BOWCREST = {
   segLip: 8,
 }
 
-
 /**
  * SUN SPECULAR — the sun's own mirror image on the water.
  *
@@ -1282,7 +1281,7 @@ export const FOAM = {
    *
    * Nothing here reads wind or current. Drift belongs to the emitted foam,
    * which gets it from the field for free.
- */
+   */
   /** Collar width in metres at full foaminess. */
   collarWidth: 0.15,
   /** Opacity of the collar, applied as thickness into the foam web. */
@@ -1536,7 +1535,6 @@ export const MIST = {
   hover: 0.3,
 }
 
-
 /**
  * FRAGMENT ABLATION — measurement scaffolding for the water shader.
  *
@@ -1750,7 +1748,7 @@ export const SEA = {
    * Compass knobs: 0 north, 90 east, 180 south, 270 west, calibrated so
    * WEST is where the default sun path sets (world azimuth 226). Bearings
    * are the direction the wind/current moves TOWARD.
- */
+   */
   /** 0 calm .. 1 largeSwell .. 2 storm. */
   waves: 1,
   /** 0 clear blue .. 1 heavy overcast. */
@@ -1796,7 +1794,6 @@ export const SEA = {
    */
   stepEvery: 1,
 }
-
 
 /**
  * UNDERWATER — how submerged things are lit, and how the caustic pattern
@@ -2170,6 +2167,30 @@ export const BOAT = {
   /** m/s^2 at full throttle. */
   thrust: 6.0,
   reverseThrust: 1.5,
+  /**
+   * TORQUE RESERVE for pushing through opposition, m/s^2. A small motor
+   * bogs down under load; a big one holds its thrust. While the throttle
+   * is engaged this cancels up to `horsepower` of what the sea throws
+   * AGAINST the driven direction — the gravity slide on a face, and the
+   * shove of a breaking crest, both drawing from ONE shared per-step
+   * reserve. Capped at the actual opposition, so it never adds speed on
+   * flat water (top speed is untouched) and at best holds the hull
+   * against the grade or the break. Scales with throttle fraction: half
+   * throttle brings half the reserve.
+   */
+  horsepower: 16,
+  /**
+   * PROP WASH foam per second at full throttle, deposited into the foam
+   * field just astern of the prop. Keyed to THRUST, not speed: bubbles
+   * come from the screw churning air into the water, so a boat pinned
+   * against a wall at full throttle foams exactly as hard as one at top
+   * speed — the speed only stretches the trail out behind. Also depth-
+   * independent: a stern that digs the motor under churns just as hard
+   * (the bubbles rise); only a prop in the AIR goes quiet. Emission
+   * follows the prop's SPIN, which freewheels down over ~a second after
+   * throttle release instead of stopping dead.
+   */
+  centerWakeFoam: 2,
   /** Linear + quadratic hull drag; together they set the top speed
    * (~5.8 m/s at the defaults: thrust = dragLinear*v + dragQuad*v^2). */
   dragLinear: 0.45,

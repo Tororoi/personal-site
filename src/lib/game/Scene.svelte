@@ -1413,6 +1413,32 @@ float boatSdfAt(vec3 q) {
 	return mix(d0, d1, fz);
 }
 
+// BOAT COLLAR: the hull's waterline ring, from the same SDF the
+// refraction reads (defined here, below the SDF, because GLSL wants
+// declaration before use — the sphere/buoy cases live in contactFoam
+// and the call site maxes the two). One 3D distance does all three
+// jobs the box cases split up: beside the hull it is the horizontal
+// gap, over a swamped deck it is the water's depth onto the hull,
+// under a lifted hull it is the air gap — so a single falloff gives
+// ring, overwash and lift fade at collar scale.
+float boatContact(vec3 P) {
+	if (uFoaminess < 0.001) return 0.0;
+	vec3 lp = (uBoatInv * vec4(P, 1.0)).xyz;
+	// Hard reject outside the SDF box (plus slack): boatSdfAt clamps its
+	// sample into the box, so far-away points would read the border's
+	// small values and smear collar across open water.
+	vec3 rel = lp - uBoatSdfMin;
+	if (any(lessThan(rel, vec3(-0.4))) || any(greaterThan(rel, uBoatSdfSize + 0.4))) {
+		return 0.0;
+	}
+	float wob = foamNoise(P.xz * ${f(1 / FOAM.collarWobbleScale)}) * 0.6
+		+ foamNoise(P.xz * ${f(2.7 / FOAM.collarWobbleScale)} + 7.0) * 0.4;
+	float w = ${f(FOAM.collarWidth)} * uFoaminess
+		* mix(${f(1 - FOAM.collarWobble)}, ${f(1 + FOAM.collarWobble)}, wob);
+	float d = boatSdfAt(lp);
+	return 1.0 - smoothstep(w * ${f(1 - FOAM.collarSoft)}, w, max(d, 0.0));
+}
+
 float boatHit(vec3 ro, vec3 rd, out vec3 nWorld) {
 	vec3 o = (uBoatInv * vec4(ro, 1.0)).xyz;
 	vec3 d = (uBoatInv * vec4(rd, 0.0)).xyz;
@@ -1753,7 +1779,9 @@ void main() {
 	// equal edges, which is undefined in GLSL and returns 1, so the
 	// calmest sea got the THICKEST collar.
 	float contactT = ${
-		ENABLE.contactFoam ? `contactFoam(vWorld) * ${f(FOAM.collarAlpha)}` : '0.0'
+		ENABLE.contactFoam
+			? `max(contactFoam(vWorld), boatContact(vWorld)) * ${f(FOAM.collarAlpha)}`
+			: '0.0'
 	};
 	// One web over both, so a fading collar tears into the same lace the
 	// field does, and overlapping foam draws one pattern rather than two.
@@ -3464,6 +3492,13 @@ void main() {
 	};
 	const boatSurf = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 };
 	const propScratch = new THREE.Vector3();
+	// Prop spin as a fraction of full-throttle thrust, SIGNED. The screw
+	// takes a moment to bite and a real motor freewheels down rather than
+	// stopping dead at throttle release — foam emission follows this, not
+	// the raw throttle, so the wash winds down over a couple of seconds.
+	let propSpin = 0;
+	const SPIN_UP_TAU = 0.15;
+	const SPIN_DOWN_TAU = 1.2;
 	const orbScratch = { x: 0, z: 0 };
 	const slideScratch = { x: 0, z: 0 };
 	const boatKeys = { fwd: false, back: false, left: false, right: false };
@@ -3787,13 +3822,24 @@ void main() {
 		// while a lifted stern has the prop out).
 		propScratch.set(-2.48, -0.2, 0);
 		boatMesh.localToWorld(propScratch);
-		const propWet =
-			BOAT.airControl ||
+		// propUnder is the physical fact (screw below the surface, however
+		// deep); propWet is the CONTROL gate, which airControl may fake.
+		// Foam keys on the fact — an airControl flight makes no bubbles.
+		const propUnder =
 			propScratch.y - BOAT.propDepthM <
-				surfaceHeight(propScratch.x, propScratch.z, waveTime);
+			surfaceHeight(propScratch.x, propScratch.z, waveTime);
+		const propWet = BOAT.airControl || propUnder;
 		const throttle = propWet
 			? (boatKeys.fwd ? BOAT.thrust : 0) - (boatKeys.back ? BOAT.reverseThrust : 0)
 			: 0;
+		// HORSEPOWER budget for this step: one torque reserve, shared by
+		// everything it can hold against (gravity slide, break shove) —
+		// two opposers in the same frame split it rather than each getting
+		// the full reserve. Scales with throttle fraction.
+		let hpLeft =
+			throttle !== 0 && BOAT.horsepower > 0
+				? (BOAT.horsepower * Math.abs(throttle)) / Math.max(BOAT.thrust, 0.001)
+				: 0;
 		const steer = (boatKeys.right ? 1 : 0) - (boatKeys.left ? 1 : 0);
 		const authority = BOAT.turnMin + (1 - BOAT.turnMin) * Math.min(Math.abs(boat.speed) / 3, 1);
 		// YAW carries momentum: the rate chases the rudder's command while
@@ -3827,6 +3873,35 @@ void main() {
 		}
 		boat.vx += fwdX * throttle * dt;
 		boat.vz += fwdZ * throttle * dt;
+		// PROP WASH: keyed to PROP SPIN, not raw throttle — spin chases the
+		// commanded thrust fraction fast on the way up and freewheels down
+		// slowly on release, so letting off the throttle tails the foam
+		// out over a couple of seconds instead of cutting it dead. The
+		// bubbles are cavitation and entrained air off the blades, made
+		// whether or not the hull is going anywhere, and depth-independent
+		// on purpose: a buried screw churns just as hard and the bubbles
+		// rise. The ONLY quiet states are a wound-down motor and a prop in
+		// the air (spin still decays in flight; landing resumes the wash).
+		// Deposits sit at MID-HULL and just aft of it: foam is laid in
+		// place while the boat moves on, so a stern-line emitter opens a
+		// visible gap behind the transom within a frame or two — seeding
+		// under the hull keeps the trail visually attached and the hull
+		// itself churns over it on the way out. REST-space, so subtract
+		// the sway like every other addFoam caller.
+		const spinTarget = throttle / Math.max(BOAT.thrust, 0.001);
+		propSpin +=
+			(spinTarget - propSpin) *
+			Math.min(dt / (Math.abs(spinTarget) > Math.abs(propSpin) ? SPIN_UP_TAU : SPIN_DOWN_TAU), 1);
+		if (propUnder && Math.abs(propSpin) > 0.02 && BOAT.centerWakeFoam > 0) {
+			const amp = BOAT.centerWakeFoam * Math.abs(propSpin) * dt;
+			for (let k = 0; k < 2; k++) {
+				const back = k * 0.9;
+				const wx = boat.x - fwdX * back + (Math.random() - 0.5) * 0.6;
+				const wz = boat.z - fwdZ * back + (Math.random() - 0.5) * 0.6;
+				const s = sampleOcean(wx, wz, waveTime, 1, 1);
+				addFoam(wx - s.swayX, wz - s.swayZ, 0.5, amp * (k === 0 ? 1 : 0.6));
+			}
+		}
 		if (boat.wet) {
 			// Drag acts in the WATER'S frame: the water itself moves with
 			// the waves' orbital motion, and drag pulls the hull toward
@@ -3944,6 +4019,23 @@ void main() {
 					const shove = BOAT.breakPush * breaking * sizeF * dt;
 					boat.vx -= ux * shove;
 					boat.vz -= uz * shove;
+					// HORSEPOWER vs the break: same contract as the slide —
+					// cancel the shove's component against the driven
+					// direction, capped at the actual opposition and at
+					// what's left of this step's reserve. Powering into a
+					// breaking face holds ground; the crossways part of the
+					// shove still lands.
+					if (hpLeft > 0) {
+						const dirX = fwdX * Math.sign(throttle);
+						const dirZ = fwdZ * Math.sign(throttle);
+						const oppose = BOAT.breakPush * breaking * sizeF * (ux * dirX + uz * dirZ);
+						if (oppose > 0) {
+							const assist = Math.min(oppose, hpLeft);
+							hpLeft -= assist;
+							boat.vx += dirX * assist * dt;
+							boat.vz += dirZ * assist * dt;
+						}
+					}
 				}
 			}
 		}
@@ -4020,6 +4112,25 @@ void main() {
 			filteredSlopeInto(slideScratch, boat.rest.u, boat.rest.v, waveTime, BOAT.slideLambdaM);
 			boat.vx -= 9.8 * slideScratch.x * BOAT.slopeSlide * dt;
 			boat.vz -= 9.8 * slideScratch.z * BOAT.slopeSlide * dt;
+			// HORSEPOWER: the slide above doesn't care whether the motor is
+			// pushing; a hull climbing a face loses exactly what gravity
+			// takes. The reserve cancels the slide's component AGAINST the
+			// driven direction — capped at the actual opposition and at
+			// what's left of the shared per-step budget (the break shove
+			// draws from the same reserve), so it neutralizes the grade at
+			// best and adds nothing on flat water or downhill.
+			if (hpLeft > 0) {
+				const dirX = fwdX * Math.sign(throttle);
+				const dirZ = fwdZ * Math.sign(throttle);
+				const oppose =
+					9.8 * BOAT.slopeSlide * (slideScratch.x * dirX + slideScratch.z * dirZ);
+				if (oppose > 0) {
+					const assist = Math.min(oppose, hpLeft);
+					hpLeft -= assist;
+					boat.vx += dirX * assist * dt;
+					boat.vz += dirZ * assist * dt;
+				}
+			}
 		}
 		// Per-axis springs: each axis chases its target with its OWN
 		// stiffness and damping, so pitch can sit taut while roll rocks

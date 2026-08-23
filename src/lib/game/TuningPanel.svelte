@@ -202,6 +202,8 @@
 		'SEA.seaState': { min: -1, max: 2, step: 0.01 },
 		'BOAT.thrust': { min: 0, max: 8, step: 0.1 },
 		'BOAT.reverseThrust': { min: 0, max: 4, step: 0.1 },
+		'BOAT.horsepower': { min: 0, max: 20, step: 0.1 },
+		'BOAT.centerWakeFoam': { min: 0, max: 3, step: 0.05 },
 		'BOAT.dragLinear': { min: 0.05, max: 1, step: 0.01 },
 		'BOAT.dragQuad': { min: 0, max: 0.15, step: 0.002 },
 		'BOAT.turnRate': { min: 0, max: 2.5, step: 0.05 },
@@ -361,14 +363,14 @@
 			['testing', ['sphereDepth', 'rainbowCard']]
 		],
 		BOAT: [
-			['drive', ['pinned', 'thrust', 'reverseThrust', 'propDepthM']],
+			['drive', ['pinned', 'thrust', 'reverseThrust', 'horsepower', 'propDepthM']],
 			['steering', ['turnRate', 'turnMin', 'turnPivotM', 'yawResponse', 'yawWaterDrag', 'airControl']],
 			['hull', ['dragLinear', 'dragQuad', 'keelGrip']],
 			['waves', ['orbitalMotion', 'slopeSlide', 'slideLambdaM', 'breakPush']],
 			['buoyancy', ['bobPeriod', 'bobZeta', 'maxSubmersion', 'entryDrag']],
 			['swing', ['rollGain', 'rollRighting', 'rollZeta', 'pitchGain', 'pitchRighting', 'pitchZeta']],
 			['trim', ['sternTrim', 'trimPerSpeed', 'trimPerAccel', 'liftPerSpeed', 'liftMax']],
-			['wake', ['wakeAmp', 'wakeOffset']]
+			['wake', ['wakeAmp', 'wakeOffset', 'centerWakeFoam']]
 		],
 		SPECULAR: [
 			['core', ['sharpClear', 'sharpOvercast', 'gainClear', 'gainOvercast', 'fresnelMix']],

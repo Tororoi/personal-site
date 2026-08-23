@@ -100,6 +100,16 @@ if (SAVED.CONTACT) {
 	saveOverrides(SAVED);
 }
 
+// MIGRATION — motorFoam renamed to centerWakeFoam and rehomed under the
+// wake group; the scale also shrank (old max 20, new max 3 = the tuned
+// level), so a carried value is capped rather than left off-slider.
+if (SAVED.BOAT && 'motorFoam' in SAVED.BOAT) {
+	const v = SAVED.BOAT.motorFoam;
+	if (typeof v === 'number') SAVED.BOAT.centerWakeFoam = Math.min(v, 3);
+	delete SAVED.BOAT.motorFoam;
+	saveOverrides(SAVED);
+}
+
 /**
  * Patch one config group in place from the saved set, and hand it back so
  * it can be used as an initialiser.
