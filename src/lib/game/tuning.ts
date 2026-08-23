@@ -401,6 +401,17 @@ export const LOOP = {
   backfaceWhite: 0.0,
   /** Weight of the reconstructed fold-ramp term, 0-1. */
   rampWhite: 1.0,
+  /**
+   * Refine the fold ramps PER PIXEL (a full wave-tangent loop in the
+   * water fragment) instead of using the vertex-stage ramps alone.
+   * Sharper fold edges below quad scale — at a cost that has nothing to
+   * do with how often it runs: the loop's register footprint taxes
+   * EVERY pixel's occupancy whether or not the mid-ramp gate fires
+   * (measured 8ms of a 31ms frame at 4Mpx with it on, calm sea). Same
+   * lesson as the foam web in Milestone 13. Off by default; flip on to
+   * judge whether the edge gain is worth a quarter of the frame.
+   */
+  pixelRamps: false,
 
   /**
    * The ramp term is a max() of three separate claims. Switch any of

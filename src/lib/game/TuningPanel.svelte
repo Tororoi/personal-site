@@ -432,7 +432,7 @@
 			['fade', ['bodyBias', 'coherence', 'coherenceScale', 'tipFade', 'edgeFade', 'alpha', 'alphaCull']]
 		],
 		LOOP: [
-			['whiteness', ['backfaceWhite', 'rampWhite', 'whiteFromJ', 'whiteFromTilt', 'whiteFromStretch', 'whiteJRamp', 'whiteTiltStart', 'whiteTiltFull']],
+			['whiteness', ['backfaceWhite', 'rampWhite', 'pixelRamps', 'whiteFromJ', 'whiteFromTilt', 'whiteFromStretch', 'whiteJRamp', 'whiteTiltStart', 'whiteTiltFull']],
 			['debug', ['thinSk', 'debugThin']],
 			['stretch', ['stretchJRamp', 'stretchDepth', 'stretchFrothR', 'stretchBack', 'stretchDown']],
 			['gate', ['gateStart', 'gateFull']]

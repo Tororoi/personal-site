@@ -1317,7 +1317,7 @@ ${ENABLE.fftDetail ? fftSlopeGlsl() : ''}
 ${ENABLE.objectWave ? objWaveGlsl : ''}
 ${ENABLE.objectWave ? objectWaveSlopeGlsl() : ''}
 
-// The fold ramps at FRAGMENT resolution (see the gate in main): one
+${LOOP.pixelRamps ? `// The fold ramps at FRAGMENT resolution (see the gate in main): one
 // tangent loop yields both tests — the unnormalized Na.y IS the
 // horizontal Jacobian determinant, and Na.y/|Na| is the tilt.
 float pinchMask(vec2 restXZ) {
@@ -1369,6 +1369,7 @@ float pinchMask(vec2 restXZ) {
 		`1.0 - smoothstep(0.0, ${f(LOOP.stretchJRamp)}, Na.y)`
 	)} * vis;
 }
+` : ''}
 
 /**
  * CONTACT FOAM: the collar where the surface meets a solid.
@@ -1913,7 +1914,7 @@ void main() {
 	// only where the vertex estimate lands mid-ramp — a whole extra wave
 	// pass is not worth paying on water that is plainly one or the other.
 	float ramps = ${ENABLE.loopWhite ? 'vPinchWhite' : '0.0'};
-	if (ramps > 0.01 && ramps < 0.99) ramps = pinchMask(vRest);
+	${LOOP.pixelRamps ? 'if (ramps > 0.01 && ramps < 0.99) ramps = pinchMask(vRest);' : '// LOOP.pixelRamps off: vertex ramps only (see tuning.ts).'}
 	// The thin gate applies to the RAMPS only. The backface is not an
 	// estimate that can be wrong about a hairline — it is the sheet.
 	float thin = ${
