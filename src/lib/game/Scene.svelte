@@ -3300,84 +3300,6 @@ void main() {
 	const SPHERE_CZ = 2;
 	const SPHERE_CR = 5;
 
-	// DEBUG: where the light is, relative to the sphere. A dot sits on
-	// the sphere's surface at the sub-light point (the spot the light is
-	// directly over), and a thin arc traces that point's path. The SUN
-	// and MOON are drawn separately — yellow and pale blue — because
-	// they are genuinely different arcs, not two halves of one circle:
-	// computeEnv negates the vector at handover, mirroring the night arc
-	// through the origin onto the opposite side of the sphere.
-	// depthTest off: the sphere sits below the waterline, so the opaque
-	// water hides the markers exactly when they matter most.
-	const SUN_COLOR = '#ffd83a';
-	const MOON_COLOR = '#a8c8ff';
-	const markerGeo = new THREE.SphereGeometry(0.28, 12, 10);
-	const sunDotMat = new THREE.MeshBasicMaterial({ color: SUN_COLOR, depthTest: false });
-	const moonDotMat = new THREE.MeshBasicMaterial({ color: MOON_COLOR, depthTest: false });
-	const sunDot = new THREE.Mesh(markerGeo, sunDotMat);
-	const moonDot = new THREE.Mesh(markerGeo, moonDotMat);
-	sunDot.renderOrder = 12;
-	moonDot.renderOrder = 12;
-
-	function pathMat(color: string) {
-		return new THREE.LineBasicMaterial({
-			color,
-			transparent: true,
-			opacity: 0.55,
-			depthTest: false
-		});
-	}
-	const sunPathMat = pathMat(SUN_COLOR);
-	const moonPathMat = pathMat(MOON_COLOR);
-
-	/** Trace the light's path over the phases where `daytime` holds. The
-	 * sun rules the half where its altitude is positive; the moon takes
-	 * the other half. */
-	function lightPathPoints(daytime: boolean) {
-		const pts: THREE.Vector3[] = [];
-		const R = SPHERE_CR + 0.06;
-		const STEPS = 160;
-		for (let i = 0; i <= STEPS; i++) {
-			const phase = i / STEPS;
-			// Same test computeEnv uses to hand over between sun and moon.
-			const isDay = Math.sin((phase - 0.25) * Math.PI * 2) > 0;
-			if (isDay !== daytime) continue;
-			const e = computeEnv(phase);
-			pts.push(
-				new THREE.Vector3(
-					SPHERE_CX + e.lightDir[0] * R,
-					SPHERE_CY + e.lightDir[1] * R,
-					SPHERE_CZ + e.lightDir[2] * R
-				)
-			);
-		}
-		return pts;
-	}
-	function lightPath(daytime: boolean, mat: THREE.LineBasicMaterial) {
-		const line = new THREE.Line(
-			new THREE.BufferGeometry().setFromPoints(lightPathPoints(daytime)),
-			mat
-		);
-		line.renderOrder = 11;
-		return line;
-	}
-	const sunPath = lightPath(true, sunPathMat);
-	const moonPath = lightPath(false, moonPathMat);
-
-	// The two arcs are the only way to SEE what the path knobs do, so they
-	// have to follow them. The knobs are live (nothing bakes them), but the
-	// geometry was traced once at build, so it is re-traced whenever any of
-	// the four changes — compared as a string rather than watched, since
-	// ENV is a plain object no one is subscribed to.
-	let pathSig = '';
-	function refreshLightPaths() {
-		const sig = `${ENV.sunPathAngleDeg},${ENV.sunPathOffsetDeg},${ENV.moonPathAngleDeg},${ENV.moonPathOffsetDeg}`;
-		if (sig === pathSig) return;
-		pathSig = sig;
-		sunPath.geometry.setFromPoints(lightPathPoints(true));
-		moonPath.geometry.setFromPoints(lightPathPoints(false));
-	}
-	refreshLightPaths();
 	function depositContactFoam(t: number) {
 		for (const b of buoys) {
 			const s = sampleOcean(b.x, b.z, t, 1, 1);
@@ -4534,18 +4456,6 @@ void main() {
 					SPECULAR.haloGain + (SPECULAR.haloGainLow - SPECULAR.haloGain) * t;
 				waterUniforms.uSpecFade.value = smooth01(sunAlt, 0, SPECULAR.fadeAltDeg);
 			}
-			// Sub-light point on the sphere's surface: the sun's dot while
-			// the sun is up, the moon's while it is not.
-			const isDay = Math.sin((game.time / ENV.daySeconds - 0.25) * Math.PI * 2) > 0;
-			const activeDot = isDay ? sunDot : moonDot;
-			activeDot.position.set(
-				SPHERE_CX + env.lightDir[0] * (SPHERE_CR + 0.06),
-				SPHERE_CY + env.lightDir[1] * (SPHERE_CR + 0.06),
-				SPHERE_CZ + env.lightDir[2] * (SPHERE_CR + 0.06)
-			);
-			sunDot.visible = isDay;
-			moonDot.visible = !isDay;
-			refreshLightPaths();
 			// Reflected sky follows the clock: daylight preset colours, sunk
 			// toward the fog as night falls. skyScratch carries the fog tone.
 			skyScratch.setRGB(env.fog[0], env.fog[1], env.fog[2]);
@@ -4880,13 +4790,6 @@ void main() {
 		material={sphereMaterial}
 		position={[3, -6, 2]}
 	/>
-{/if}
-
-{#if !PROFILE.hideObjects}
-	<T is={sunPath} />
-	<T is={moonPath} />
-	<T is={sunDot} />
-	<T is={moonDot} />
 {/if}
 
 <T is={sprayMesh} />

@@ -261,7 +261,7 @@
 		'UNDERWATER.scatterOvercast': { min: 0, max: 3, step: 0.02 },
 		'UNDERWATER.surfaceReflect': { min: 0, max: 0.6, step: 0.002 },
 		'UNDERWATER.fresnelGrazing': { min: 0, max: 1.5, step: 0.01 },
-		'UNDERWATER.entryLoss': { min: 0, max: 1, step: 0.01 },
+		'UNDERWATER.entryLoss': { min: 0, max: 100, step: 0.5 },
 		'UNDERWATER.ambientSkyHue': { min: 0, max: 1, step: 0.01 },
 		'UNDERWATER.wrap': { min: 0, max: 1, step: 0.01 },
 		'UNDERWATER.sphereDepth': { min: -14, max: 6, step: 0.1 },
