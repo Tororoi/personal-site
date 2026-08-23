@@ -2001,6 +2001,20 @@ export const UNDERWATER = {
    */
   sphereDepth: -6,
   /**
+   * TEST WHALE: an analytic ellipsoid (12m long, semi-axes 6/1.6/2.2),
+   * raytraced and shadow-casting like the sphere, but FREELY POSITIONED
+   * — drive it over or under the other bodies to exercise object-on-
+   * object shadows at every depth pairing. Underwater only (it has no
+   * dry mesh; raised above the surface it simply stops rendering). A
+   * modelled low-poly whale can replace the ellipsoid later by
+   * inheriting the boat's SDF + image machinery.
+   */
+  whale: false,
+  /** Whale centre height, metres (negative = below the surface). */
+  whaleY: -8,
+  whaleX: -8,
+  whaleZ: 2,
+  /**
    * Flat brightness multiplier on submerged shading — the honest fudge
    * for the gap this model has not closed analytically.
    *
@@ -2116,8 +2130,9 @@ export const CAUSTICS = {
    * CAST SHADOW strength, 0-1. The reference's system, one channel
    * further: shadows are baked into the caustic map by the same
    * refracted rays as the pattern (R = clean light, G = shadowed by
-   * every occluder, B = shadowed by the surface floaters only), and
-   * receivers CHOOSE — the seabed reads G, submerged bodies read B, so
+   * every occluder, B = shadowed by the surface floaters only, A =
+   * shadowed by everything except the hull), and receivers CHOOSE —
+   * the seabed reads G, submerged bodies read B, the hull reads A, so
    * objects get the hull's shadow, keep their own caustics, and can
    * never read their own silhouette (the reference's sphere skips its
    * shadow channel for exactly this reason). Shadow edges inherit the

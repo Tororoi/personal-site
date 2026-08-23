@@ -268,6 +268,9 @@
 		'UNDERWATER.ambientSkyHue': { min: 0, max: 1, step: 0.01 },
 		'UNDERWATER.wrap': { min: 0, max: 1, step: 0.01 },
 		'UNDERWATER.sphereDepth': { min: -14, max: 6, step: 0.1 },
+		'UNDERWATER.whaleY': { min: -20, max: 2, step: 0.1 },
+		'UNDERWATER.whaleX': { min: -40, max: 40, step: 0.5 },
+		'UNDERWATER.whaleZ': { min: -40, max: 40, step: 0.5 },
 		'BOAT.wakeAmp': { min: 0, max: 0.05, step: 0.001 },
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
 		'SEA.waves': { min: 0, max: 2, step: 0.01 },
@@ -361,7 +364,7 @@
 			['shading', ['wrap', 'ambientSkyHue']],
 			['interface', ['surfaceReflect', 'fresnelGrazing', 'entryLoss']],
 			['seabed', ['seabed', 'seabedDepthM']],
-			['testing', ['sphereDepth', 'rainbowCard']]
+			['testing', ['sphereDepth', 'rainbowCard', 'whale', 'whaleY', 'whaleX', 'whaleZ']]
 		],
 		BOAT: [
 			['drive', ['pinned', 'thrust', 'reverseThrust', 'horsepower', 'propDepthM']],

@@ -491,6 +491,9 @@
 		uBoatTex: { value: null as THREE.Texture | null },
 		uProj: { value: new THREE.Matrix4() },
 		uBoatSdf: { value: null as THREE.Texture | null },
+		// Test whale centre; shared by reference with the caustics splat.
+		uWhaleC: { value: new THREE.Vector3(-8, -8, 2) },
+		uWhaleOn: { value: UNDERWATER.whale ? 1 : 0 },
 		SPHERE_C: sphereCUniform,
 		...rainbowUniforms,
 		...uwUniforms,
@@ -653,9 +656,18 @@ uniform float uUwAmbient;
 uniform float uUwDirect;
 // CAST SHADOW strength: blends the receiver's channel choice between
 // the clean caustic field and the shadowed one (see causticTapAt /
-// caustics.ts — shadows live in the map's G/B channels, made of the
+// caustics.ts — shadows live in the map's G/B/A channels, made of the
 // same rays as the pattern, exactly the reference's system).
 uniform float uUwShadowK;
+// HYBRID leg: the map's channels cannot carry underwater-object ->
+// object shadows (a channel per caster doesn't scale), so those come
+// receiver-side: analytic ahead-only tests along the refracted sun
+// path, skipping the receiver's own body. Ahead-only makes them
+// depth-correct per receiver for free — geometry behind the ray
+// cannot cast, so only what is genuinely above a point shades it.
+// Prototype here; the water raytrace defines it with the real
+// occluders, hosts without them stub it to 1.0.
+float uwObjectShadow(vec3 Q, vec3 upSun, float objRecv);
 uniform float uUwRidge;
 uniform vec3 uUwSigma;
 uniform vec3 uUwScatter;
@@ -771,21 +783,24 @@ float causticValidity(vec2 beamXZ) {
 // One caustic tap at a receiver point: beam walk to the reference plane,
 // then the depth-defocus pyramid blend. Factored out so the footprint
 // supersampler below can afford as many taps as the look wants.
-// All three channels: R clean, G shadowed by every occluder, B shadowed
-// by the surface floaters only (see caustics.ts's splatFragment).
-vec3 causticTapAt(vec3 Pi, vec3 refrLight, float t1, float t2) {
+// All four channels: R clean, G shadowed by every occluder, B shadowed
+// by the surface floaters only, A shadowed by everything except the
+// hull (see caustics.ts's splatFragment).
+vec4 causticTapAt(vec3 Pi, vec3 refrLight, float t1, float t2) {
 	vec2 bxz = Pi.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - Pi.y) / refrLight.y);
 	vec2 cuvI = clamp((bxz - uCausticCenter) / uCausticExtent + 0.5, 0.002, 0.998);
-	vec3 c0 = texture2D(uCausticMap, cuvI).rgb;
-	vec3 c1 = texture2D(uCausticPyr1, cuvI).rgb;
-	vec3 c2 = texture2D(uCausticPyr2, cuvI).rgb;
+	vec4 c0 = texture2D(uCausticMap, cuvI);
+	vec4 c1 = texture2D(uCausticPyr1, cuvI);
+	vec4 c2 = texture2D(uCausticPyr2, cuvI);
 	return mix(mix(c0, c1, t1), c2, t2);
 }
 
-// objRecv picks the shadow channel (the reference's receiver rule, one
-// channel further): 0.0 = seabed, shadowed by everything; 1.0 = a
-// submerged body, shadowed only by the surface floaters — so it gets
-// the hull's shadow but can never read its own.
+// objRecv picks the shadow channel (the reference's receiver rule,
+// extended): 0.0 = seabed, shadowed by everything (G); 1.0 = a
+// submerged body, shadowed only by the surface floaters (B); 2.0 = the
+// hull itself, shadowed by everything except its own silhouette (A) —
+// a floater reading a channel containing itself darkened its whole wet
+// body the moment it dipped.
 vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow, float graze, float objRecv) {
 	vec3 sunN = normalize(uSunDir);
 	vec3 refrLight = refract(-sunN, vec3(0.0, 1.0, 0.0), 0.7519);
@@ -854,7 +869,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 			ddx *= 2.4 / dpm;
 			ddy *= 2.4 / dpm;
 		}
-		vec3 accRGB = vec3(0.0);
+		vec4 accC = vec4(0.0);
 		// ADAPTIVE tap count: the footprint's size in MAP TEXELS decides
 		// how many samples the integral needs. One tap where the pixel
 		// spans less than a texel (most flat-on water — the bulk of the
@@ -868,12 +883,17 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 				if (j >= n) break;
 				vec3 Pi = P + ((float(i) + 0.5) / float(n) - 0.5) * ddx
 					+ ((float(j) + 0.5) / float(n) - 0.5) * ddy;
-				accRGB += causticTapAt(Pi, refrLight, t1, t2);
+				accC += causticTapAt(Pi, refrLight, t1, t2);
 			}
 		}
-		vec3 cRGB = accRGB / float(n * n);
-		// Channel choice, blended toward clean by the castShadow dial.
-		caustic = mix(cRGB.r, mix(cRGB.g, cRGB.b, objRecv), uUwShadowK);
+		vec4 cC = accC / float(n * n);
+		// Channel choice, blended toward clean by the castShadow dial:
+		// seabed (0) reads G, the hull (2) reads A, every other body
+		// reads B. The hybrid analytic leg then adds what no channel
+		// carries — underwater casters onto objects.
+		float sh = objRecv < 0.5 ? cC.g : (abs(objRecv - 2.0) < 0.25 ? cC.a : cC.b);
+		if (objRecv > 0.5) sh *= uwObjectShadow(P, -refrLight, objRecv);
+		caustic = mix(cC.r, sh, uUwShadowK);
 	}
 	// SELF-NORMALIZE by the map's mean over the splatted rect (a 1x1
 	// reduction target, refreshed each step — NOT a mip read; mips on the
@@ -1222,6 +1242,13 @@ uniform vec3 uRainbow[6];
 uniform vec4 uRainbowRect; // cx, cz, halfX, halfZ
 uniform float uRainbowY;
 uniform float uRainbowOn;
+// The test whale: an analytic ellipsoid, raytraced and casting like the
+// sphere but freely positioned (UNDERWATER.whale*). Semi-axes must
+// match caustics.ts's copy.
+uniform vec3 uWhaleC;
+uniform float uWhaleOn;
+#define WHALE_AX vec3(6.0, 1.6, 2.2)
+#define WHALE_COLOR vec3(0.34, 0.4, 0.47)
 
 /**
  * The rainbow test card — a horizontal rectangle of six hard-edged
@@ -1488,6 +1515,45 @@ float buoyHit(mat4 inv, vec3 ro, vec3 rd, out vec3 nWorld) {
 	return tN;
 }
 
+// The hybrid analytic leg (prototyped in the shared underwater chunk):
+// underwater casters — sphere and card — onto object receivers. Each
+// test is skipped for the caster's own body (objRecv 3 = sphere,
+// 4 = card), AHEAD-ONLY (so nothing behind the ray casts: this is what
+// makes it depth-correct per receiver), and its penumbra widens with
+// caster distance on the caustics' own blurPerM dial, since these
+// bypass the map's pyramid. When meshy underwater bodies arrive, this
+// is the function a sun-space depth map replaces.
+float uwObjectShadow(vec3 Q, vec3 upSun, float objRecv) {
+	float v = 1.0;
+	if (abs(objRecv - 3.0) > 0.25) {
+		float b = dot(SPHERE_C - Q, upSun);
+		if (b > 0.25) {
+			float dd = length(SPHERE_C - Q - upSun * b) - SPHERE_R;
+			float ext = b * uUwCausticBlur;
+			v *= smoothstep(-0.5 * ext, 0.35 + ext, dd);
+		}
+	}
+	if (abs(objRecv - 4.0) > 0.25 && uRainbowOn > 0.5 && upSun.y > 0.001) {
+		float th = (uRainbowY - Q.y) / upSun.y;
+		if (th > 0.05) {
+			vec2 qd = abs(Q.xz + upSun.xz * th - uRainbowRect.xy) - uRainbowRect.zw;
+			float ext = th * uUwCausticBlur;
+			v *= smoothstep(-0.5 * ext, 0.2 + ext, max(qd.x, qd.y));
+		}
+	}
+	// The whale: ellipsoid via scaled space, ahead-only like the sphere.
+	if (abs(objRecv - 5.0) > 0.25 && uWhaleOn > 0.5) {
+		vec3 ow = (Q - uWhaleC) / WHALE_AX;
+		vec3 dw = upSun / WHALE_AX;
+		float bw = -dot(ow, dw) / dot(dw, dw);
+		if (bw > 0.25) {
+			float dd = (length(ow + dw * bw) - 1.0) * 1.6;
+			float ext = bw * uUwCausticBlur;
+			v *= smoothstep(-0.5 * ext, 0.35 + ext, dd);
+		}
+	}
+	return v;
+}
 
 void main() {
 	// SMOOTH shading: interpolated analytic wave slope + per-pixel ripple
@@ -1555,11 +1621,17 @@ void main() {
 	float tHit = -1.0;
 	vec3 hitN = vec3(0.0, 1.0, 0.0);
 	vec3 albedo = uSphereColor;
+	// Receiver class of the winning hit: 1.0 = buoy (reads B), 2.0 =
+	// hull (reads A, never sees itself), 3.0 = sphere, 4.0 = card,
+	// 5.0 = whale (read B and skip their own analytic test in
+	// uwObjectShadow).
+	float recvCh = 1.0;
 	if (disc > 0.0) {
 		float th = -b - sqrt(disc);
 		if (th > 0.0) {
 			tHit = th;
 			hitN = normalize(pEntry + refr * th - SPHERE_C);
+			recvCh = 3.0;
 		}
 	}
 	// Buoys are in the intersection list too; nearest hit wins.
@@ -1570,6 +1642,7 @@ void main() {
 			tHit = tb;
 			hitN = bn;
 			albedo = uBuoyColor;
+			recvCh = 1.0;
 		}
 	}
 	{
@@ -1589,6 +1662,7 @@ void main() {
 				tHit = tb;
 				hitN = bn;
 				albedo = bimg.rgb;
+				recvCh = 2.0;
 			}
 		}
 	}
@@ -1599,6 +1673,27 @@ void main() {
 			tHit = tr;
 			hitN = vec3(0.0, 1.0, 0.0);
 			albedo = ralb;
+			recvCh = 4.0;
+		}
+	}
+	// The whale: sphere maths in the ellipsoid's scaled space (offsets
+	// scaled, so t stays a world-metres parameter); the normal picks up
+	// the inverse-square axis weighting of a true ellipsoid gradient.
+	if (uWhaleOn > 0.5) {
+		vec3 ow = (pEntry - uWhaleC) / WHALE_AX;
+		vec3 dw = refr / WHALE_AX;
+		float aw = dot(dw, dw);
+		float bw = dot(ow, dw);
+		float cw = dot(ow, ow) - 1.0;
+		float dscw = bw * bw - aw * cw;
+		if (dscw > 0.0) {
+			float tw = (-bw - sqrt(dscw)) / aw;
+			if (tw > 0.0 && (tHit < 0.0 || tw < tHit)) {
+				tHit = tw;
+				hitN = normalize((pEntry + refr * tw - uWhaleC) / (WHALE_AX * WHALE_AX));
+				albedo = WHALE_COLOR;
+				recvCh = 5.0;
+			}
 		}
 	}
 	vec3 transmitted;
@@ -1614,7 +1709,7 @@ void main() {
 		vec3 P = pEntry + refr * tHit;
 		waterPath = tHit;
 		transmitted = shadeUnderwater(
-			P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), 1.0);
+			P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), recvCh);
 	} else if (tSeabed > 0.0) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
@@ -2137,6 +2232,11 @@ varying float vViewZ;
 varying float vWaterY;
 
 ${underwaterShadeGlsl}
+
+// No occluders in this host (see the chunk's prototype): the mesh's wet
+// branch only shades its own waterline band, where the raytraced view —
+// which has the real uwObjectShadow — takes over a pixel later.
+float uwObjectShadow(vec3 Q, vec3 upSun, float objRecv) { return 1.0; }
 
 void main() {
 	vec3 normal = normalize(vNormal);
@@ -3741,7 +3841,8 @@ void main() {
 			waterUniforms.uBoatSdfMin.value,
 			waterUniforms.uBoatSdfSize.value,
 			waterUniforms.uBuoyInv.value,
-			rainbowUniforms.uRainbowRect.value
+			rainbowUniforms.uRainbowRect.value,
+			waterUniforms.uWhaleC.value
 		);
 	}
 	// Everything the boat-image pass renders lives on layer 3.
@@ -4540,6 +4641,14 @@ void main() {
 				uwUniforms.uUwGlow.value = UNDERWATER.glow;
 				uwUniforms.uUwSeabedOn.value = UNDERWATER.seabed ? 1 : 0;
 				uwUniforms.uUwSeabedD.value = UNDERWATER.seabedDepthM;
+				// The whale's centre object is shared by reference with the
+				// caustics splat, so one write moves both.
+				waterUniforms.uWhaleC.value.set(
+					UNDERWATER.whaleX,
+					UNDERWATER.whaleY,
+					UNDERWATER.whaleZ
+				);
+				waterUniforms.uWhaleOn.value = UNDERWATER.whale ? 1 : 0;
 				uwUniforms.uUwCausticFocus.value = CAUSTICS.formM;
 				uwUniforms.uUwCausticBlur.value = CAUSTICS.blurPerM;
 				uwUniforms.uUwShadowK.value = Math.min(Math.max(CAUSTICS.castShadow, 0), 1);

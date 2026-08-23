@@ -139,6 +139,7 @@ varying vec2 vOld;
 varying vec2 vNew;
 varying float vVisAll;
 varying float vVisFloat;
+varying float vVisNoHull;
 
 ${wavesGlsl()}
 ${sdfAtlasGlsl}
@@ -162,6 +163,10 @@ const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
 uniform vec4 uCardRect; // rainbow card: cx, cz, hx, hz
 uniform float uCardY;
 uniform float uCardOn;
+uniform vec3 uWhaleC;
+uniform float uWhaleOn;
+// Must match Scene.svelte's water shader: the test whale's semi-axes.
+#define WHALE_AX vec3(6.0, 1.6, 2.2)
 // World y of the seabed (-1e5 when it's off): occlusion on the
 // refracted leg stops HERE, not at the reference plane. The map is
 // evaluated at the plane's depth, but light that already landed on a
@@ -230,6 +235,22 @@ float sphereRayVis(vec3 P, vec3 rd, float tMax) {
 	if (b <= 0.0) return 1.0;
 	float d = length(uSphereCenter - P - rd * min(b, tMax)) - uSphereRadius;
 	return smoothstep(0.0, 0.35, d);
+}
+
+// The whale: an ellipsoid, tested as a sphere in scaled space (t stays
+// a world-metres parameter because only the OFFSETS are scaled).
+// Ahead-only like the sphere.
+float whaleRayVis(vec3 P, vec3 rd, float tMax) {
+	if (uWhaleOn < 0.5) return 1.0;
+	vec3 o = (P - uWhaleC) / WHALE_AX;
+	vec3 d = rd / WHALE_AX;
+	float b = -dot(o, d) / dot(d, d);
+	if (b <= 0.0) return 1.0;
+	vec3 pc = o + d * min(b, tMax);
+	// Scaled-space clearance, converted back to ~metres by the smallest
+	// semi-axis (the conservative direction).
+	float dist = (length(pc) - 1.0) * 1.6;
+	return smoothstep(0.0, 0.35, dist);
 }
 
 // The rainbow card: a thin horizontal rect on the refracted leg.
@@ -315,15 +336,23 @@ void main() {
 	// legs (it can be dialed from seabed to airborne), min-combined so
 	// a breaching sphere doesn't double-darken where the legs overlap.
 	vec3 inc = -normalize(uSunDir);
-	float vFloat = boatShadowVis(gEntry, inc);
-	for (int i = 0; i < 3; i++) vFloat *= buoyShadowVis(uBuoyInv[i], gEntry, inc);
+	float hullV = boatShadowVis(gEntry, inc);
+	float buoyV = 1.0;
+	for (int i = 0; i < 3; i++) buoyV *= buoyShadowVis(uBuoyInv[i], gEntry, inc);
 	// The refracted leg is truncated at the seabed (see uSeabedY).
 	float tOcc = min(gLandT, (gEntry.y - uSeabedY) / max(-gRefr.y, 0.05));
-	float vAll = vFloat
-		* min(sphereRayVis(gEntry, -inc, 1e5), sphereRayVis(gEntry, gRefr, tOcc))
-		* cardShadowVis(gEntry, gRefr, tOcc);
-	vVisAll = vAll;
-	vVisFloat = vFloat;
+	float deepV = min(sphereRayVis(gEntry, -inc, 1e5), sphereRayVis(gEntry, gRefr, tOcc))
+		* cardShadowVis(gEntry, gRefr, tOcc)
+		* whaleRayVis(gEntry, gRefr, tOcc);
+	// Channel roles: G (everything) is the seabed's; B (floaters) is the
+	// generic object channel; A (buoys only) is the hull's. Underwater
+	// casters are DELIBERATELY absent from B and A — object receivers
+	// get them from the analytic leg (uwObjectShadow, Scene), which is
+	// depth-correct per receiver where the map cannot be, and putting
+	// them here too would double-shadow.
+	vVisAll = hullV * buoyV * deepV;
+	vVisFloat = hullV * buoyV;
+	vVisNoHull = buoyV;
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
@@ -353,14 +382,14 @@ uniform sampler2D uSrc;
 uniform vec2 uStep; // half-sigma tap spacing in uv, along the blur axis
 varying vec2 vUv;
 void main() {
-	vec3 acc = texture2D(uSrc, vUv).rgb * 0.1997;
-	acc += (texture2D(uSrc, vUv + uStep).rgb + texture2D(uSrc, vUv - uStep).rgb) * 0.1762;
-	acc += (texture2D(uSrc, vUv + 2.0 * uStep).rgb + texture2D(uSrc, vUv - 2.0 * uStep).rgb) * 0.1211;
-	acc += (texture2D(uSrc, vUv + 3.0 * uStep).rgb + texture2D(uSrc, vUv - 3.0 * uStep).rgb) * 0.0648;
-	acc += (texture2D(uSrc, vUv + 4.0 * uStep).rgb + texture2D(uSrc, vUv - 4.0 * uStep).rgb) * 0.0270;
-	acc += (texture2D(uSrc, vUv + 5.0 * uStep).rgb + texture2D(uSrc, vUv - 5.0 * uStep).rgb) * 0.0088;
-	acc += (texture2D(uSrc, vUv + 6.0 * uStep).rgb + texture2D(uSrc, vUv - 6.0 * uStep).rgb) * 0.0022;
-	gl_FragColor = vec4(acc, 1.0);
+	vec4 acc = texture2D(uSrc, vUv) * 0.1997;
+	acc += (texture2D(uSrc, vUv + uStep) + texture2D(uSrc, vUv - uStep)) * 0.1762;
+	acc += (texture2D(uSrc, vUv + 2.0 * uStep) + texture2D(uSrc, vUv - 2.0 * uStep)) * 0.1211;
+	acc += (texture2D(uSrc, vUv + 3.0 * uStep) + texture2D(uSrc, vUv - 3.0 * uStep)) * 0.0648;
+	acc += (texture2D(uSrc, vUv + 4.0 * uStep) + texture2D(uSrc, vUv - 4.0 * uStep)) * 0.0270;
+	acc += (texture2D(uSrc, vUv + 5.0 * uStep) + texture2D(uSrc, vUv - 5.0 * uStep)) * 0.0088;
+	acc += (texture2D(uSrc, vUv + 6.0 * uStep) + texture2D(uSrc, vUv - 6.0 * uStep)) * 0.0022;
+	gl_FragColor = acc;
 }`
 
 const splatFragment = `
@@ -369,6 +398,7 @@ varying vec2 vOld;
 varying vec2 vNew;
 varying float vVisAll;
 varying float vVisFloat;
+varying float vVisNoHull;
 
 void main() {
 	// Differential-area brightness from screen-space derivatives —
@@ -382,10 +412,15 @@ void main() {
 	float oldArea = abs(ox.x * oy.y - ox.y * oy.x);
 	float newArea = abs(nx.x * ny.y - nx.y * ny.x);
 	float b = clamp(oldArea / max(newArea, 1e-7), 0.0, uMaxBright);
-	// R clean, G shadowed by everything, B shadowed by floaters only —
-	// receivers pick their channel; one normalisation (R's mean) serves
-	// all three, so shadow is honestly missing light, never a repaint.
-	gl_FragColor = vec4(b, b * vVisAll, b * vVisFloat, 1.0);
+	// R clean, G shadowed by everything (seabed), B shadowed by the
+	// floaters (generic objects), A shadowed by the buoys alone (the
+	// hull — a floater reading a channel containing itself darkened its
+	// whole wet body; underwater casters reach objects analytically).
+	// One normalisation (R's mean) serves all four, so shadow is
+	// honestly missing light, never a repaint. ALPHA IS DATA from here
+	// on: every downstream pass must carry vec4 with NoBlending, and
+	// the splat clear must zero alpha.
+	gl_FragColor = vec4(b, b * vVisAll, b * vVisFloat, b * vVisNoHull);
 }`
 
 /** Low-discrepancy sequence for the splat jitter — deterministic, so the
@@ -417,25 +452,25 @@ void main() {
 	vec2 huv = vUv + uScroll;
 	float inH =
 		huv.x > 0.0 && huv.x < 1.0 && huv.y > 0.0 && huv.y < 1.0 ? 1.0 : 0.0;
-	vec3 h = texture2D(uHist, huv).rgb;
-	vec3 c = texture2D(uCur, vUv).rgb;
+	vec4 h = texture2D(uHist, huv);
+	vec4 c = texture2D(uCur, vUv);
 	// NEIGHBOURHOOD CLAMP: waves move the pattern through the domain, and
 	// unclamped history dragged bright filaments into decaying trails
 	// ("trailing glitter"). Clamp the history into the current frame's
 	// local brightness range (plus a pad for the jitter's own variance):
 	// stale-bright history over now-dark water is rejected within a
 	// frame, while history inside the local range keeps integrating the
-	// lattice noise. Per channel — the shadowed fields integrate (and
-	// their edges wobble) exactly like the clean one.
-	vec3 cl = texture2D(uCur, vUv - vec2(uTexelT, 0.0)).rgb;
-	vec3 cr = texture2D(uCur, vUv + vec2(uTexelT, 0.0)).rgb;
-	vec3 cd = texture2D(uCur, vUv - vec2(0.0, uTexelT)).rgb;
-	vec3 cu = texture2D(uCur, vUv + vec2(0.0, uTexelT)).rgb;
-	vec3 mn = min(c, min(min(cl, cr), min(cd, cu)));
-	vec3 mx = max(c, max(max(cl, cr), max(cd, cu)));
-	vec3 pad = 0.35 * (mx - mn) + 0.05;
-	vec3 hc = clamp(h, mn - pad, mx + pad);
-	gl_FragColor = vec4(mix(c, hc, uAlpha * inH), 1.0);
+	// lattice noise. Per channel — the shadowed fields (alpha included)
+	// integrate, and their edges wobble, exactly like the clean one.
+	vec4 cl = texture2D(uCur, vUv - vec2(uTexelT, 0.0));
+	vec4 cr = texture2D(uCur, vUv + vec2(uTexelT, 0.0));
+	vec4 cd = texture2D(uCur, vUv - vec2(0.0, uTexelT));
+	vec4 cu = texture2D(uCur, vUv + vec2(0.0, uTexelT));
+	vec4 mn = min(c, min(min(cl, cr), min(cd, cu)));
+	vec4 mx = max(c, max(max(cl, cr), max(cd, cu)));
+	vec4 pad = 0.35 * (mx - mn) + 0.05;
+	vec4 hc = clamp(h, mn - pad, mx + pad);
+	gl_FragColor = mix(c, hc, uAlpha * inH);
 }`
 
 // ---- Edge-directed antialias ----
@@ -452,13 +487,13 @@ uniform float uTexelAA;
 uniform float uAA;
 varying vec2 vUv;
 void main() {
-	vec3 c = texture2D(uSrc, vUv).rgb;
-	vec3 l = texture2D(uSrc, vUv - vec2(uTexelAA, 0.0)).rgb;
-	vec3 r = texture2D(uSrc, vUv + vec2(uTexelAA, 0.0)).rgb;
-	vec3 d = texture2D(uSrc, vUv - vec2(0.0, uTexelAA)).rgb;
-	vec3 u = texture2D(uSrc, vUv + vec2(0.0, uTexelAA)).rgb;
+	vec4 c = texture2D(uSrc, vUv);
+	vec4 l = texture2D(uSrc, vUv - vec2(uTexelAA, 0.0));
+	vec4 r = texture2D(uSrc, vUv + vec2(uTexelAA, 0.0));
+	vec4 d = texture2D(uSrc, vUv - vec2(0.0, uTexelAA));
+	vec4 u = texture2D(uSrc, vUv + vec2(0.0, uTexelAA));
 	// Edge detection on the CLEAN channel; the blend applies to all
-	// three (the shadowed fields share the clean field's filament
+	// four (the shadowed fields share the clean field's filament
 	// structure, so its isolines are theirs).
 	vec2 g = vec2(r.r - l.r, u.r - d.r);
 	float gm = length(g);
@@ -467,13 +502,13 @@ void main() {
 	float level = 0.25 * (l.r + r.r + d.r + u.r) + 0.5;
 	float w = uAA * smoothstep(0.0005, 0.025, gm / level);
 	if (w < 0.001) {
-		gl_FragColor = vec4(c, 1.0);
+		gl_FragColor = c;
 		return;
 	}
 	vec2 t = vec2(-g.y, g.x) * (uTexelAA / max(gm, 1e-6));
-	vec3 a = texture2D(uSrc, vUv + t).rgb;
-	vec3 b = texture2D(uSrc, vUv - t).rgb;
-	gl_FragColor = vec4(mix(c, (c + a + b) / 3.0, w), 1.0);
+	vec4 a = texture2D(uSrc, vUv + t);
+	vec4 b = texture2D(uSrc, vUv - t);
+	gl_FragColor = mix(c, (c + a + b) / 3.0, w);
 }`
 
 export class CausticMap {
@@ -589,6 +624,8 @@ export class CausticMap {
         uCardRect: { value: new THREE.Vector4(14, 2, 5, 2.5) },
         uCardY: { value: -6 },
         uCardOn: { value: 0 },
+        uWhaleC: { value: new THREE.Vector3(0, -1e5, 0) },
+        uWhaleOn: { value: 0 },
         uSeabedY: { value: -1e5 },
         uTime: { value: 0 },
         uAmp: { value: 1 },
@@ -598,7 +635,18 @@ export class CausticMap {
       },
       vertexShader: splatVertex,
       fragmentShader: splatFragment,
-      blending: THREE.AdditiveBlending,
+      // EXPLICIT One/One addition. THREE.AdditiveBlending is
+      // src*SrcAlpha + dst — invisible while alpha was a constant 1.0,
+      // but the moment alpha became the no-hull shadow field it scaled
+      // every splat by it: all four channels went dark exactly where
+      // the sphere blocks, which is where the sphere's and card's own
+      // lookups land — they lost their caustics entirely.
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.OneFactor,
+      blendSrcAlpha: THREE.OneFactor,
+      blendDstAlpha: THREE.OneFactor,
       depthTest: false,
       depthWrite: false,
       // Folded triangles invert their winding; both faces must splat.
@@ -655,6 +703,9 @@ export class CausticMap {
       },
       vertexShader: blurVertex,
       fragmentShader: accumFragment,
+      // Alpha carries the no-hull shadow field: NormalBlending would
+      // read it as coverage and composite garbage.
+      blending: THREE.NoBlending,
       depthTest: false,
       depthWrite: false,
     })
@@ -691,6 +742,8 @@ export class CausticMap {
       },
       vertexShader: blurVertex,
       fragmentShader: edgeAAFragment,
+      // Alpha is data (see accumMaterial).
+      blending: THREE.NoBlending,
       depthTest: false,
       depthWrite: false,
     })
@@ -859,6 +912,7 @@ void main() {
     this.material.uniforms.uExtent.value = this.extent
     this.material.uniforms.uMaxBright.value = CAUSTICS.maxBright
     this.material.uniforms.uCardOn.value = UNDERWATER.rainbowCard ? 1 : 0
+    this.material.uniforms.uWhaleOn.value = UNDERWATER.whale ? 1 : 0
     this.material.uniforms.uSeabedY.value = UNDERWATER.seabed
       ? -UNDERWATER.seabedDepthM
       : -1e5
@@ -976,7 +1030,9 @@ void main() {
     const previousClearAlpha = renderer.getClearAlpha()
 
     renderer.setRenderTarget(this.target)
-    renderer.setClearColor(this.clearColor, 1)
+    // Alpha 0: the splat ADDS b x visNoHull into alpha, so a cleared 1
+    // would bias the no-hull shadow field a full unit bright.
+    renderer.setClearColor(this.clearColor, 0)
     renderer.clear(true, false, false)
     renderer.autoClear = false
     renderer.render(this.splatScene, this.splatCamera)
@@ -1232,6 +1288,7 @@ void main() {
     boatSdfSize: THREE.Vector3,
     buoyInv: THREE.Matrix4[],
     cardRect: THREE.Vector4,
+    whaleC: THREE.Vector3,
   ) {
     const u = this.material.uniforms
     u.uBoatInv.value = boatInv
@@ -1240,6 +1297,7 @@ void main() {
     u.uBoatSdfSize.value = boatSdfSize
     u.uBuoyInv.value = buoyInv
     u.uCardRect.value = cardRect
+    u.uWhaleC.value = whaleC
   }
   setViewRect(hw: number, hn: number, hf: number) {
     // Guard: the rotated rect must FIT the domain square, or the trusted
