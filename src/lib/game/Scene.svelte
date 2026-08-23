@@ -879,18 +879,17 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 			ddx *= 2.4 / dpm;
 			ddy *= 2.4 / dpm;
 		}
-		// ADAPTIVE tap count: the footprint's size in MAP TEXELS decides
-		// how many samples the integral needs. One tap where the pixel
-		// spans less than a texel (most flat-on water — the bulk of the
-		// screen), ramping to 3x3 (the by-eye convergence point; more
-		// bought nothing) where refraction magnifies the footprint.
-		float ftex = dpm * (${CAUSTIC_RESOLUTION}.0 / uCausticExtent);
-		int n = int(clamp(ftex * 0.5 + 0.5, 1.0, 3.0));
+		// STATIC 3x3 taps (the by-eye convergence point; more bought
+		// nothing). This was an adaptive count — one tap where the pixel
+		// spans less than a map texel, 3x3 where refraction magnifies the
+		// footprint — but once the taps read 2-byte texels the taps it
+		// saved cost less than the divergent loop it took to save them:
+		// the fixed loop measured faster AND gives maximum quality
+		// everywhere.
+		const int n = 3;
 		float acc0 = 0.0;
 		for (int i = 0; i < 3; i++) {
-			if (i >= n) break;
 			for (int j = 0; j < 3; j++) {
-				if (j >= n) break;
 				vec3 Pi = P + ((float(i) + 0.5) / float(n) - 0.5) * ddx
 					+ ((float(j) + 0.5) / float(n) - 0.5) * ddy;
 				acc0 += causticTapAt(Pi, refrLight);
