@@ -245,6 +245,7 @@
 		'INSPECT.camYawDeg': { min: -180, max: 180, step: 5 },
 		'INSPECT.camElevDeg': { min: 0, max: 80, step: 1 },
 		'CAUSTICS.ridgeGain': { min: 0, max: 2.5, step: 0.02 },
+		'CAUSTICS.castShadow': { min: 0, max: 1, step: 0.05 },
 		'UNDERWATER.redRangeM': { min: 0.5, max: 40, step: 0.5 },
 		'UNDERWATER.greenRangeM': { min: 2, max: 150, step: 1 },
 		'UNDERWATER.blueRangeM': { min: 5, max: 400, step: 5 },
@@ -351,7 +352,7 @@
 		CAUSTICS: [
 			['splat', ['maxBright', 'sourceBlurM']],
 			['depth', ['formM', 'focalM', 'blurPerM', 'diffuseDepthM']],
-			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain']]
+			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain', 'castShadow']]
 		],
 		UNDERWATER: [
 			['light', ['ambient', 'direct', 'dim', 'glow', 'exposure']],

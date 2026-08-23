@@ -39,6 +39,7 @@
 
 import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
+import { sdfAtlasGlsl } from './sdf'
 import { CAUSTICS } from './tuning'
 import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
@@ -134,10 +135,49 @@ uniform float uTime;
 uniform float uAmp;
 uniform float uMaxBright;
 uniform vec2 uJitter; // per-frame lattice offset, world metres
+uniform mat4 uBoatInv;
+uniform float uShadowK;
 varying vec2 vOld;
 varying vec2 vNew;
+varying float vVis;
 
 ${wavesGlsl()}
+${sdfAtlasGlsl}
+
+// Entry point of the last traced ray, for the shadow test in main().
+vec3 gEntry;
+
+// HULL OCCLUSION along the sun line through the entry point. The hull
+// straddles the waterline, so ONE line covers both blockers: t toward
+// the sun catches the topsides (light stopped before entering), t past
+// P approximates the refracted segment under the draft (the bend over
+// the hull's ~1m vertical span is centimetres — far inside the
+// penumbra). Soft SDF visibility, NOT a binary kill: the old crown
+// shadow aliased into radial spokes precisely because it was binary;
+// a smoothstep over distance, integrated by the jittered temporal
+// accumulation, resolves a clean penumbra instead. Almost every vertex
+// exits at the slab test — only rays whose line clips the hull's box
+// pay for the march.
+float boatShadowVis(vec3 P, vec3 incident) {
+	vec3 o = (uBoatInv * vec4(P, 1.0)).xyz;
+	vec3 d = normalize((uBoatInv * vec4(incident, 0.0)).xyz);
+	vec3 invD = 1.0 / d;
+	vec3 t0v = (uBoatSdfMin - o) * invD;
+	vec3 t1v = (uBoatSdfMin + uBoatSdfSize - o) * invD;
+	vec3 tmin3 = min(t0v, t1v);
+	vec3 tmax3 = max(t0v, t1v);
+	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
+	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
+	// Line test, deliberately unclamped: negative t is the above-water
+	// leg toward the sun and must NOT be rejected.
+	if (tN > tF) return 1.0;
+	float minD = 1e9;
+	for (int i = 0; i < 12; i++) {
+		float t = mix(tN, tF, (float(i) + 0.5) / 12.0);
+		minD = min(minD, boatSdfAt(o + d * t));
+	}
+	return mix(1.0, smoothstep(0.0, 0.12, minD), uShadowK);
+}
 
 attribute vec2 aTile; // active tile origin, in tile units
 
@@ -185,12 +225,12 @@ vec3 causticLand(vec2 sxz) {
 	vec3 refr = refract(incident, normal, ${IOR});
 	if (refr.y > -0.01) refr = vec3(0.0, -1.0, 0.0); // grazing guard
 
+	gEntry = P;
 	// Beam-space: EVERY ray projects to the reference plane; no receiver
-	// intersection here. (No crown shadow either: it was the only cast
-	// shadow in the whole game — the sun has no shadow maps and nothing
-	// above water shades anything — and a binary ray-kill aliased the
-	// waterline circle into radial spokes. If cast shadows ever arrive,
-	// they arrive everywhere at once.)
+	// intersection here. Occlusion is a BRIGHTNESS factor, not a ray
+	// kill (see boatShadowVis) — the shadowed ray still projects, it
+	// just delivers no light, which is what keeps the estimator's
+	// geometry honest under the temporal integration.
 	float t = max((P.y + uPlaneDepth) / max(-refr.y, 0.05), 0.0);
 	return P + refr * t;
 }
@@ -206,6 +246,7 @@ void main() {
 	vec3 land = causticLand(sxz);
 	vOld = sxz;
 	vNew = land.xz;
+	vVis = uShadowK > 0.0 ? boatShadowVis(gEntry, -normalize(uSunDir)) : 1.0;
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
@@ -249,6 +290,7 @@ const splatFragment = `
 uniform float uMaxBright;
 varying vec2 vOld;
 varying vec2 vNew;
+varying float vVis;
 
 void main() {
 	// Differential-area brightness from screen-space derivatives —
@@ -261,7 +303,7 @@ void main() {
 	vec2 ny = dFdy(vNew);
 	float oldArea = abs(ox.x * oy.y - ox.y * oy.x);
 	float newArea = abs(nx.x * ny.y - nx.y * ny.x);
-	gl_FragColor = vec4(clamp(oldArea / max(newArea, 1e-7), 0.0, uMaxBright), 0.0, 0.0, 1.0);
+	gl_FragColor = vec4(clamp(oldArea / max(newArea, 1e-7), 0.0, uMaxBright) * vVis, 0.0, 0.0, 1.0);
 }`
 
 /** Low-discrepancy sequence for the splat jitter — deterministic, so the
@@ -447,6 +489,13 @@ export class CausticMap {
         uMaxBright: { value: 30 },
         uJitter: { value: new THREE.Vector2(0, 0) },
         uPlaneDepth: { value: CAUSTIC_PLANE_DEPTH },
+        // Hull occluder — wired by setBoatOccluder once the SDF bakes;
+        // uShadowK stays 0 (shadows off) until the texture exists.
+        uBoatInv: { value: new THREE.Matrix4() },
+        uBoatSdf: { value: null as THREE.Texture | null },
+        uBoatSdfMin: { value: new THREE.Vector3() },
+        uBoatSdfSize: { value: new THREE.Vector3(1, 1, 1) },
+        uShadowK: { value: 0 },
         uTime: { value: 0 },
         uAmp: { value: 1 },
         // Shared with every other wave material; see waveUniformA.
@@ -711,6 +760,9 @@ void main() {
     const cc = this.material.uniforms.uCenter.value as THREE.Vector2
     this.material.uniforms.uExtent.value = this.extent
     this.material.uniforms.uMaxBright.value = CAUSTICS.maxBright
+    this.material.uniforms.uShadowK.value = this.material.uniforms.uBoatSdf.value
+      ? Math.min(Math.max(CAUSTICS.castShadow, 0), 1)
+      : 0
     // Ray lattice phase = WORLD ANCHOR + Halton jitter. The lattice used
     // to ride the domain, whose centre snaps to map texels as the boat
     // moves — every snap translated the rays by a fraction of the ray
@@ -1066,6 +1118,24 @@ void main() {
     // history's texel<->world mapping — a full temporal reseed, showing
     // one raw-jitter frame: the intermittent flicker while driving.
     if (want > this.extent || want < this.extent - 6) this.extent = want
+  }
+  /**
+   * Wire the hull occluder for cast shadows. Matrix and vectors are held
+   * BY REFERENCE (the water material's own objects), so the sim and the
+   * shadow can never see different boat poses — the same sharing rule as
+   * the buoys and the sphere everywhere else.
+   */
+  setBoatOccluder(
+    inv: THREE.Matrix4,
+    tex: THREE.Texture,
+    min: THREE.Vector3,
+    size: THREE.Vector3,
+  ) {
+    const u = this.material.uniforms
+    u.uBoatInv.value = inv
+    u.uBoatSdf.value = tex
+    u.uBoatSdfMin.value = min
+    u.uBoatSdfSize.value = size
   }
   setViewRect(hw: number, hn: number, hf: number) {
     // Guard: the rotated rect must FIT the domain square, or the trusted

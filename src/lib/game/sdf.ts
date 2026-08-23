@@ -223,3 +223,30 @@ export function bakeSdfAtlas(
   }
   return { data, width, height, min, size }
 }
+
+/**
+ * The GLSL reader for the boat's baked atlas — uniforms + sampler in one
+ * snippet so every shader that traces the hull (the water's refraction,
+ * the caustics' shadow rays) includes the SAME text and cannot drift.
+ * The literal constants encode the bake layout (48 slices in 8x6 tiles,
+ * half-texel insets for a 96x40 slice) and must change with BOAT_SDF.
+ */
+export const sdfAtlasGlsl = `
+uniform sampler2D uBoatSdf;
+uniform vec3 uBoatSdfMin;
+uniform vec3 uBoatSdfSize;
+
+float boatSdfAt(vec3 q) {
+	vec3 u = clamp((q - uBoatSdfMin) / uBoatSdfSize, 0.0, 1.0);
+	// slice index + mix across the 48-deep stack of 8x6 tiles
+	float z = u.z * 47.0;
+	float z0 = floor(min(z, 46.0));
+	float fz = z - z0;
+	vec2 sxy = u.xy * vec2(0.989583, 0.975000) + vec2(0.005208, 0.012500);
+	vec2 tile0 = vec2(mod(z0, 8.0), floor(z0 / 8.0));
+	vec2 tile1 = vec2(mod(z0 + 1.0, 8.0), floor((z0 + 1.0) / 8.0));
+	float d0 = texture2D(uBoatSdf, (tile0 + sxy) * vec2(0.125000, 0.166667)).r;
+	float d1 = texture2D(uBoatSdf, (tile1 + sxy) * vec2(0.125000, 0.166667)).r;
+	return mix(d0, d1, fz);
+}
+`

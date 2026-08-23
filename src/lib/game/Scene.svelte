@@ -3,7 +3,7 @@
 	import { T, useStage, useTask, useThrelte } from '@threlte/core';
 	import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 	import { onDestroy } from 'svelte';
-	import { bakeSdfAtlas } from './sdf';
+	import { bakeSdfAtlas, sdfAtlasGlsl } from './sdf';
 	import {
 		activeField,
 		objectWaveGlsl,
@@ -1395,23 +1395,7 @@ uniform mat4 uProj;
 // point and normal, which is what keeps a body recognisable underwater.
 // The image pass still supplies colour. Fish and the Blender hull inherit
 // all of this by being baked the same way.
-uniform sampler2D uBoatSdf;
-uniform vec3 uBoatSdfMin;
-uniform vec3 uBoatSdfSize;
-
-float boatSdfAt(vec3 q) {
-	vec3 u = clamp((q - uBoatSdfMin) / uBoatSdfSize, 0.0, 1.0);
-	// slice index + mix across the 48-deep stack of 8x6 tiles
-	float z = u.z * 47.0;
-	float z0 = floor(min(z, 46.0));
-	float fz = z - z0;
-	vec2 sxy = u.xy * vec2(0.989583, 0.975000) + vec2(0.005208, 0.012500);
-	vec2 tile0 = vec2(mod(z0, 8.0), floor(z0 / 8.0));
-	vec2 tile1 = vec2(mod(z0 + 1.0, 8.0), floor((z0 + 1.0) / 8.0));
-	float d0 = texture2D(uBoatSdf, (tile0 + sxy) * vec2(0.125000, 0.166667)).r;
-	float d1 = texture2D(uBoatSdf, (tile1 + sxy) * vec2(0.125000, 0.166667)).r;
-	return mix(d0, d1, fz);
-}
+${sdfAtlasGlsl}
 
 // BOAT COLLAR: the hull's waterline ring, from the same SDF the
 // refraction reads (defined here, below the SDF, because GLSL wants
@@ -3726,6 +3710,14 @@ void main() {
 		waterUniforms.uBoatSdf.value = tex;
 		waterUniforms.uBoatSdfMin.value.copy(bake.min);
 		waterUniforms.uBoatSdfSize.value.copy(bake.size);
+		// Caustic cast shadows trace the same bake through the water
+		// material's own matrix/vectors (by reference — one boat pose).
+		causticMap.setBoatOccluder(
+			waterUniforms.uBoatInv.value,
+			tex,
+			waterUniforms.uBoatSdfMin.value,
+			waterUniforms.uBoatSdfSize.value
+		);
 	}
 	// Everything the boat-image pass renders lives on layer 3.
 	boatMesh.traverse((o) => o.layers.enable(3));

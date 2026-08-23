@@ -2112,6 +2112,14 @@ export const CAUSTICS = {
    * redistribute light instead of minting or stealing it.
    */
   ridgeGain: 1.0,
+  /**
+   * CAST SHADOW strength, 0-1: the hull occludes the caustic rays, so
+   * its shadow on the seabed is the ABSENCE of caustic light — refracted
+   * with the same bend as the light around it and softened by the same
+   * temporal accumulation (soft SDF visibility, not the binary ray-kill
+   * that gave the old crown shadow its radial spokes). 0 = off.
+   */
+  castShadow: 1,
 }
 
 /**
