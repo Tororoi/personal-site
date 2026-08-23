@@ -40,7 +40,7 @@
 import * as THREE from 'three'
 import { RIPPLE_EXTENT } from './ripples'
 import { sdfAtlasGlsl } from './sdf'
-import { CAUSTICS } from './tuning'
+import { CAUSTICS, UNDERWATER } from './tuning'
 import { waves, wavesGlsl, waveUniformA, waveUniformB } from './waves'
 
 /**
@@ -135,48 +135,103 @@ uniform float uTime;
 uniform float uAmp;
 uniform float uMaxBright;
 uniform vec2 uJitter; // per-frame lattice offset, world metres
-uniform mat4 uBoatInv;
-uniform float uShadowK;
 varying vec2 vOld;
 varying vec2 vNew;
-varying float vVis;
+varying float vVisAll;
+varying float vVisFloat;
 
 ${wavesGlsl()}
 ${sdfAtlasGlsl}
 
-// Entry point of the last traced ray, for the shadow test in main().
-vec3 gEntry;
+// ---- Cast-shadow visibility, IN THE MAP (the reference's system) ----
+// The pool reference bakes its sphere shadow into a second channel of
+// the caustic texture, computed against the same refracted rays as the
+// pattern — receivers then CHOOSE channels (walls read pattern x
+// shadow, the sphere reads pattern only, which is how it never shades
+// itself). Same here, one channel further: vVisAll carries every
+// occluder (the seabed's channel), vVisFloat only the surface floaters
+// — hull and buoys — so submerged bodies read a channel their own
+// silhouettes never touched. Because the splat is ADDITIVE, visibility
+// cannot be written directly; each ray adds brightness x vis, making
+// the shadowed channels true shadowed LIGHT fields under the same
+// normalisation as the clean one.
+uniform mat4 uBoatInv;
+uniform mat4 uBuoyInv[3];
+// Must match Scene.svelte's water shader.
+const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
+uniform vec4 uCardRect; // rainbow card: cx, cz, hx, hz
+uniform float uCardY;
+uniform float uCardOn;
 
-// HULL OCCLUSION along the sun line through the entry point. The hull
-// straddles the waterline, so ONE line covers both blockers: t toward
-// the sun catches the topsides (light stopped before entering), t past
-// P approximates the refracted segment under the draft (the bend over
-// the hull's ~1m vertical span is centimetres — far inside the
-// penumbra). Soft SDF visibility, NOT a binary kill: the old crown
-// shadow aliased into radial spokes precisely because it was binary;
-// a smoothstep over distance, integrated by the jittered temporal
-// accumulation, resolves a clean penumbra instead. Almost every vertex
-// exits at the slab test — only rays whose line clips the hull's box
-// pay for the march.
-float boatShadowVis(vec3 P, vec3 incident) {
+// Entry point, refracted direction and travel of the last traced ray.
+vec3 gEntry;
+vec3 gRefr;
+float gLandT;
+
+// Hull on the sun line through the entry point: the hull straddles the
+// waterline, so one line covers topsides and draft (the bend over its
+// ~1m span is centimetres). Soft SDF visibility, never a binary kill —
+// the old crown shadow's radial spokes came from a binary one; here the
+// jittered temporal accumulation integrates the soft edge further.
+float boatShadowVis(vec3 P, vec3 dirW) {
 	vec3 o = (uBoatInv * vec4(P, 1.0)).xyz;
-	vec3 d = normalize((uBoatInv * vec4(incident, 0.0)).xyz);
+	vec3 d = normalize((uBoatInv * vec4(dirW, 0.0)).xyz);
 	vec3 invD = 1.0 / d;
-	vec3 t0v = (uBoatSdfMin - o) * invD;
-	vec3 t1v = (uBoatSdfMin + uBoatSdfSize - o) * invD;
-	vec3 tmin3 = min(t0v, t1v);
-	vec3 tmax3 = max(t0v, t1v);
+	vec3 s0 = (uBoatSdfMin - o) * invD;
+	vec3 s1 = (uBoatSdfMin + uBoatSdfSize - o) * invD;
+	vec3 tmin3 = min(s0, s1);
+	vec3 tmax3 = max(s0, s1);
 	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
 	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
-	// Line test, deliberately unclamped: negative t is the above-water
-	// leg toward the sun and must NOT be rejected.
+	// Line test, unclamped: negative t is the above-water leg toward
+	// the sun and must not be rejected.
 	if (tN > tF) return 1.0;
 	float minD = 1e9;
 	for (int i = 0; i < 12; i++) {
 		float t = mix(tN, tF, (float(i) + 0.5) / 12.0);
 		minD = min(minD, boatSdfAt(o + d * t));
 	}
-	return mix(1.0, smoothstep(0.0, 0.12, minD), uShadowK);
+	return smoothstep(0.0, 0.12, minD);
+}
+
+// A buoy on the sun line: analytic box, arithmetic only.
+float buoyShadowVis(mat4 inv, vec3 P, vec3 dirW) {
+	vec3 o = (inv * vec4(P, 1.0)).xyz;
+	vec3 d = normalize((inv * vec4(dirW, 0.0)).xyz);
+	vec3 invD = 1.0 / d;
+	vec3 s0 = (-BUOY_HALF - o) * invD;
+	vec3 s1 = (BUOY_HALF - o) * invD;
+	vec3 tmin3 = min(s0, s1);
+	vec3 tmax3 = max(s0, s1);
+	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
+	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
+	if (tN > tF) return 1.0;
+	float minD = 1e9;
+	for (int i = 0; i < 8; i++) {
+		vec3 p = o + d * mix(tN, tF, (float(i) + 0.5) / 8.0);
+		vec3 q = abs(p) - BUOY_HALF;
+		minD = min(minD, length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+	}
+	return smoothstep(0.0, 0.06, minD);
+}
+
+// The sphere against one ray leg, AHEAD-ONLY (a sphere behind the ray
+// origin must not shadow — nearest-distance semantics ringed the
+// breaching sphere's waterline on its sun side once before).
+float sphereRayVis(vec3 P, vec3 rd, float tMax) {
+	float b = dot(uSphereCenter - P, rd);
+	if (b <= 0.0) return 1.0;
+	float d = length(uSphereCenter - P - rd * min(b, tMax)) - uSphereRadius;
+	return smoothstep(0.0, 0.35, d);
+}
+
+// The rainbow card: a thin horizontal rect on the refracted leg.
+float cardShadowVis(vec3 P, vec3 rd, float tMax) {
+	if (uCardOn < 0.5 || rd.y > -0.001) return 1.0;
+	float th = (P.y - uCardY) / -rd.y;
+	if (th < 0.0 || th > tMax) return 1.0;
+	vec2 q = abs(P.xz + rd.xz * th - uCardRect.xy) - uCardRect.zw;
+	return smoothstep(0.0, 0.2, max(q.x, q.y));
 }
 
 attribute vec2 aTile; // active tile origin, in tile units
@@ -227,11 +282,13 @@ vec3 causticLand(vec2 sxz) {
 
 	gEntry = P;
 	// Beam-space: EVERY ray projects to the reference plane; no receiver
-	// intersection here. Occlusion is a BRIGHTNESS factor, not a ray
-	// kill (see boatShadowVis) — the shadowed ray still projects, it
-	// just delivers no light, which is what keeps the estimator's
-	// geometry honest under the temporal integration.
+	// intersection here. Occlusion never touches R — it lands in G/B as
+	// brightness x visibility (see the channel note above), so a body
+	// sampling the clean channel still reads its own light while the
+	// channels below it carry its shadow.
 	float t = max((P.y + uPlaneDepth) / max(-refr.y, 0.05), 0.0);
+	gRefr = refr;
+	gLandT = t;
 	return P + refr * t;
 }
 
@@ -246,7 +303,18 @@ void main() {
 	vec3 land = causticLand(sxz);
 	vOld = sxz;
 	vNew = land.xz;
-	vVis = uShadowK > 0.0 ? boatShadowVis(gEntry, -normalize(uSunDir)) : 1.0;
+	// Surface floaters block the SUN line through the entry point;
+	// submerged bodies block the REFRACTED leg. The sphere tests both
+	// legs (it can be dialed from seabed to airborne), min-combined so
+	// a breaching sphere doesn't double-darken where the legs overlap.
+	vec3 inc = -normalize(uSunDir);
+	float vFloat = boatShadowVis(gEntry, inc);
+	for (int i = 0; i < 3; i++) vFloat *= buoyShadowVis(uBuoyInv[i], gEntry, inc);
+	float vAll = vFloat
+		* min(sphereRayVis(gEntry, -inc, 1e5), sphereRayVis(gEntry, gRefr, gLandT))
+		* cardShadowVis(gEntry, gRefr, gLandT);
+	vVisAll = vAll;
+	vVisFloat = vFloat;
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
 	gl_Position = vec4(ndc, 0.0, 1.0);
 }`
@@ -276,21 +344,22 @@ uniform sampler2D uSrc;
 uniform vec2 uStep; // half-sigma tap spacing in uv, along the blur axis
 varying vec2 vUv;
 void main() {
-	float acc = texture2D(uSrc, vUv).r * 0.1997;
-	acc += (texture2D(uSrc, vUv + uStep).r + texture2D(uSrc, vUv - uStep).r) * 0.1762;
-	acc += (texture2D(uSrc, vUv + 2.0 * uStep).r + texture2D(uSrc, vUv - 2.0 * uStep).r) * 0.1211;
-	acc += (texture2D(uSrc, vUv + 3.0 * uStep).r + texture2D(uSrc, vUv - 3.0 * uStep).r) * 0.0648;
-	acc += (texture2D(uSrc, vUv + 4.0 * uStep).r + texture2D(uSrc, vUv - 4.0 * uStep).r) * 0.0270;
-	acc += (texture2D(uSrc, vUv + 5.0 * uStep).r + texture2D(uSrc, vUv - 5.0 * uStep).r) * 0.0088;
-	acc += (texture2D(uSrc, vUv + 6.0 * uStep).r + texture2D(uSrc, vUv - 6.0 * uStep).r) * 0.0022;
-	gl_FragColor = vec4(acc, 0.0, 0.0, 1.0);
+	vec3 acc = texture2D(uSrc, vUv).rgb * 0.1997;
+	acc += (texture2D(uSrc, vUv + uStep).rgb + texture2D(uSrc, vUv - uStep).rgb) * 0.1762;
+	acc += (texture2D(uSrc, vUv + 2.0 * uStep).rgb + texture2D(uSrc, vUv - 2.0 * uStep).rgb) * 0.1211;
+	acc += (texture2D(uSrc, vUv + 3.0 * uStep).rgb + texture2D(uSrc, vUv - 3.0 * uStep).rgb) * 0.0648;
+	acc += (texture2D(uSrc, vUv + 4.0 * uStep).rgb + texture2D(uSrc, vUv - 4.0 * uStep).rgb) * 0.0270;
+	acc += (texture2D(uSrc, vUv + 5.0 * uStep).rgb + texture2D(uSrc, vUv - 5.0 * uStep).rgb) * 0.0088;
+	acc += (texture2D(uSrc, vUv + 6.0 * uStep).rgb + texture2D(uSrc, vUv - 6.0 * uStep).rgb) * 0.0022;
+	gl_FragColor = vec4(acc, 1.0);
 }`
 
 const splatFragment = `
 uniform float uMaxBright;
 varying vec2 vOld;
 varying vec2 vNew;
-varying float vVis;
+varying float vVisAll;
+varying float vVisFloat;
 
 void main() {
 	// Differential-area brightness from screen-space derivatives —
@@ -303,7 +372,11 @@ void main() {
 	vec2 ny = dFdy(vNew);
 	float oldArea = abs(ox.x * oy.y - ox.y * oy.x);
 	float newArea = abs(nx.x * ny.y - nx.y * ny.x);
-	gl_FragColor = vec4(clamp(oldArea / max(newArea, 1e-7), 0.0, uMaxBright) * vVis, 0.0, 0.0, 1.0);
+	float b = clamp(oldArea / max(newArea, 1e-7), 0.0, uMaxBright);
+	// R clean, G shadowed by everything, B shadowed by floaters only —
+	// receivers pick their channel; one normalisation (R's mean) serves
+	// all three, so shadow is honestly missing light, never a repaint.
+	gl_FragColor = vec4(b, b * vVisAll, b * vVisFloat, 1.0);
 }`
 
 /** Low-discrepancy sequence for the splat jitter — deterministic, so the
@@ -335,24 +408,25 @@ void main() {
 	vec2 huv = vUv + uScroll;
 	float inH =
 		huv.x > 0.0 && huv.x < 1.0 && huv.y > 0.0 && huv.y < 1.0 ? 1.0 : 0.0;
-	float h = texture2D(uHist, huv).r;
-	float c = texture2D(uCur, vUv).r;
+	vec3 h = texture2D(uHist, huv).rgb;
+	vec3 c = texture2D(uCur, vUv).rgb;
 	// NEIGHBOURHOOD CLAMP: waves move the pattern through the domain, and
 	// unclamped history dragged bright filaments into decaying trails
 	// ("trailing glitter"). Clamp the history into the current frame's
 	// local brightness range (plus a pad for the jitter's own variance):
 	// stale-bright history over now-dark water is rejected within a
 	// frame, while history inside the local range keeps integrating the
-	// lattice noise.
-	float cl = texture2D(uCur, vUv - vec2(uTexelT, 0.0)).r;
-	float cr = texture2D(uCur, vUv + vec2(uTexelT, 0.0)).r;
-	float cd = texture2D(uCur, vUv - vec2(0.0, uTexelT)).r;
-	float cu = texture2D(uCur, vUv + vec2(0.0, uTexelT)).r;
-	float mn = min(c, min(min(cl, cr), min(cd, cu)));
-	float mx = max(c, max(max(cl, cr), max(cd, cu)));
-	float pad = 0.35 * (mx - mn) + 0.05;
-	float hc = clamp(h, mn - pad, mx + pad);
-	gl_FragColor = vec4(mix(c, hc, uAlpha * inH), 0.0, 0.0, 1.0);
+	// lattice noise. Per channel — the shadowed fields integrate (and
+	// their edges wobble) exactly like the clean one.
+	vec3 cl = texture2D(uCur, vUv - vec2(uTexelT, 0.0)).rgb;
+	vec3 cr = texture2D(uCur, vUv + vec2(uTexelT, 0.0)).rgb;
+	vec3 cd = texture2D(uCur, vUv - vec2(0.0, uTexelT)).rgb;
+	vec3 cu = texture2D(uCur, vUv + vec2(0.0, uTexelT)).rgb;
+	vec3 mn = min(c, min(min(cl, cr), min(cd, cu)));
+	vec3 mx = max(c, max(max(cl, cr), max(cd, cu)));
+	vec3 pad = 0.35 * (mx - mn) + 0.05;
+	vec3 hc = clamp(h, mn - pad, mx + pad);
+	gl_FragColor = vec4(mix(c, hc, uAlpha * inH), 1.0);
 }`
 
 // ---- Edge-directed antialias ----
@@ -369,25 +443,28 @@ uniform float uTexelAA;
 uniform float uAA;
 varying vec2 vUv;
 void main() {
-	float c = texture2D(uSrc, vUv).r;
-	float l = texture2D(uSrc, vUv - vec2(uTexelAA, 0.0)).r;
-	float r = texture2D(uSrc, vUv + vec2(uTexelAA, 0.0)).r;
-	float d = texture2D(uSrc, vUv - vec2(0.0, uTexelAA)).r;
-	float u = texture2D(uSrc, vUv + vec2(0.0, uTexelAA)).r;
-	vec2 g = vec2(r - l, u - d);
+	vec3 c = texture2D(uSrc, vUv).rgb;
+	vec3 l = texture2D(uSrc, vUv - vec2(uTexelAA, 0.0)).rgb;
+	vec3 r = texture2D(uSrc, vUv + vec2(uTexelAA, 0.0)).rgb;
+	vec3 d = texture2D(uSrc, vUv - vec2(0.0, uTexelAA)).rgb;
+	vec3 u = texture2D(uSrc, vUv + vec2(0.0, uTexelAA)).rgb;
+	// Edge detection on the CLEAN channel; the blend applies to all
+	// three (the shadowed fields share the clean field's filament
+	// structure, so its isolines are theirs).
+	vec2 g = vec2(r.r - l.r, u.r - d.r);
 	float gm = length(g);
 	// Scale-invariant edge metric: gradient against local level, so a
 	// dim filament's border counts as much as a bright one's.
-	float level = 0.25 * (l + r + d + u) + 0.5;
+	float level = 0.25 * (l.r + r.r + d.r + u.r) + 0.5;
 	float w = uAA * smoothstep(0.0005, 0.025, gm / level);
 	if (w < 0.001) {
-		gl_FragColor = vec4(c, 0.0, 0.0, 1.0);
+		gl_FragColor = vec4(c, 1.0);
 		return;
 	}
 	vec2 t = vec2(-g.y, g.x) * (uTexelAA / max(gm, 1e-6));
-	float a = texture2D(uSrc, vUv + t).r;
-	float b = texture2D(uSrc, vUv - t).r;
-	gl_FragColor = vec4(mix(c, (c + a + b) / 3.0, w), 0.0, 0.0, 1.0);
+	vec3 a = texture2D(uSrc, vUv + t).rgb;
+	vec3 b = texture2D(uSrc, vUv - t).rgb;
+	gl_FragColor = vec4(mix(c, (c + a + b) / 3.0, w), 1.0);
 }`
 
 export class CausticMap {
@@ -452,8 +529,10 @@ export class CausticMap {
       CAUSTIC_RESOLUTION,
       {
         type: THREE.HalfFloatType,
-        // Single channel: quarters the additive fill bandwidth vs RGBA.
-        format: THREE.RedFormat,
+        // RGBA since cast shadows: R clean brightness, G shadowed by all
+        // occluders, B shadowed by floaters only (see splatFragment).
+        // The single-channel bandwidth saving retired with them.
+        format: THREE.RGBAFormat,
         // No mip chain: depth softening now comes from an explicit blur
         // pyramid (below) — driver mipmap generation on half-float
         // targets silently no-ops on some renderers, and regenerating
@@ -489,13 +568,18 @@ export class CausticMap {
         uMaxBright: { value: 30 },
         uJitter: { value: new THREE.Vector2(0, 0) },
         uPlaneDepth: { value: CAUSTIC_PLANE_DEPTH },
-        // Hull occluder — wired by setBoatOccluder once the SDF bakes;
-        // uShadowK stays 0 (shadows off) until the texture exists.
+        // Occluders for the shadow channels — wired by setOccluders once
+        // the hull SDF bakes (until then the SDF box is degenerate at the
+        // origin with no texture, and G/B just track R). The sphere
+        // shares uSphereCenter/uSphereRadius above.
         uBoatInv: { value: new THREE.Matrix4() },
         uBoatSdf: { value: null as THREE.Texture | null },
         uBoatSdfMin: { value: new THREE.Vector3() },
-        uBoatSdfSize: { value: new THREE.Vector3(1, 1, 1) },
-        uShadowK: { value: 0 },
+        uBoatSdfSize: { value: new THREE.Vector3(0, 0, 0) },
+        uBuoyInv: { value: [new THREE.Matrix4(), new THREE.Matrix4(), new THREE.Matrix4()] },
+        uCardRect: { value: new THREE.Vector4(14, 2, 5, 2.5) },
+        uCardY: { value: -6 },
+        uCardOn: { value: 0 },
         uTime: { value: 0 },
         uAmp: { value: 1 },
         // Shared with every other wave material; see waveUniformA.
@@ -526,7 +610,7 @@ export class CausticMap {
     // only this allocation changes).
     const blurTargetOpts = {
       type: THREE.HalfFloatType,
-      format: THREE.RedFormat,
+      format: THREE.RGBAFormat,
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: false,
@@ -534,7 +618,7 @@ export class CausticMap {
     } as const
     const histOpts = {
       type: THREE.HalfFloatType,
-      format: THREE.RedFormat,
+      format: THREE.RGBAFormat,
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       depthBuffer: false,
@@ -577,7 +661,11 @@ export class CausticMap {
       CAUSTIC_RESOLUTION,
       {
         type: THREE.HalfFloatType,
-        format: THREE.RedFormat,
+        // RGBA like every stage since the shadow channels: this is the
+        // texture receivers actually sample when edgeAA is on, and a
+        // single-channel target here silently zeroed G/B — every
+        // receiver reads a shadow channel, so the sea went causticless.
+        format: THREE.RGBAFormat,
         minFilter: THREE.LinearFilter,
         magFilter: THREE.LinearFilter,
         depthBuffer: false,
@@ -760,9 +848,7 @@ void main() {
     const cc = this.material.uniforms.uCenter.value as THREE.Vector2
     this.material.uniforms.uExtent.value = this.extent
     this.material.uniforms.uMaxBright.value = CAUSTICS.maxBright
-    this.material.uniforms.uShadowK.value = this.material.uniforms.uBoatSdf.value
-      ? Math.min(Math.max(CAUSTICS.castShadow, 0), 1)
-      : 0
+    this.material.uniforms.uCardOn.value = UNDERWATER.rainbowCard ? 1 : 0
     // Ray lattice phase = WORLD ANCHOR + Halton jitter. The lattice used
     // to ride the domain, whose centre snaps to map texels as the boat
     // moves — every snap translated the rays by a fraction of the ray
@@ -1120,22 +1206,27 @@ void main() {
     if (want > this.extent || want < this.extent - 6) this.extent = want
   }
   /**
-   * Wire the hull occluder for cast shadows. Matrix and vectors are held
-   * BY REFERENCE (the water material's own objects), so the sim and the
-   * shadow can never see different boat poses — the same sharing rule as
-   * the buoys and the sphere everywhere else.
+   * Wire the occluders for the shadow channels. Matrices and vectors are
+   * held BY REFERENCE (the water material's own objects), so the splat
+   * and the water can never see different poses — the same sharing rule
+   * as the foam sim's buoys. The sphere needs no wiring: its uniforms
+   * are already live via setSphereY.
    */
-  setBoatOccluder(
-    inv: THREE.Matrix4,
-    tex: THREE.Texture,
-    min: THREE.Vector3,
-    size: THREE.Vector3,
+  setOccluders(
+    boatInv: THREE.Matrix4,
+    boatSdf: THREE.Texture,
+    boatSdfMin: THREE.Vector3,
+    boatSdfSize: THREE.Vector3,
+    buoyInv: THREE.Matrix4[],
+    cardRect: THREE.Vector4,
   ) {
     const u = this.material.uniforms
-    u.uBoatInv.value = inv
-    u.uBoatSdf.value = tex
-    u.uBoatSdfMin.value = min
-    u.uBoatSdfSize.value = size
+    u.uBoatInv.value = boatInv
+    u.uBoatSdf.value = boatSdf
+    u.uBoatSdfMin.value = boatSdfMin
+    u.uBoatSdfSize.value = boatSdfSize
+    u.uBuoyInv.value = buoyInv
+    u.uCardRect.value = cardRect
   }
   setViewRect(hw: number, hn: number, hf: number) {
     // Guard: the rotated rect must FIT the domain square, or the trusted
@@ -1179,9 +1270,11 @@ void main() {
     return this.meanTarget.texture
   }
 
-  /** Sphere centre height, live from the tuning panel. */
+  /** Sphere centre height, live from the tuning panel. The rainbow card
+   *  rides the same dial (Scene keeps uRainbowY = SPHERE_CY). */
   setSphereY(y: number) {
     ;(this.material.uniforms.uSphereCenter.value as THREE.Vector3).y = y
+    this.material.uniforms.uCardY.value = y
   }
 
   /** Domain centre, for the receivers' uCausticCenter uniforms. */

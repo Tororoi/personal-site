@@ -2113,11 +2113,17 @@ export const CAUSTICS = {
    */
   ridgeGain: 1.0,
   /**
-   * CAST SHADOW strength, 0-1: the hull occludes the caustic rays, so
-   * its shadow on the seabed is the ABSENCE of caustic light — refracted
-   * with the same bend as the light around it and softened by the same
-   * temporal accumulation (soft SDF visibility, not the binary ray-kill
-   * that gave the old crown shadow its radial spokes). 0 = off.
+   * CAST SHADOW strength, 0-1. The reference's system, one channel
+   * further: shadows are baked into the caustic map by the same
+   * refracted rays as the pattern (R = clean light, G = shadowed by
+   * every occluder, B = shadowed by the surface floaters only), and
+   * receivers CHOOSE — the seabed reads G, submerged bodies read B, so
+   * objects get the hull's shadow, keep their own caustics, and can
+   * never read their own silhouette (the reference's sphere skips its
+   * shadow channel for exactly this reason). Shadow edges inherit the
+   * pattern's wave wobble, temporal integration and depth blur because
+   * they ARE the pattern's rays. This dial blends receivers toward the
+   * clean channel; 0 = off.
    */
   castShadow: 1,
 }

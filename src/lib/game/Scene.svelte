@@ -343,6 +343,7 @@
 	const uwUniforms = {
 		uUwAmbient: { value: UNDERWATER.ambient },
 		uUwDirect: { value: UNDERWATER.direct },
+		uUwShadowK: { value: CAUSTICS.castShadow },
 		uUwRidge: { value: CAUSTICS.ridgeGain },
 		uUwSigma: { value: new THREE.Vector3() },
 		uUwScatter: { value: new THREE.Vector3() },
@@ -650,6 +651,11 @@
 	const underwaterShadeGlsl = `
 uniform float uUwAmbient;
 uniform float uUwDirect;
+// CAST SHADOW strength: blends the receiver's channel choice between
+// the clean caustic field and the shadowed one (see causticTapAt /
+// caustics.ts — shadows live in the map's G/B channels, made of the
+// same rays as the pattern, exactly the reference's system).
+uniform float uUwShadowK;
 uniform float uUwRidge;
 uniform vec3 uUwSigma;
 uniform vec3 uUwScatter;
@@ -765,16 +771,22 @@ float causticValidity(vec2 beamXZ) {
 // One caustic tap at a receiver point: beam walk to the reference plane,
 // then the depth-defocus pyramid blend. Factored out so the footprint
 // supersampler below can afford as many taps as the look wants.
-float causticTapAt(vec3 Pi, vec3 refrLight, float t1, float t2) {
+// All three channels: R clean, G shadowed by every occluder, B shadowed
+// by the surface floaters only (see caustics.ts's splatFragment).
+vec3 causticTapAt(vec3 Pi, vec3 refrLight, float t1, float t2) {
 	vec2 bxz = Pi.xz + refrLight.xz * ((${(-CAUSTIC_PLANE_DEPTH).toFixed(1)} - Pi.y) / refrLight.y);
 	vec2 cuvI = clamp((bxz - uCausticCenter) / uCausticExtent + 0.5, 0.002, 0.998);
-	float c0 = texture2D(uCausticMap, cuvI).r;
-	float c1 = texture2D(uCausticPyr1, cuvI).r;
-	float c2 = texture2D(uCausticPyr2, cuvI).r;
+	vec3 c0 = texture2D(uCausticMap, cuvI).rgb;
+	vec3 c1 = texture2D(uCausticPyr1, cuvI).rgb;
+	vec3 c2 = texture2D(uCausticPyr2, cuvI).rgb;
 	return mix(mix(c0, c1, t1), c2, t2);
 }
 
-vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow, float graze) {
+// objRecv picks the shadow channel (the reference's receiver rule, one
+// channel further): 0.0 = seabed, shadowed by everything; 1.0 = a
+// submerged body, shadowed only by the surface floaters — so it gets
+// the hull's shadow but can never read its own.
+vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow, float graze, float objRecv) {
 	vec3 sunN = normalize(uSunDir);
 	vec3 refrLight = refract(-sunN, vec3(0.0, 1.0, 0.0), 0.7519);
 	// Beam incidence, relaxing toward omnidirectional (0.5) as the light
@@ -842,6 +854,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 			ddx *= 2.4 / dpm;
 			ddy *= 2.4 / dpm;
 		}
+		vec3 accRGB = vec3(0.0);
 		// ADAPTIVE tap count: the footprint's size in MAP TEXELS decides
 		// how many samples the integral needs. One tap where the pixel
 		// spans less than a texel (most flat-on water — the bulk of the
@@ -849,17 +862,18 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 		// bought nothing) where refraction magnifies the footprint.
 		float ftex = dpm * (${CAUSTIC_RESOLUTION}.0 / uCausticExtent);
 		int n = int(clamp(ftex * 0.5 + 0.5, 1.0, 3.0));
-		float acc = 0.0;
 		for (int i = 0; i < 3; i++) {
 			if (i >= n) break;
 			for (int j = 0; j < 3; j++) {
 				if (j >= n) break;
 				vec3 Pi = P + ((float(i) + 0.5) / float(n) - 0.5) * ddx
 					+ ((float(j) + 0.5) / float(n) - 0.5) * ddy;
-				acc += causticTapAt(Pi, refrLight, t1, t2);
+				accRGB += causticTapAt(Pi, refrLight, t1, t2);
 			}
 		}
-		caustic = acc / float(n * n);
+		vec3 cRGB = accRGB / float(n * n);
+		// Channel choice, blended toward clean by the castShadow dial.
+		caustic = mix(cRGB.r, mix(cRGB.g, cRGB.b, objRecv), uUwShadowK);
 	}
 	// SELF-NORMALIZE by the map's mean over the splatted rect (a 1x1
 	// reduction target, refreshed each step — NOT a mip read; mips on the
@@ -1474,6 +1488,7 @@ float buoyHit(mat4 inv, vec3 ro, vec3 rd, out vec3 nWorld) {
 	return tN;
 }
 
+
 void main() {
 	// SMOOTH shading: interpolated analytic wave slope + per-pixel ripple
 	// slope from the sim texture (rings shade at texture resolution no
@@ -1590,7 +1605,8 @@ void main() {
 	if (tHit > 0.0) {
 		vec3 P = pEntry + refr * tHit;
 		waterPath = tHit;
-		transmitted = shadeUnderwater(P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)));
+		transmitted = shadeUnderwater(
+			P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), 1.0);
 	} else if (uUwSeabedOn > 0.5 && refr.y < -0.001) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
@@ -1602,7 +1618,7 @@ void main() {
 		vec3 Pf = pEntry + refr * tFloor;
 		waterPath = tFloor;
 		transmitted = shadeUnderwater(
-			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(pEntry.y - Pf.y, 0.0), abs(refr.y));
+			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0);
 	} else {
 		// Seabed off, total internal reflection, or a grazing ray with no
 		// floor ahead: the water column alone. uwVolume() is its
@@ -2142,7 +2158,7 @@ void main() {
 	// blend band on an exposed crown.
 	float belowS = max(waterY - vWorld.y, 0.0);
 	vec3 wet = shadeUnderwater(vWorld, normal, uSphereColor, belowS, belowS,
-		abs(dot(normal, vec3(${f(CAM_AXIS.x)}, ${f(CAM_AXIS.y)}, ${f(CAM_AXIS.z)}))));
+		abs(dot(normal, vec3(${f(CAM_AXIS.x)}, ${f(CAM_AXIS.y)}, ${f(CAM_AXIS.z)}))), 1.0);
 
 	vec3 col = mix(dry, wet, submerged);
 
@@ -3710,13 +3726,15 @@ void main() {
 		waterUniforms.uBoatSdf.value = tex;
 		waterUniforms.uBoatSdfMin.value.copy(bake.min);
 		waterUniforms.uBoatSdfSize.value.copy(bake.size);
-		// Caustic cast shadows trace the same bake through the water
-		// material's own matrix/vectors (by reference — one boat pose).
-		causticMap.setBoatOccluder(
+		// The caustic shadow channels trace the same bake through the
+		// water material's own matrices (by reference — one pose).
+		causticMap.setOccluders(
 			waterUniforms.uBoatInv.value,
 			tex,
 			waterUniforms.uBoatSdfMin.value,
-			waterUniforms.uBoatSdfSize.value
+			waterUniforms.uBoatSdfSize.value,
+			waterUniforms.uBuoyInv.value,
+			rainbowUniforms.uRainbowRect.value
 		);
 	}
 	// Everything the boat-image pass renders lives on layer 3.
@@ -4517,6 +4535,7 @@ void main() {
 				uwUniforms.uUwSeabedD.value = UNDERWATER.seabedDepthM;
 				uwUniforms.uUwCausticFocus.value = CAUSTICS.formM;
 				uwUniforms.uUwCausticBlur.value = CAUSTICS.blurPerM;
+				uwUniforms.uUwShadowK.value = Math.min(Math.max(CAUSTICS.castShadow, 0), 1);
 				uwUniforms.uCausticPyr1.value = causticMap.pyr1Texture;
 				uwUniforms.uCausticPyr2.value = causticMap.pyr2Texture;
 				uwUniforms.uUwCausticFocal.value = CAUSTICS.focalM;
