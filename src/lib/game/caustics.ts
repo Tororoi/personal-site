@@ -162,6 +162,13 @@ const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
 uniform vec4 uCardRect; // rainbow card: cx, cz, hx, hz
 uniform float uCardY;
 uniform float uCardOn;
+// World y of the seabed (-1e5 when it's off): occlusion on the
+// refracted leg stops HERE, not at the reference plane. The map is
+// evaluated at the plane's depth, but light that already landed on a
+// shallower seabed cannot be blocked below it — a sphere buried in a
+// shallow floor kept casting from its underground half, and the extra
+// shadow sat displaced down-sun of the visible body.
+uniform float uSeabedY;
 
 // Entry point, refracted direction and travel of the last traced ray.
 vec3 gEntry;
@@ -310,9 +317,11 @@ void main() {
 	vec3 inc = -normalize(uSunDir);
 	float vFloat = boatShadowVis(gEntry, inc);
 	for (int i = 0; i < 3; i++) vFloat *= buoyShadowVis(uBuoyInv[i], gEntry, inc);
+	// The refracted leg is truncated at the seabed (see uSeabedY).
+	float tOcc = min(gLandT, (gEntry.y - uSeabedY) / max(-gRefr.y, 0.05));
 	float vAll = vFloat
-		* min(sphereRayVis(gEntry, -inc, 1e5), sphereRayVis(gEntry, gRefr, gLandT))
-		* cardShadowVis(gEntry, gRefr, gLandT);
+		* min(sphereRayVis(gEntry, -inc, 1e5), sphereRayVis(gEntry, gRefr, tOcc))
+		* cardShadowVis(gEntry, gRefr, tOcc);
 	vVisAll = vAll;
 	vVisFloat = vFloat;
 	vec2 ndc = ((land.xz - uCenter) / uExtent) * 2.0;
@@ -580,6 +589,7 @@ export class CausticMap {
         uCardRect: { value: new THREE.Vector4(14, 2, 5, 2.5) },
         uCardY: { value: -6 },
         uCardOn: { value: 0 },
+        uSeabedY: { value: -1e5 },
         uTime: { value: 0 },
         uAmp: { value: 1 },
         // Shared with every other wave material; see waveUniformA.
@@ -849,6 +859,9 @@ void main() {
     this.material.uniforms.uExtent.value = this.extent
     this.material.uniforms.uMaxBright.value = CAUSTICS.maxBright
     this.material.uniforms.uCardOn.value = UNDERWATER.rainbowCard ? 1 : 0
+    this.material.uniforms.uSeabedY.value = UNDERWATER.seabed
+      ? -UNDERWATER.seabedDepthM
+      : -1e5
     // Ray lattice phase = WORLD ANCHOR + Halton jitter. The lattice used
     // to ride the domain, whose centre snaps to map texels as the boat
     // moves — every snap translated the rays by a fraction of the ray

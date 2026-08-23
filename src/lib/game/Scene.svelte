@@ -1602,23 +1602,30 @@ void main() {
 		}
 	}
 	vec3 transmitted;
-	if (tHit > 0.0) {
+	// The floor competes on DISTANCE like any other surface: an object
+	// hit beyond the seabed is buried in it and must lose (a sphere
+	// clipping a shallow seabed used to render through the ground,
+	// because objects won unconditionally and the floor only ran when
+	// nothing was hit at all).
+	float tSeabed = (uUwSeabedOn > 0.5 && refr.y < -0.001)
+		? (-uUwSeabedD - pEntry.y) / refr.y
+		: -1.0;
+	if (tHit > 0.0 && (tSeabed <= 0.0 || tHit < tSeabed)) {
 		vec3 P = pEntry + refr * tHit;
 		waterPath = tHit;
 		transmitted = shadeUnderwater(
 			P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), 1.0);
-	} else if (uUwSeabedOn > 0.5 && refr.y < -0.001) {
+	} else if (tSeabed > 0.0) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
 		// seabed — most of every underwater pixel — ignored the UNDERWATER
 		// knobs entirely and carried no caustics; the panel then read as
 		// "only affects the sphere". Intersect the refracted ray with the
 		// caustic plane and shade it like any other submerged surface.
-		float tFloor = (-uUwSeabedD - pEntry.y) / refr.y;
-		vec3 Pf = pEntry + refr * tFloor;
-		waterPath = tFloor;
+		vec3 Pf = pEntry + refr * tSeabed;
+		waterPath = tSeabed;
 		transmitted = shadeUnderwater(
-			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tFloor, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0);
+			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tSeabed, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0);
 	} else {
 		// Seabed off, total internal reflection, or a grazing ray with no
 		// floor ahead: the water column alone. uwVolume() is its
