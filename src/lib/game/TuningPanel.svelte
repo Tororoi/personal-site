@@ -192,6 +192,24 @@
 	 * Explicit bounds for tuning knobs whose sensible range the heuristic
 	 * cannot guess from the default. Keyed "GROUP.knob".
 	 */
+	/**
+	 * Single-select RADIO knobs: numeric under the hood (the index), a
+	 * one-only radio row in the UI. WEATHER's preset selectors —
+	 * placeholders until the preset tables land.
+	 */
+	const RADIO_OPTIONS: Record<string, string[]> = {
+		'WEATHER.skyPreset': ['sunny', 'partly cloudy', 'overcast', 'foggy', 'rainy', 'stormy'],
+		'WEATHER.waterBody': ['coastal', 'tropical', 'open water'],
+		'WEATHER.waterClarity': [
+			'clear shallow',
+			'clear deep',
+			'medium clear',
+			'murky',
+			'red algae bloom',
+			'biolum algae bloom'
+		]
+	};
+
 	const TUNING_RANGE: Record<string, { min: number; max: number; step: number }> = {
 		// Defaults to -1 (meaning "leave the preset alone"), so the heuristic
 		// would infer -1..1 — useless for a value spanning the presets' 0.55
@@ -276,9 +294,11 @@
 		'BOAT.wakeAmp': { min: 0, max: 0.05, step: 0.001 },
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
 		'SEA.waves': { min: 0, max: 2, step: 0.01 },
-		'SEA.weather': { min: 0, max: 1, step: 0.01 },
-		'SEA.windSpeed': { min: 0, max: 45, step: 0.5 },
-		'SEA.windCompassDeg': { min: 0, max: 360, step: 1 },
+		'WEATHER.overcast': { min: 0, max: 1, step: 0.01 },
+		'WEATHER.turbidity': { min: 0, max: 1, step: 0.01 },
+		'WEATHER.transitionS': { min: 0, max: 60, step: 0.5 },
+		'WIND.windSpeed': { min: 0, max: 45, step: 0.5 },
+		'WIND.windCompassDeg': { min: 0, max: 360, step: 1 },
 		'SEA.currentCompassDeg': { min: 0, max: 360, step: 1 },
 		'SEA.currentSpeed': { min: 0, max: 4, step: 0.05 },
 		'SEA.timeScale': { min: 0.2, max: 2, step: 0.01 },
@@ -399,9 +419,17 @@
 			['halo', ['haloSharp', 'haloGain', 'haloGainLow', 'anisotropy']],
 			['altitude', ['altHigh', 'altLow', 'fadeAltDeg']]
 		],
+		WEATHER: [
+			['presets', ['skyPreset', 'waterBody', 'waterClarity', 'transitionS']],
+			['dials', ['overcast', 'turbidity']]
+		],
+		WIND: [
+			['wind', ['windSpeed', 'windCompassDeg', 'baseWander', 'baseBreath']],
+			['gusting', ['gustCycle', 'gustDurMin', 'gustDurVar', 'gustTurnMin', 'gustTurnVar', 'gustSpeedMin', 'gustSpeedVar']],
+			['gustmask', ['gustLambdaMin', 'gustLambdaMax', 'gustSlopeAmp', 'gustDirPow', 'gustLengthM', 'gustWidthM', 'gustDensity', 'gustCover', 'gustSharp', 'gustGain', 'gustFresnelGrazing', 'gustSurfaceReflect']]
+		],
 		SEA: [
-			['sea', ['waves', 'weather', 'lambdaScale', 'chopOverride', 'seaState', 'transitionSecondsPerUnit']],
-			['wind', ['windSpeed', 'windCompassDeg']],
+			['sea', ['waves', 'lambdaScale', 'chopOverride', 'seaState', 'transitionSecondsPerUnit']],
 			['current', ['currentSpeed', 'currentCompassDeg']],
 			['tempo', ['timeScale']],
 			['detail', ['detailMin', 'detailMax', 'detailSlope', 'stepEvery']]
@@ -722,7 +750,26 @@
 								<div class="shead">{k.slice(1)}</div>
 							{:else}
 							{@const v = valueOf(g, k)}
-							{#if typeof v === 'boolean'}
+							{#if RADIO_OPTIONS[`${g}.${k}`]}
+								<div class="knob" class:staged={isStaged(g, k)}>
+									<div class="head">
+										<span class="name" class:mod={isModified(g, k)}>{k}</span>
+									</div>
+									<div class="radios">
+										{#each RADIO_OPTIONS[`${g}.${k}`] as label, i (label)}
+											<label class="radio">
+												<input
+													type="radio"
+													name={`${g}.${k}`}
+													checked={v === i}
+													onchange={() => setKnob(g, k, i)}
+												/>
+												<span>{label}</span>
+											</label>
+										{/each}
+									</div>
+								</div>
+							{:else if typeof v === 'boolean'}
 								<label class="bool" class:staged={isStaged(g, k)}>
 									<input
 										type="checkbox"
@@ -977,6 +1024,20 @@
 	}
 
 	.knob,
+	.radios {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 2px 10px;
+		margin: 2px 0 4px;
+	}
+	.radio {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-size: 11px;
+		color: #9fb0c0;
+		cursor: pointer;
+	}
 	.bool {
 		display: block;
 		padding: 3px 8px 5px;

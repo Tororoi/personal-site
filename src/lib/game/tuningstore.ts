@@ -121,6 +121,22 @@ if (SAVED.WIND && 'gustSpacingM' in SAVED.WIND) {
 	saveOverrides(SAVED);
 }
 
+// MIGRATION — the WEATHER restructure (2026-08-24): SEA.weather became
+// WEATHER.overcast; SEA's wind pair moved home to WIND.
+if (SAVED.SEA) {
+	if ('weather' in SAVED.SEA) {
+		SAVED.WEATHER = { ...(SAVED.WEATHER ?? {}), overcast: SAVED.SEA.weather };
+		delete SAVED.SEA.weather;
+	}
+	for (const k of ['windSpeed', 'windCompassDeg'] as const) {
+		if (k in SAVED.SEA) {
+			SAVED.WIND = { ...(SAVED.WIND ?? {}), [k]: SAVED.SEA[k] };
+			delete SAVED.SEA[k];
+		}
+	}
+	saveOverrides(SAVED);
+}
+
 /**
  * Patch one config group in place from the saved set, and hand it back so
  * it can be used as an initialiser.

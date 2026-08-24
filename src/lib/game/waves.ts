@@ -21,7 +21,7 @@
  */
 
 import * as THREE from 'three'
-import { CURRENT, INSPECT, SEA } from './tuning'
+import { WEATHER, WIND, CURRENT, INSPECT, SEA } from './tuning'
 
 export type WaveParams = {
   /** Unit direction of travel. */
@@ -875,8 +875,8 @@ export function unifiedField(): WaveFieldConfig {
     ((UNIFIED_NORTH_DEG + deg) % 360) * (Math.PI / 180)
   return {
     seed: SEA_PRESETS.largeSwell.seed,
-    windAngle: compass(U.windCompassDeg),
-    windSpeed: U.windSpeed,
+    windAngle: compass(WIND.windCompassDeg),
+    windSpeed: WIND.windSpeed,
     surfaceCurrentHeading: compass(U.currentCompassDeg),
     surfaceCurrentSpeed: U.currentSpeed,
     chop,
@@ -886,14 +886,14 @@ export function unifiedField(): WaveFieldConfig {
       zenith: lerpHex(
         SEA_PRESETS.calm.sky.zenith,
         SEA_PRESETS.storm.sky.zenith,
-        U.weather,
+        WEATHER.overcast,
       ),
       horizon: lerpHex(
         SEA_PRESETS.calm.sky.horizon,
         SEA_PRESETS.storm.sky.horizon,
-        U.weather,
+        WEATHER.overcast,
       ),
-      diffusion: 0.05 + (0.7 - 0.05) * U.weather,
+      diffusion: 0.05 + (0.7 - 0.05) * WEATHER.overcast,
     },
     detail: {
       minLambda: U.detailMin,

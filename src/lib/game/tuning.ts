@@ -811,7 +811,46 @@ export const SPECULAR = {
  * consumers see one wind; the crest plumes read the GUST alone, so
  * spray whips only when a gust is actually blowing through.
  */
+/**
+ * WEATHER — the state the sky and water are in, as distinct from the
+ * mechanics that respond to it (each system keeps its own clear/overcast
+ * endpoint pairs). The preset selectors are the road map: sky states
+ * (sunny .. stormy) and two water axes (body, clarity) will each become
+ * a table of values over the other groups' knobs, cross-faded over
+ * transitionS by the transition engine. Until those tables land the
+ * radios select and persist but drive nothing.
+ */
+export const WEATHER = {
+  /** 0 clear blue .. 1 heavy overcast. Drives sky colour and sun
+   * diffusion (caustic wash, specular blend, foam sky/sun balance). */
+  overcast: 0.4,
+  /**
+   * 0 clear .. 1 pea soup. Shortens all three absorption ranges toward
+   * ~12% and adds particulate (Mie) backscatter — the water clouds and
+   * loses its colour depth. The clarity PRESETS will set this alongside
+   * per-channel endpoints; until then it is the one murk dial.
+   */
+  turbidity: 0,
+  /** Sky preset: 0 sunny, 1 partly cloudy, 2 overcast, 3 foggy,
+   * 4 rainy, 5 stormy. Placeholder until the tables land. */
+  skyPreset: 0,
+  /** Water body: 0 coastal, 1 tropical, 2 open water. Placeholder. */
+  waterBody: 0,
+  /** Water clarity: 0 clear shallow, 1 clear deep, 2 medium clear,
+   * 3 murky, 4 red algae bloom, 5 bioluminescent algae bloom.
+   * Placeholder. */
+  waterClarity: 0,
+  /** Seconds a preset change cross-fades over, once wired. */
+  transitionS: 5,
+}
+
 export const WIND = {
+  /** m/s. Spray advection, gusts, and the FFT detail spectrum's shape.
+   * (Moved from SEA: wind is wind.) Changing it rebuilds the sea. */
+  windSpeed: 15,
+  /** Compass bearing the wind blows toward. 68 = the presets' heading.
+   * 0 north, 90 east; bearings are the direction the wind moves TOWARD. */
+  windCompassDeg: 68,
   /** Base wander: slow heading drift, radians. */
   baseWander: 0.22,
   /** Slow multi-sine breathing on the base speed (fraction). */
@@ -1773,12 +1812,8 @@ export const SEA = {
    */
   /** 0 calm .. 1 largeSwell .. 2 storm. */
   waves: 1,
-  /** 0 clear blue .. 1 heavy overcast. */
-  weather: 0.4,
-  /** m/s. Spray advection, gusts, and the FFT detail spectrum's shape. */
-  windSpeed: 15,
-  /** Compass bearing the wind blows toward. 68 = the presets' heading. */
-  windCompassDeg: 68,
+  // (weather moved to WEATHER.overcast; windSpeed/windCompassDeg moved
+  // to WIND — 2026-08-24, the WEATHER section restructure.)
   /** Compass bearing the surface current sets toward. */
   currentCompassDeg: 68,
   /** m/s. */
@@ -1878,9 +1913,9 @@ export const UNDERWATER = {
    *
    * Lower a range for murkier water; raise it for gin-clear.
    */
-  redRangeM: 10,
+  redRangeM: 15,
   greenRangeM: 60,
-  blueRangeM: 180,
+  blueRangeM: 160,
   /**
    * RAYLEIGH backscatter — molecular, per metre, quoted at green (550nm).
    *
@@ -1954,7 +1989,7 @@ export const UNDERWATER = {
    * an overcast sea reads grey and flat rather than merely darker blue.
    * Blended by the sea's own sun diffusion.
    */
-  scatterClear: 1.0,
+  scatterClear: 0,
   scatterOvercast: 0.3,
   /**
    * FRESNEL FLOOR — how much sky the surface reflects when looked at
@@ -2432,6 +2467,7 @@ const GROUPS = {
   ENABLE,
   BOAT,
   SEA,
+  WEATHER,
   WIND,
   CURRENT,
   UNDERWATER,
@@ -2481,6 +2517,11 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
 export const LIVE_GROUPS = new Set([
   'SPECULAR',
   'SEA',
+  // overcast reaches the scene through the sea-rebuild key, turbidity
+  // through the per-frame sigma sync. The PRESET RADIOS and transitionS
+  // are declared placeholders: they select and persist but apply nothing
+  // until the preset tables land (next phase) — flagged, not silent.
+  'WEATHER',
   'BOAT',
   'UNDERWATER',
   // Every CAUSTICS knob reaches the scene through a per-frame uniform

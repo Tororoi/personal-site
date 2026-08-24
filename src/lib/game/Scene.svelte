@@ -59,7 +59,7 @@
 		foamNoiseGlsl,
 		FOAM_EXTENT
 	} from './foam';
-	import { WIND,
+	import { WEATHER, WIND,
 		CAUSTICS,
 		BOAT,
 		DROPLET,
@@ -1109,7 +1109,8 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 		// Any UNIFIED knob must trigger a rebuild — that group IS the field
 		// now. Joining the whole group is cheap next to the rebuild it
 		// guards.
-		const key = `U${Object.values(SEA).join(',')}`;
+		// The moved state knobs still rebuild the sea: join them in.
+		const key = `U${Object.values(SEA).join(',')},${WIND.windSpeed},${WIND.windCompassDeg},${WEATHER.overcast}`;
 		if (key === seaApplied) return;
 		seaApplied = key;
 		applySeaState(seaEased, SEA.chopOverride);
@@ -4804,17 +4805,22 @@ void main() {
 				// Fade RANGES in metres -> per-metre extinction. "Fades" is
 				// 90% of the light gone, so sigma = ln(10) / range.
 				const LN10 = 2.302585;
+				// TURBIDITY (WEATHER.turbidity): suspended particulate eats
+				// every channel — ranges shorten toward ~12% of clear.
+				const turbK = 1 - 0.88 * WEATHER.turbidity;
 				uwUniforms.uUwSigma.value.set(
-					LN10 / Math.max(UNDERWATER.redRangeM, 0.01),
-					LN10 / Math.max(UNDERWATER.greenRangeM, 0.01),
-					LN10 / Math.max(UNDERWATER.blueRangeM, 0.01)
+					LN10 / Math.max(UNDERWATER.redRangeM * turbK, 0.01),
+					LN10 / Math.max(UNDERWATER.greenRangeM * turbK, 0.01),
+					LN10 / Math.max(UNDERWATER.blueRangeM * turbK, 0.01)
 				);
 				// Backscatter = Rayleigh (molecular, lambda^-4.3 so blue is
 				// scattered 5.9x more than red) + Mie (particulate, equal
 				// across channels). The balance between them is the
 				// open-ocean-blue to coastal-teal axis.
 				const ray = UNDERWATER.rayleighScatter;
-				const mie = UNDERWATER.mieScatter;
+				// Particulate scatter rises with turbidity: murk is BRIGHT
+				// haze, not just darkness.
+				const mie = UNDERWATER.mieScatter + 0.004 * WEATHER.turbidity;
 				uwUniforms.uUwScatter.value.set(
 					ray * 0.3999 + mie,
 					ray * 1.0 + mie,
