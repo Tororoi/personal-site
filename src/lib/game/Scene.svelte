@@ -592,20 +592,6 @@
 	// underwater raytrace.
 	const BACKDROP_DEPTH = 10;
 
-	// The reconstructed fold ramps: a max() over whichever of the three
-	// claims are switched on, emitted as source so a disabled term costs
-	// nothing. Shared by the vertex estimate and the fragment refinement
-	// so the two can never disagree about which terms are in play.
-	const rampWhiteGlsl = (jac: string, tilt: string, stretch: string | null) => {
-		const terms: string[] = [];
-		if (LOOP.whiteFromJ) terms.push(`1.0 - smoothstep(0.0, ${f(LOOP.whiteJRamp)}, ${jac})`);
-		if (LOOP.whiteFromTilt)
-			terms.push(`1.0 - smoothstep(${f(LOOP.whiteTiltStart)}, ${f(LOOP.whiteTiltFull)}, ${tilt})`);
-		if (stretch !== null && LOOP.whiteFromStretch) terms.push(stretch);
-		if (terms.length === 0) return '0.0';
-		return terms.reduce((a, b) => `max(${a}, ${b})`);
-	};
-
 	/** The object wave, shared verbatim by every shader that builds a
 	 * displacement gradient. One definition: the water mesh, its fragment
 	 * refinement and the froth sprites must agree about where the water
@@ -1251,11 +1237,8 @@ varying vec2 vRest;
 // pixel on top of this (see pExact) instead of re-summing every wave.
 varying vec3 vWaveP;
 varying vec2 vSlope;
-varying float vOverhang;
 uniform float uDomAmp;
 uniform vec2 uWinCenter;
-varying float vLoopSk;
-varying float vPinchWhite;
 varying float vViewZ;
 varying float vJacobian;
 
@@ -1316,59 +1299,6 @@ ${ENABLE.fftDetail ? fftSlopeGlsl() : ''}
 ${ENABLE.objectWave ? objWaveGlsl : ''}
 ${ENABLE.objectWave ? objectWaveSlopeGlsl() : ''}
 
-${LOOP.pixelRamps ? `// The fold ramps at FRAGMENT resolution (see the gate in main): one
-// tangent loop yields both tests — the unnormalized Na.y IS the
-// horizontal Jacobian determinant, and Na.y/|Na| is the tilt.
-float pinchMask(vec2 restXZ) {
-	float txx = 0.0;
-	float txy = 0.0;
-	float txz = 0.0;
-	float tzy = 0.0;
-	float tzz = 0.0;
-	float wAmp = 0.0;
-	float wsum = 0.0;
-	for (int i = 0; i < WAVE_COUNT; i++) {
-		vec4 wa = uWaveA[i];
-		vec3 wb = uWaveB[i];
-		float theta = (restXZ.x * wa.x + restXZ.y * wa.y) * wa.z - wa.w * uTime + wb.z;
-		float sn = sin(theta);
-		float cs = cos(theta);
-		float qak = wb.y * wb.x * uAmp * wa.z;
-		float ak = wb.x * uAmp * wa.z;
-		txx -= qak * wa.x * wa.x * sn;
-		txy += ak * wa.x * cs;
-		txz -= qak * wa.x * wa.y * sn;
-		tzy += ak * wa.y * cs;
-		tzz -= qak * wa.y * wa.y * sn;
-		float pw = max(qak * sn, 0.0);
-		pw *= pw;
-		wAmp += wb.x * pw;
-		wsum += pw;
-	}
-	// The same wave the vertex used. This refinement runs wherever the
-	// vertex reported a partial value — exactly where the object wave is
-	// — so leaving it out here would rebuild a spectrum-only frame and
-	// erase the vertex's verdict.
-	${objWaveApply('vWorld.xz', 'vWorld.y', '')}
-	vec3 Tu = vec3(1.0 + txx, txy, txz);
-	vec3 Tv = vec3(txz, tzy, 1.0 + tzz);
-	vec3 Na = cross(Tv, Tu);
-	float ny = Na.y / max(length(Na), 0.0001);
-	// Shared sprite-criterion gate (twin of the vertex).
-	// Compressed absolute sizing — see FROTH.ampCurve. max() guards pow(0, x),
-	// which is undefined in GLSL for a zero base.
-	float ampK = clamp(pow(max((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.0001), ${f(FROTH.ampCurve)}), 0.3, 1.0);
-	float intK = mix(0.4, 1.0, clamp((0.1 - Na.y) / 0.55, 0.0, 1.0));
-	float sk = ampK * intK;
-	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
-	float vis = smoothstep(0.1, 0.16, sk);
-	return ${rampWhiteGlsl(
-		'Na.y',
-		'ny',
-		`1.0 - smoothstep(0.0, ${f(LOOP.stretchJRamp)}, Na.y)`
-	)} * vis;
-}
-` : ''}
 
 /**
  * CONTACT FOAM: the collar where the surface meets a solid.
@@ -1908,21 +1838,6 @@ void main() {
 	// frame by frame from a re-jittering scan. gl_FrontFacing is the
 	// same fact, exact, stable and with no state at all behind it.
 	// EXACT: the inverted sheet itself, straight off the rasteriser.
-	${PROFILE.skipLoopWhite ? '' : `float backface = ${ENABLE.loopWhite ? `(gl_FrontFacing ? 0.0 : 1.0) * ${f(LOOP.backfaceWhite)}` : '0.0'};
-	// RECONSTRUCTED: the Jacobian and overhang ramps. Refined per pixel
-	// only where the vertex estimate lands mid-ramp — a whole extra wave
-	// pass is not worth paying on water that is plainly one or the other.
-	float ramps = ${ENABLE.loopWhite ? 'vPinchWhite' : '0.0'};
-	${LOOP.pixelRamps ? 'if (ramps > 0.01 && ramps < 0.99) ramps = pinchMask(vRest);' : '// LOOP.pixelRamps off: vertex ramps only (see tuning.ts).'}
-	// The thin gate applies to the RAMPS only. The backface is not an
-	// estimate that can be wrong about a hairline — it is the sheet.
-	float thin = ${
-		LOOP.thinSk > 0
-			? `1.0 - smoothstep(${f(LOOP.thinSk * 0.75)}, ${f(LOOP.thinSk)}, vLoopSk)`
-			: '0.0'
-	};
-	ramps *= (1.0 - thin) * ${f(LOOP.rampWhite)};
-	float loopWhite = max(backface, ramps);`}
 	// The two foams stay separate SUBSTANCES — the collar never enters
 	// the field, so it cannot drift, diffuse, decay or be governed by the
 	// field's mass budget — but they share one SKELETON. Feeding the
@@ -1953,13 +1868,18 @@ void main() {
 	vec3 foamLit = whitewaterLight(uFoamColor, foamN, ${f(1 - FOAM.shapeFloor)});
 	col = mix(col, foamLit, foamAmt);`}
 	${
-		PROFILE.skipLoopWhite
+		PROFILE.skipLoopWhite || !ENABLE.loopWhite
 			? ''
-			: `vec3 flatLit = whitewaterLight(uFoamColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
-	${
-		LOOP.debugThin
-			? 'col = mix(col, mix(flatLit, vec3(0.95, 0.15, 0.1), thin), max(backface, vPinchWhite));'
-			: 'col = mix(col, flatLit, loopWhite);'
+			: `if (!gl_FrontFacing) {
+		// BACKFACE = WHITEWATER, statically: the inverted sheet of a
+		// breaking loop is solid froth, lit exactly like the foam (same
+		// whitewaterLight, same shape floor), so the two whites cannot
+		// disagree. This replaced the ramp/pinch machinery — per-vertex
+		// Jacobian votes, overhang and thin gates, stretch-coupled
+		// whitening: the front-face white it added was judged
+		// insignificant by eye, and retiring it bought ~4fps of vertex
+		// and varying work at 4Mpx (2026-08-24).
+		col = whitewaterLight(uFoamColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
 	}`
 	}
 
@@ -2001,9 +1921,6 @@ varying vec2 vRest;
 // pixel on top of this (see pExact) instead of re-summing every wave.
 varying vec3 vWaveP;
 varying vec2 vSlope;
-varying float vOverhang;
-varying float vLoopSk;
-varying float vPinchWhite;
 
 ${wavesGlsl()}
 ${ENABLE.objectWave ? objWaveGlsl : ''}
@@ -2071,67 +1988,31 @@ void main() {
 	// as though the object's wave were not there.
 	vJacobian = Na.y;
 	vSlope = -Na.xz / max(Na.y, 0.2);
-	// NORMALIZED normal y: -> 0 means the surface tips vertical, < 0
-	// means it OVERHANGS — the visible rolling tongue of a breaking
-	// loop, which the Jacobian ramp misses (J marks the compressed seam
-	// hidden INSIDE the fold, not the thrown water rolling over it).
-	// Raw Na.y would be wrong here: unnormalized, it IS approximately
-	// the Jacobian determinant again.
-	vOverhang = Na.y / max(length(Na), 0.0001);
+	${ENABLE.loopStretch ? `
 	// STRETCH the pinched loop toward the foam sprite centers: the flat
 	// discs depth-test at their centers ~0.8r behind the surface along
 	// -normal, and the sheet in front of that plane showed as a dark
-	// line slicing them. Pulling the pinch-zone surface along -normal
-	// fills the wedge between fold and sprite plane with WHITE water.
-	// SHARED FROTH CRITERION: the same smoothstep(0.1, 0.42) gate the
-	// sprites use — a loop that generates no sprites neither whitens
-	// nor stretches, so all three systems agree on which pinches count.
-	// Compressed absolute sizing — see FROTH.ampCurve. max() guards pow(0, x),
-	// which is undefined in GLSL for a zero base.
+	// line slicing them. Pulling the pinch-zone surface along a STABLE
+	// direction (backward against the pinch-weighted heading, down into
+	// the wave body) fills the wedge between fold and sprite plane with
+	// water the backface then paints white. SHARED FROTH CRITERION: the
+	// same smoothstep(0.1, 0.42) gate the sprites use. (The whiteness
+	// half of this system — Jacobian/overhang ramps, thin gate,
+	// stretch-coupled whitening — retired 2026-08-24: backface IS the
+	// white now, and the ramps' front-face additions were judged
+	// insignificant against their vertex cost.)
 	float ampK = clamp(pow(max((wsum > 0.0001 ? wAmp / wsum : 0.0) / uDomAmp, 0.0001), ${f(FROTH.ampCurve)}), 0.3, 1.0);
 	float intK = mix(0.4, 1.0, clamp((0.1 - vJacobian) / 0.55, 0.0, 1.0));
 	float sk = ampK * intK;
 	sk *= 1.0 + 0.5 * smoothstep(0.15, 0.55, sk);
-	// NEAR-BINARY gate for the water: the 0.1 criterion decides WHICH
-	// pinches whiten, but qualifying ones whiten at full harshness (the
-	// narrow 0.1-0.16 ramp only smooths the on/off boundary; the
-	// sprites keep their own wider size-ease ramp).
 	float vis = smoothstep(0.1, 0.16, sk);
-	vLoopSk = sk;
-	// The fold's own ramps: sharp, and saturated at a real fold. A
-	// coarse per-vertex estimate — the fragment refines it through
-	// pinchMask wherever it lands mid-ramp.
-	vPinchWhite = ${rampWhiteGlsl('vJacobian', 'vOverhang', null)};
-	float stretchGate = ${ENABLE.loopStretch ? `(1.0 - smoothstep(0.0, ${f(LOOP.stretchJRamp)}, vJacobian)) * vis` : '0.0'};
+	float stretchGate = (1.0 - smoothstep(0.0, ${f(LOOP.stretchJRamp)}, vJacobian)) * vis;
 	if (stretchGate > 0.001) {
-		// Pull by 0.8 x the reconstructed local sprite radius, along a
-		// STABLE direction: backward against the pinch-weighted heading
-		// and down into the wave body. The raw normal swings wildly
-		// between adjacent vertices at a fold — pulling along it painted
-		// a squiggly sheet, worst on crests diagonal to the mesh grid.
 		float frothR = ${f(LOOP.stretchFrothR)} * min(sk, ${f(FROTH.sizeCap)});
 		vec2 hd = wsum > 0.0001 ? normalize(vec2(hwx, hwz)) : vec2(1.0, 0.0);
 		vec3 pullDir = normalize(vec3(-hd.x * ${f(LOOP.stretchBack)}, -${f(LOOP.stretchDown)}, -hd.y * ${f(LOOP.stretchBack)}));
 		p += pullDir * (frothR * ${f(LOOP.stretchDepth)} * stretchGate);
-	}
-	vPinchWhite = ${LOOP.whiteFromStretch ? 'max(vPinchWhite, stretchGate)' : 'vPinchWhite'} * vis;
-	// SPREAD: extend the white outward from thick loops.
-	//
-	// Widening the J threshold cannot do this, which is why the earlier
-	// attempt saturated and then started painting flat water. The white
-	// was foldTest * vis, and vis gates on the LOCAL froth factor -- so
-	// no matter how wide the J window opened, the paint stopped dead at
-	// the sk = 0.1 contour, and inside that contour it eventually filled
-	// everything, peak or not. Worse, the widening keyed off the same
-	// vertex's sk, and the vertices we want to newly whiten are exactly
-	// the ones whose sk is low. It could never reach past itself.
-	//
-	// So measure distance instead. J is smooth and crosses zero AT the
-	// fold, so to first order the distance from here to the nearest fold
-	// line is J / |grad J| — in metres, from the gradient accumulated
-	// above. Points far from any fold are excluded by construction,
-	// which is what keeps flat water dark.
-
+	}` : ''}
 	// Sample ripples at the DISPLACED position: Gerstner slides vertices
 	// horizontally by meters, and the field is indexed by true world
 	// coordinates. Sampling at the rest position would paint rings onto the
@@ -2400,7 +2281,7 @@ void main() {
 			uSunI: waterUniforms.uSunI,
 			uSunDir: waterUniforms.uSunDir,
 			uSunDiffusion: waterUniforms.uSunDiffusion,
-			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) }
+			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) * PROFILE.renderScale }
 		},
 		vertexShader: `
 uniform float uPointPx;
@@ -2630,7 +2511,7 @@ float frothFrame(vec2 anchor, float baseR, float rank, out vec3 surf, out vec3 N
 			uColor: waterUniforms.uFoamColor,
 			uFogColor: waterUniforms.uFogColor,
 			uFogDensity: waterUniforms.uFogDensity,
-			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) },
+			uPointPx: { value: zoom * Math.min(window.devicePixelRatio || 1, 1.5) * PROFILE.renderScale },
 			uDomAmp: waterUniforms.uDomAmp,
 			uWinCenter,
 			uSkyZenith: waterUniforms.uSkyZenith,

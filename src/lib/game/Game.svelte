@@ -29,7 +29,16 @@
 	// pipeline (underwater raytrace + reflection + foam web) is the frame
 	// budget. 1.5 is 44% less fill than 2, and the soft organic water
 	// hides the difference at our ortho zoom.
-	const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+	// RENDER SCALE: the frame is fragment-bound (~7 ms/Mpx), so cost is
+	// LINEAR in canvas pixels — 0.8 scale is 0.64x the pixels. The canvas
+	// stays CSS-sized; the browser upscales the smaller backing store.
+	const baseDpr = Math.min(window.devicePixelRatio || 1, 1.5);
+	// Live scale: starts at the hand-tuned renderScale; PROFILE.autoScale
+	// lets the 1s perf window nudge it down under load and back up when
+	// headroom returns (renderScale stays the ceiling). Reactive, so the
+	// Canvas re-applies the pixel ratio when it moves.
+	let scaleNow = $state(PROFILE.renderScale);
+	const dpr = $derived(baseDpr * scaleNow);
 
 	// Debug hook: /?tod=0.5 forces a time of day (0 = midnight, 0.5 = noon).
 	const todParam = new URLSearchParams(window.location.search).get('tod');
@@ -120,6 +129,17 @@
 			fps = frames;
 			worstMs = worst;
 			avgMs = frames ? total / frames : 0;
+			// AUTO SCALE (see PROFILE.autoScale): one step per window, with
+			// a 15-24ms dead band as hysteresis. The mean is the signal —
+			// worstMs spikes on one-off hitches (GC, tab focus) that a
+			// resolution drop cannot fix.
+			if (PROFILE.autoScale && frames > 0) {
+				if (avgMs > 24 && scaleNow > 0.5) {
+					scaleNow = Math.max(0.5, +(scaleNow - 0.05).toFixed(2));
+				} else if (avgMs < 15 && scaleNow < PROFILE.renderScale) {
+					scaleNow = Math.min(PROFILE.renderScale, +(scaleNow + 0.05).toFixed(2));
+				}
+			}
 			frames = 0;
 			worst = 0;
 			total = 0;
@@ -140,7 +160,7 @@
 			{fps} FPS · worst {worstMs.toFixed(1)}ms<br />
 			{perf.calls} calls · {(perf.tris / 1000).toFixed(0)}k tris<br />
 			cpu {perf.taskMs.toFixed(1)}ms · {perf.steps} steps<br />
-			{perf.w}×{perf.h} = {((perf.w * perf.h) / 1e6).toFixed(1)}Mpx<br />
+			{perf.w}×{perf.h} = {((perf.w * perf.h) / 1e6).toFixed(1)}Mpx · scale {scaleNow.toFixed(2)}<br />
 			<span class="key">{msPerMpx.toFixed(2)} ms/Mpx</span><br />
 			foam {perf.foam.toFixed(0)} · spray {perf.spray}<br />
 			wc {perf.cpuWhitecaps.toFixed(1)} · spr {perf.cpuSpray.toFixed(1)} · cur {perf.cpuCurrent.toFixed(1)}

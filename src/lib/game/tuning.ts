@@ -39,7 +39,7 @@ export const ENABLE = {
   /** White ribbon on the folding mesh itself. */
   loopWhite: true,
   /** Pull of the pinch zone toward the sprite plane. */
-  loopStretch: true,
+  loopStretch: false,
   /** Froth masses surfacing from under the fold. */
   froth: true,
   /** Vertical spray thrown off each foam mass. */
@@ -78,7 +78,7 @@ export const ENABLE = {
   /** 2D fluid mist field and its overlay. */
   mist: false,
   /** Downslope gusts shaping the mist. */
-  mistGusts: true,
+  mistGusts: false,
   /** Standing Gerstner wave at an object's waterline (OBJWAVE). */
   objectWave: false,
   /** Mesh crest riding the water at an object's nose (BOWCREST). */
@@ -366,67 +366,14 @@ export const PLUME = {
  * fold: the white ribbon, and the pull toward the sprite plane that
  * hides the fold's leading sliver.
  */
+// RETIRED 2026-08-24: the whiteness half of this group (backfaceWhite,
+// rampWhite, pixelRamps, whiteFrom*, whiteJRamp, whiteTilt*, thinSk,
+// debugThin, and the never-consumed gateStart/gateFull). Loop whiteness
+// is now the backface painted as whitewater, statically — the ramp
+// machinery's front-face white was insignificant by eye and its
+// per-vertex Jacobian/vote work cost ~4fps at 4Mpx.
 export const LOOP = {
-  /**
-   * WHITENESS comes from two independent claims, combined with max().
-   * Both are live; weight them to taste.
-   *
-   *  - BACKFACE. The loop IS the mesh's backface: where a crest
-   *    overturns, the rest -> world map inverts and the winding flips
-   *    with it, so gl_FrontFacing reports the inverted sheet per pixel,
-   *    exactly and with no state to flicker. Its limit is that it only
-   *    covers what the camera can actually see of that sheet, which
-   *    from this angle is a sliver along each crest — most of it hides
-   *    behind the lip overhanging it.
-   *
-   *  - FOLD RAMPS. The Jacobian and overhang reconstruction: an
-   *    estimate rather than the thing itself, but it reaches out from
-   *    the seam into the compressed water around it, so it is what
-   *    widens the read past the sliver.
-   */
-  /**
-   * Weight of the backface term, 0-1.
-   *
-   * Zero by default, because gl_FrontFacing is decided PER TRIANGLE: a
-   * tri is entirely front- or back-facing, so white driven by it has
-   * hard polygon edges and no shading smoothing can help. That is
-   * invisible on the ambient crests, where the ribbon is thin and froth
-   * covers it, but obvious on an object's wave.
-   *
-   * Nothing is lost by dropping it. Backface means J < 0, and the ramp
-   * term computes 1 - smoothstep(0, whiteJRamp, J) per PIXEL in
-   * pinchMask — the same fact, feathered, at fragment resolution. Raise
-   * this only to check what the exact geometric test would have said.
-   */
-  backfaceWhite: 0.0,
-  /** Weight of the reconstructed fold-ramp term, 0-1. */
-  rampWhite: 1.0,
-  /**
-   * Refine the fold ramps PER PIXEL (a full wave-tangent loop in the
-   * water fragment) instead of using the vertex-stage ramps alone.
-   * Sharper fold edges below quad scale — at a cost that has nothing to
-   * do with how often it runs: the loop's register footprint taxes
-   * EVERY pixel's occupancy whether or not the mid-ramp gate fires
-   * (measured 8ms of a 31ms frame at 4Mpx with it on, calm sea). Same
-   * lesson as the foam web in Milestone 13. Off by default; flip on to
-   * judge whether the edge gain is worth a quarter of the frame.
-   */
-  pixelRamps: false,
 
-  /**
-   * The ramp term is a max() of three separate claims. Switch any of
-   * them out to see what it was contributing — the term is dropped from
-   * the shader source rather than scaled to zero.
-   *
-   * Do NOT try to disable one by zeroing its ramp instead. smoothstep
-   * is undefined when its edges are equal (it divides by their
-   * difference), so a zeroed ramp does not switch its term off — it
-   * makes it unpredictable, and in practice it returns 1.0 everywhere,
-   * which paints MORE white rather than none.
-   */
-  whiteFromJ: false,
-  whiteFromTilt: true,
-  whiteFromStretch: true,
   // Measured, storm preset, one frozen frame, against backface-only:
   // the J ramp alone adds 7.5% more white, but adds NOTHING on top of
   // the stretch term — at 0.04 against the stretch's 0.3 it is
@@ -434,23 +381,7 @@ export const LOOP = {
   // everywhere and the max() never picks it. Widen whiteJRamp past
   // stretchJRamp before expecting it to show.
 
-  /** Jacobian ramp for whiteness (0 = fully white at collapse). */
-  whiteJRamp: 0.04,
-  /** Overhang (normalised normal y) ramp for the rolling tongue. */
-  whiteTiltStart: 0.02,
-  whiteTiltFull: 0.12,
 
-  /**
-   * THIN LOOPS. A loop formed by a small wave is a hairline: it whitens
-   * a sliver of surface and reads as a scratch rather than a break.
-   * Loops whose froth factor falls below this are held back — from the
-   * RAMP term only; the backface term is exact and is never gated.
-   * While `debugThin` is on they render RED instead of being dropped.
-   * Set to 0 to disable the gate entirely — that one IS handled as a
-   * special case rather than as a degenerate smoothstep.
-   */
-  thinSk: 0.21,
-  debugThin: false,
 
   /** Stretch gate: how far ahead of collapse the pull begins. */
   stretchJRamp: 0.3,
@@ -462,9 +393,6 @@ export const LOOP = {
   stretchBack: 0.8,
   stretchDown: 0.65,
 
-  /** Near-binary gate: pinches below the sprite criterion stay dark. */
-  gateStart: 0.1,
-  gateFull: 0.16,
 }
 
 /**
@@ -1641,6 +1569,27 @@ export const PROFILE = {
    * edge AA carry a lot of the apparent resolution.
    */
   causticMapRes: 3072,
+  /**
+   * RENDER SCALE, 0.5-1: multiplies the canvas pixel ratio (capped 1.5).
+   * The frame is fragment-bound at ~7 ms/Mpx, so cost is linear in this
+   * SQUARED — 0.8 is 0.64x the pixels, roughly 37 -> 50fps at 4Mpx. The
+   * browser upscales the smaller backing store to the same CSS size; on
+   * a 2x display 0.75 still leaves ~1.1x density. The one dial that
+   * trades resolution for frames across the WHOLE frame, not just the
+   * caustics (causticMapRes is the caustic-sharpness half of the trade).
+   * Point sprites (droplets) scale with it, so their world size holds.
+   */
+  renderScale: 0.85,
+  /**
+   * AUTO-ADJUST renderScale when the frame runs slow: each 1s window,
+   * mean frame > 24ms steps the LIVE scale down 0.05 (floor 0.5); mean
+   * < 15ms steps it back up toward renderScale (which stays the ceiling
+   * and the hand-tuned value). The 15-24ms dead band plus one step per
+   * second is the hysteresis that keeps it from oscillating. Off by
+   * default: an auto-degrading game can mask real regressions while
+   * tuning, so this is for PLAYING, not for measuring.
+   */
+  autoScale: false,
   skipFoamSim: false,
   /**
    * Stop DRAWING the sprite clouds while leaving them simulating.

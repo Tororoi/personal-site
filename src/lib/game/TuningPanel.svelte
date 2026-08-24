@@ -247,6 +247,7 @@
 		'CAUSTICS.ridgeGain': { min: 0, max: 2.5, step: 0.02 },
 		'CAUSTICS.castShadow': { min: 0, max: 1, step: 0.05 },
 		'PROFILE.causticMapRes': { min: 1024, max: 4096, step: 512 },
+		'PROFILE.renderScale': { min: 0.5, max: 1, step: 0.05 },
 		'UNDERWATER.redRangeM': { min: 0.5, max: 40, step: 0.5 },
 		'UNDERWATER.greenRangeM': { min: 2, max: 150, step: 1 },
 		'UNDERWATER.blueRangeM': { min: 5, max: 400, step: 5 },
@@ -432,10 +433,7 @@
 			['fade', ['bodyBias', 'coherence', 'coherenceScale', 'tipFade', 'edgeFade', 'alpha', 'alphaCull']]
 		],
 		LOOP: [
-			['whiteness', ['backfaceWhite', 'rampWhite', 'pixelRamps', 'whiteFromJ', 'whiteFromTilt', 'whiteFromStretch', 'whiteJRamp', 'whiteTiltStart', 'whiteTiltFull']],
-			['debug', ['thinSk', 'debugThin']],
-			['stretch', ['stretchJRamp', 'stretchDepth', 'stretchFrothR', 'stretchBack', 'stretchDown']],
-			['gate', ['gateStart', 'gateFull']]
+			['stretch', ['stretchJRamp', 'stretchDepth', 'stretchFrothR', 'stretchBack', 'stretchDown']]
 		],
 		BOWCREST: [
 			['geometry', ['arc', 'standoffFrac', 'thickPerWidth', 'lean', 'minRing']],
@@ -461,7 +459,7 @@
 			['shading', ['vertexSlope', 'skipRefraction', 'skipReflection', 'skipSpecular', 'skipFoam', 'skipRipple', 'skipLoopWhite']],
 			['sims', ['skipRippleSim', 'skipCausticSim', 'causticMapRes', 'skipFoamSim']],
 			['hide', ['hideWater', 'hideObjects', 'hideFroth', 'hideSpray']],
-			['canvas', ['noAntialias', 'opaqueCanvas']],
+			['canvas', ['renderScale', 'autoScale', 'noAntialias', 'opaqueCanvas']],
 			['camera', ['perspectiveCamera', 'perspectiveDistance']],
 			['misc', ['skipLandingCheck', 'buoyLog']]
 		],
