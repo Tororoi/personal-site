@@ -825,23 +825,76 @@ export const WEATHER = {
    * diffusion (caustic wash, specular blend, foam sky/sun balance). */
   overcast: 0.4,
   /**
-   * 0 clear .. 1 pea soup. Shortens all three absorption ranges toward
-   * ~12% and adds particulate (Mie) backscatter — the water clouds and
-   * loses its colour depth. The clarity PRESETS will set this alongside
-   * per-channel endpoints; until then it is the one murk dial.
+   * 0 clear .. 1 pea soup. A VIEW-PATH FOG: grey particulate extinction
+   * along the refracted eye ray plus an ambient-lit milky in-scatter,
+   * so near things stay sharp while distance washes out and the seabed
+   * vanishes first (at 1, visibility is ~a metre). Absorption-range
+   * shortening was tried first and only made the water bluer —
+   * absorption picks colours, scattering makes murk. The clarity
+   * presets will set this alongside their palettes.
    */
   turbidity: 0,
-  /** Sky preset: 0 sunny, 1 partly cloudy, 2 overcast, 3 foggy,
-   * 4 rainy, 5 stormy. Placeholder until the tables land. */
-  skyPreset: 0,
-  /** Water body: 0 coastal, 1 tropical, 2 open water. Placeholder. */
-  waterBody: 0,
-  /** Water clarity: 0 clear shallow, 1 clear deep, 2 medium clear,
-   * 3 murky, 4 red algae bloom, 5 bioluminescent algae bloom.
-   * Placeholder. */
-  waterClarity: 0,
-  /** Seconds a preset change cross-fades over, once wired. */
+  /**
+   * Per-metre exponent on the turbidity fog's density with DEPTH:
+   * particulate hangs thicker down the column (stirred sediment settles
+   * low), so the veil thickens toward the bottom instead of sitting
+   * uniformly in the water. 0 = uniform; 0.1 means density doubles
+   * every ~7m. The fog integrates this analytically along the view ray
+   * — no marching, one exp either way.
+   */
+  turbDepthExp: 0.05,
+  /** Seconds a preset change cross-fades over, once the transition
+   * engine lands; the preset buttons currently apply instantly. */
   transitionS: 5,
+}
+
+/**
+ * WEATHER PRESET BUTTONS: each is a fast-set of knob values ('GROUP.knob'
+ * keys), applied through the panel's normal setKnob path — live knobs
+ * land instantly and persist, staged ones queue for Apply. A preset with
+ * an empty set renders as a disabled button: the roadmap, visible.
+ * Filled in one at a time as each look is tuned by eye.
+ */
+export type WeatherPreset = { name: string; set: Record<string, number | boolean> }
+export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
+  sky: [
+    { name: 'sunny', set: {} },
+    { name: 'partly cloudy', set: {} },
+    { name: 'overcast', set: {} },
+    { name: 'foggy', set: {} },
+    { name: 'rainy', set: {} },
+    { name: 'stormy', set: {} },
+  ],
+  'water body': [
+    { name: 'coastal', set: {} },
+    { name: 'tropical', set: {} },
+    { name: 'open water', set: {} },
+  ],
+  'water clarity': [
+    {
+      // The baseline: exactly the tuned defaults of everything murky
+      // moves, so this button is murky's undo (and the state the sea
+      // loads in).
+      name: 'clear shallow',
+      set: {
+        'WEATHER.turbidity': 0,
+        'WEATHER.turbDepthExp': 0.05,
+        'UNDERWATER.blueRangeM': 160,
+      },
+    },
+    { name: 'clear deep', set: {} },
+    { name: 'medium clear', set: {} },
+    {
+      name: 'murky',
+      set: {
+        'WEATHER.turbidity': 0.3,
+        'WEATHER.turbDepthExp': 0.05,
+        'UNDERWATER.blueRangeM': 50,
+      },
+    },
+    { name: 'red algae bloom', set: {} },
+    { name: 'biolum algae bloom', set: {} },
+  ],
 }
 
 export const WIND = {
@@ -2518,9 +2571,9 @@ export const LIVE_GROUPS = new Set([
   'SPECULAR',
   'SEA',
   // overcast reaches the scene through the sea-rebuild key, turbidity
-  // through the per-frame sigma sync. The PRESET RADIOS and transitionS
-  // are declared placeholders: they select and persist but apply nothing
-  // until the preset tables land (next phase) — flagged, not silent.
+  // through the per-frame fog sync. transitionS is a declared
+  // placeholder until the cross-fade engine lands (presets themselves
+  // are BUTTONS, not knobs — see WEATHER_PRESETS).
   'WEATHER',
   'BOAT',
   'UNDERWATER',

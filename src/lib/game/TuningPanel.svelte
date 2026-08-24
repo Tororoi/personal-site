@@ -21,7 +21,7 @@
 	has a number box that accepts anything.
 -->
 <script lang="ts">
-	import { ENABLE, LIVE_GROUPS, TUNING_DEFAULTS, TUNING_GROUPS } from './tuning';
+	import { ENABLE, LIVE_GROUPS, TUNING_DEFAULTS, TUNING_GROUPS, WEATHER_PRESETS, type WeatherPreset } from './tuning';
 	import { computeEnv, ENV, ENV_DEFAULTS } from './env';
 	import { seaDrive, seaMetrics, SEA_REFERENCE } from './waves';
 	import { game, perf as perfTick } from './state.svelte';
@@ -170,6 +170,15 @@
 	// value, so this stages a change only when there is really one to make.
 	const revert = (g: string, k: string) => setKnob(g, k, TUNING_DEFAULTS[g][k]);
 
+	/** Fire a weather preset: fast-set its values through setKnob, so
+	 *  live knobs land instantly and staged ones queue for Apply. */
+	function applyPreset(p: WeatherPreset) {
+		for (const [key, v] of Object.entries(p.set)) {
+			const dot = key.indexOf('.');
+			setKnob(key.slice(0, dot), key.slice(dot + 1), v);
+		}
+	}
+
 	/**
 	 * Slider bounds inferred from the default. A guess, deliberately: with
 	 * 260 knobs the alternative is a metadata table that goes stale. The
@@ -192,24 +201,6 @@
 	 * Explicit bounds for tuning knobs whose sensible range the heuristic
 	 * cannot guess from the default. Keyed "GROUP.knob".
 	 */
-	/**
-	 * Single-select RADIO knobs: numeric under the hood (the index), a
-	 * one-only radio row in the UI. WEATHER's preset selectors —
-	 * placeholders until the preset tables land.
-	 */
-	const RADIO_OPTIONS: Record<string, string[]> = {
-		'WEATHER.skyPreset': ['sunny', 'partly cloudy', 'overcast', 'foggy', 'rainy', 'stormy'],
-		'WEATHER.waterBody': ['coastal', 'tropical', 'open water'],
-		'WEATHER.waterClarity': [
-			'clear shallow',
-			'clear deep',
-			'medium clear',
-			'murky',
-			'red algae bloom',
-			'biolum algae bloom'
-		]
-	};
-
 	const TUNING_RANGE: Record<string, { min: number; max: number; step: number }> = {
 		// Defaults to -1 (meaning "leave the preset alone"), so the heuristic
 		// would infer -1..1 — useless for a value spanning the presets' 0.55
@@ -296,6 +287,7 @@
 		'SEA.waves': { min: 0, max: 2, step: 0.01 },
 		'WEATHER.overcast': { min: 0, max: 1, step: 0.01 },
 		'WEATHER.turbidity': { min: 0, max: 1, step: 0.01 },
+		'WEATHER.turbDepthExp': { min: 0, max: 0.4, step: 0.005 },
 		'WEATHER.transitionS': { min: 0, max: 60, step: 0.5 },
 		'WIND.windSpeed': { min: 0, max: 45, step: 0.5 },
 		'WIND.windCompassDeg': { min: 0, max: 360, step: 1 },
@@ -420,8 +412,7 @@
 			['altitude', ['altHigh', 'altLow', 'fadeAltDeg']]
 		],
 		WEATHER: [
-			['presets', ['skyPreset', 'waterBody', 'waterClarity', 'transitionS']],
-			['dials', ['overcast', 'turbidity']]
+			['dials', ['overcast', 'turbidity', 'turbDepthExp', 'transitionS']]
 		],
 		WIND: [
 			['wind', ['windSpeed', 'windCompassDeg', 'baseWander', 'baseBreath']],
@@ -745,31 +736,33 @@
 							</button>
 						</h3>
 
+						{#if g === 'WEATHER' && (search.trim() || open.has(g))}
+							{#each Object.entries(WEATHER_PRESETS) as [fam, list] (fam)}
+								<div class="shead">{fam}</div>
+								<div class="presets">
+									{#each list as p (p.name)}
+										<button
+											class="preset"
+											disabled={!Object.keys(p.set).length}
+											title={Object.keys(p.set).length
+												? Object.entries(p.set)
+														.map(([kk, vv]) => `${kk} = ${vv}`)
+														.join('\n')
+												: 'not tuned yet'}
+											onclick={() => applyPreset(p)}
+										>
+											{p.name}
+										</button>
+									{/each}
+								</div>
+							{/each}
+						{/if}
 						{#each shown as k (k)}
 							{#if k.startsWith(SECTION_MARK)}
 								<div class="shead">{k.slice(1)}</div>
 							{:else}
 							{@const v = valueOf(g, k)}
-							{#if RADIO_OPTIONS[`${g}.${k}`]}
-								<div class="knob" class:staged={isStaged(g, k)}>
-									<div class="head">
-										<span class="name" class:mod={isModified(g, k)}>{k}</span>
-									</div>
-									<div class="radios">
-										{#each RADIO_OPTIONS[`${g}.${k}`] as label, i (label)}
-											<label class="radio">
-												<input
-													type="radio"
-													name={`${g}.${k}`}
-													checked={v === i}
-													onchange={() => setKnob(g, k, i)}
-												/>
-												<span>{label}</span>
-											</label>
-										{/each}
-									</div>
-								</div>
-							{:else if typeof v === 'boolean'}
+							{#if typeof v === 'boolean'}
 								<label class="bool" class:staged={isStaged(g, k)}>
 									<input
 										type="checkbox"
@@ -1024,19 +1017,25 @@
 	}
 
 	.knob,
-	.radios {
+	.presets {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 2px 10px;
-		margin: 2px 0 4px;
-	}
-	.radio {
-		display: flex;
-		align-items: center;
 		gap: 4px;
+		margin: 2px 0 6px;
+	}
+	.preset {
+		background: #263340;
+		color: #cfd8e0;
+		border: none;
+		border-radius: 3px;
+		padding: 3px 8px;
+		font: inherit;
 		font-size: 11px;
-		color: #9fb0c0;
 		cursor: pointer;
+	}
+	.preset:disabled {
+		color: #5a6a78;
+		cursor: default;
 	}
 	.bool {
 		display: block;

@@ -344,6 +344,8 @@
 		uUwAmbient: { value: UNDERWATER.ambient },
 		uUwDirect: { value: UNDERWATER.direct },
 		uUwShadowK: { value: CAUSTICS.castShadow },
+		uUwTurb: { value: WEATHER.turbidity },
+		uUwTurbK: { value: WEATHER.turbDepthExp },
 		uUwRidge: { value: CAUSTICS.ridgeGain },
 		uUwSigma: { value: new THREE.Vector3() },
 		uUwScatter: { value: new THREE.Vector3() },
@@ -665,6 +667,9 @@ uniform float uUwDirect;
 // caustics.ts — shadows live in the map's G/B/A channels, made of the
 // same rays as the pattern, exactly the reference's system).
 uniform float uUwShadowK;
+// WEATHER.turbidity / turbDepthExp — the water fragment's view-path fog.
+uniform float uUwTurb;
+uniform float uUwTurbK;
 // HYBRID leg: the map's channels cannot carry underwater-object ->
 // object shadows (a channel per caster doesn't scale), so those come
 // receiver-side: analytic ahead-only tests along the refracted sun
@@ -1841,6 +1846,36 @@ void main() {
 	// and painting the sea a colour it had no physical reason to be.
 	vec3 through = uwTransmit(waterPath);
 	transmitted = transmitted * through + uwVolume() * (1.0 - through);
+	// TURBIDITY (WEATHER.turbidity) is a VIEW-PATH FOG: suspended
+	// particulate is grey, so it attenuates every channel equally and
+	// scatters AMBIENT light back in as a milky veil — near things stay
+	// clear, far things wash out, the seabed disappears first. The
+	// first attempt shortened the absorption ranges instead, which only
+	// re-coloured the water bluer: absorption picks colours, SCATTERING
+	// makes murk. The veil is lit by the ambient irradiance, so it dims
+	// with dusk instead of glowing in the dark.
+	{
+		float turbDens = 2.5 * uUwTurb * uUwTurb;
+		// Density grows exp(uUwTurbK x depth) down the column. Along a
+		// straight ray depth is linear in distance, so the optical depth
+		// has a CLOSED FORM: dens * e^(kD0) * (e^(k m L) - 1) / (k m),
+		// with D0 the entry depth and m the ray's sink rate. The k->0
+		// limit is the uniform fog it replaces; the mix below spans the
+		// removable singularity instead of dividing by ~0.
+		float kD = uUwTurbK;
+		float mSink = max(-refr.y, 0.001);
+		float D0 = max(-pEntry.y, 0.0);
+		float km = kD * mSink;
+		float od;
+		if (km > 0.01) {
+			od = turbDens * exp(kD * D0) * (exp(km * waterPath) - 1.0) / km;
+		} else {
+			od = turbDens * waterPath * exp(kD * D0);
+		}
+		float turbThrough = exp(-od);
+		vec3 turbCol = uUwAmbIrr * vec3(0.62, 0.68, 0.62);
+		transmitted = transmitted * turbThrough + turbCol * (1.0 - turbThrough);
+	}
 
 	// Wallace-style reflection: reflect the eye ray and sample the SKY in
 	// that direction — the preset's vertical gradient with the sun's glare
@@ -4805,22 +4840,17 @@ void main() {
 				// Fade RANGES in metres -> per-metre extinction. "Fades" is
 				// 90% of the light gone, so sigma = ln(10) / range.
 				const LN10 = 2.302585;
-				// TURBIDITY (WEATHER.turbidity): suspended particulate eats
-				// every channel — ranges shorten toward ~12% of clear.
-				const turbK = 1 - 0.88 * WEATHER.turbidity;
 				uwUniforms.uUwSigma.value.set(
-					LN10 / Math.max(UNDERWATER.redRangeM * turbK, 0.01),
-					LN10 / Math.max(UNDERWATER.greenRangeM * turbK, 0.01),
-					LN10 / Math.max(UNDERWATER.blueRangeM * turbK, 0.01)
+					LN10 / Math.max(UNDERWATER.redRangeM, 0.01),
+					LN10 / Math.max(UNDERWATER.greenRangeM, 0.01),
+					LN10 / Math.max(UNDERWATER.blueRangeM, 0.01)
 				);
 				// Backscatter = Rayleigh (molecular, lambda^-4.3 so blue is
 				// scattered 5.9x more than red) + Mie (particulate, equal
 				// across channels). The balance between them is the
 				// open-ocean-blue to coastal-teal axis.
 				const ray = UNDERWATER.rayleighScatter;
-				// Particulate scatter rises with turbidity: murk is BRIGHT
-				// haze, not just darkness.
-				const mie = UNDERWATER.mieScatter + 0.004 * WEATHER.turbidity;
+				const mie = UNDERWATER.mieScatter;
 				uwUniforms.uUwScatter.value.set(
 					ray * 0.3999 + mie,
 					ray * 1.0 + mie,
@@ -4842,6 +4872,8 @@ void main() {
 				uwUniforms.uUwCausticFocus.value = CAUSTICS.formM;
 				uwUniforms.uUwCausticBlur.value = CAUSTICS.blurPerM;
 				uwUniforms.uUwShadowK.value = Math.min(Math.max(CAUSTICS.castShadow, 0), 1);
+				uwUniforms.uUwTurb.value = WEATHER.turbidity;
+				uwUniforms.uUwTurbK.value = WEATHER.turbDepthExp;
 				uwUniforms.uCausticPyr1.value = causticMap.pyr1Texture;
 				uwUniforms.uCausticShadow.value = causticMap.shadowTexture;
 				uwUniforms.uCausticShadowL1.value = causticMap.shadowL1Texture;
