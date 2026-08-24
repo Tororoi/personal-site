@@ -11,18 +11,22 @@
 
 	let { active = true }: { active?: boolean } = $props();
 
-	// Left undefined unless a switch is on, so the normal path stays
-	// exactly Threlte's own default construction.
-	const createRenderer =
-		PROFILE.noAntialias || PROFILE.opaqueCanvas
-			? (canvas: HTMLCanvasElement) =>
-					new WebGLRenderer({
-						canvas,
-						powerPreference: 'high-performance',
-						antialias: !PROFILE.noAntialias,
-						alpha: !PROFILE.opaqueCanvas
-					})
-			: undefined;
+	// ALWAYS construct the renderer ourselves, for one attribute that
+	// must never be defaulted: powerPreference 'high-performance'. On
+	// dual-GPU Macs the browser hands a default-preference WebGL context
+	// to the INTEGRATED GPU — this game spent its first week and a half
+	// rendering on an Intel UHD 630 while a Radeon sat idle (found
+	// 2026-08-24 via the WebGPU spike's 10x "compiler win" that was
+	// actually two different chips). The iGPU's tiny register file is
+	// also the likely root of every occupancy-cliff mystery in the
+	// process log.
+	const createRenderer = (canvas: HTMLCanvasElement) =>
+		new WebGLRenderer({
+			canvas,
+			powerPreference: 'high-performance',
+			antialias: !PROFILE.noAntialias,
+			alpha: !PROFILE.opaqueCanvas
+		});
 
 	// Cap device pixel ratio at 1.5 EVERYWHERE: desktop retina is DPR 2,
 	// so the old desktop cap of 2 was a no-op right where the fragment
@@ -54,6 +58,10 @@
 	const showFps = import.meta.env.DEV || ENABLE.tuningUI;
 
 	let fps = $state(0);
+	// Which chip this context actually landed on — on a dual-GPU Mac the
+	// browser's choice is otherwise invisible, and we spent a day
+	// constructing a wrong theory about it (2026-08-24).
+	let gpuName = $state('');
 	// Worst frame in the last second. An average hides the stalls that
 	// actually read as a struggling framerate; a single 40ms hitch is
 	// obvious to the eye and invisible in a 58fps mean.
@@ -68,6 +76,16 @@
 	);
 	onMount(() => {
 		if (!showFps) return;
+		{
+			const c = document.querySelector('.stage canvas');
+			const g = c ? (c as HTMLCanvasElement).getContext('webgl2') : null;
+			if (g) {
+				const dbg = g.getExtension('WEBGL_debug_renderer_info');
+				gpuName = dbg
+					? String(g.getParameter(dbg.UNMASKED_RENDERER_WEBGL))
+					: String(g.getParameter(g.RENDERER));
+			}
+		}
 		if (ENABLE.perfLog || PROFILE.buoyLog) startPerfLog(new Date().toISOString());
 		let frames = 0;
 		let worst = 0;
@@ -162,6 +180,7 @@
 			cpu {perf.taskMs.toFixed(1)}ms · {perf.steps} steps<br />
 			{perf.w}×{perf.h} = {((perf.w * perf.h) / 1e6).toFixed(1)}Mpx · scale {scaleNow.toFixed(2)}<br />
 			<span class="key">{msPerMpx.toFixed(2)} ms/Mpx</span><br />
+			<span class="dim gpu">{gpuName}</span><br />
 			foam {perf.foam.toFixed(0)} · spray {perf.spray}<br />
 			wc {perf.cpuWhitecaps.toFixed(1)} · spr {perf.cpuSpray.toFixed(1)} · cur {perf.cpuCurrent.toFixed(1)}
 			· rest {perf.cpuRest.toFixed(1)}<br />

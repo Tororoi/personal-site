@@ -373,15 +373,12 @@ export const PLUME = {
 // machinery's front-face white was insignificant by eye and its
 // per-vertex Jacobian/vote work cost ~4fps at 4Mpx.
 export const LOOP = {
-
   // Measured, storm preset, one frozen frame, against backface-only:
   // the J ramp alone adds 7.5% more white, but adds NOTHING on top of
   // the stretch term — at 0.04 against the stretch's 0.3 it is
   // subsumed, since 1-smoothstep(0, 0.3, J) is the larger of the two
   // everywhere and the max() never picks it. Widen whiteJRamp past
   // stretchJRamp before expecting it to show.
-
-
 
   /** Stretch gate: how far ahead of collapse the pull begins. */
   stretchJRamp: 0.3,
@@ -392,7 +389,6 @@ export const LOOP = {
   /** Pull direction: horizontal weight against the heading, and down. */
   stretchBack: 0.8,
   stretchDown: 0.65,
-
 }
 
 /**
@@ -1801,7 +1797,7 @@ export const UNDERWATER = {
    * doesn't.
    */
   seabed: true,
-  seabedDepthM: 6,
+  seabedDepthM: 10,
   /**
    * FADE RANGE, in METRES: the depth at which each channel is 90% gone
    * (10% of the light left). Beer-Lambert, so the shader converts with
@@ -1981,9 +1977,9 @@ export const UNDERWATER = {
   /** Whale centre height, metres (negative = below the surface). Keep
    * it above -(seabedDepthM - 1.6) or it spawns buried in the floor —
    * hidden, and correctly casting nothing. */
-  whaleY: -4,
-  whaleX: -8,
-  whaleZ: 2,
+  whaleY: -9,
+  whaleX: 17,
+  whaleZ: 5,
   /**
    * Flat brightness multiplier on submerged shading — the honest fudge
    * for the gap this model has not closed analytically.
