@@ -50,6 +50,9 @@ export const perf = $state({
 	gpuCaustic: 0,
 	gpuFoam: 0,
 	gpuMain: 0,
+	// Which clock the gpu rows use: 'q' = real GPU timer queries,
+	// 'sync' = the old finish()+wall-clock fallback (lies on ANGLE/Metal).
+	gpuClock: '',
 	/** Foam field capacity estimate — foam's cost tracks its coverage. */
 	foam: 0,
 	/** Live spray droplets this frame (alpha-blended, so overdraw). */

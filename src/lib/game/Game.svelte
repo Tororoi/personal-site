@@ -191,7 +191,7 @@
 				<span class="warn">profiling — total inflated</span><br />
 				ripple {perf.gpuRipple.toFixed(1)} · fft {perf.gpuFft.toFixed(1)}<br />
 				caustic {perf.gpuCaustic.toFixed(1)} · foam {perf.gpuFoam.toFixed(1)}<br />
-				main {perf.gpuMain.toFixed(1)}
+				main {perf.gpuMain.toFixed(1)} · ⏱{perf.gpuClock}
 			{/if}
 		</div>
 	{/if}

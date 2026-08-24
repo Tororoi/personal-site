@@ -3470,24 +3470,76 @@ void main() {
 	const frozen = freezeParam !== null;
 	if (frozen) waveTime = Number(freezeParam) || 12;
 
-	// GPU pass profiler (ENABLE.gpuProfile). renderer.info cannot see the
-	// offscreen sims — three resets it at the head of every render() — so
-	// the only way to price them from inside the page is to serialise with
-	// finish() and time the wall clock. That distorts the total, which is
-	// why it is behind a flag rather than always on.
-	const profGl = ENABLE.gpuProfile ? renderer.getContext() : null;
+	// GPU pass profiler (ENABLE.gpuProfile), on REAL GPU TIMER QUERIES
+	// (EXT_disjoint_timer_query_webgl2) where the browser exposes them —
+	// which this platform DOES, discovered 2026-08-24 after a whole
+	// campaign of ablation ladders built to work around their assumed
+	// absence. The old gl.finish() + wall-clock path is provably a liar
+	// here (it reported 0.3ms for a caustic generator that timer queries
+	// and ablation both priced at ~14ms: on ANGLE/Metal, finish() returns
+	// without draining the pipeline). Queries are async: each frame polls
+	// the completed ones and EMAs them into perf, so rows lag a few
+	// frames but never distort the frame they measure. finish() remains
+	// only as the fallback where the extension is missing.
+	const profGl = ENABLE.gpuProfile
+		? (renderer.getContext() as WebGL2RenderingContext)
+		: null;
+	const profExt = profGl ? profGl.getExtension('EXT_disjoint_timer_query_webgl2') : null;
+	perf.gpuClock = profGl ? (profExt ? 'q' : 'sync') : '';
+	type LapKey = 'gpuRipple' | 'gpuFft' | 'gpuCaustic' | 'gpuFoam' | 'gpuMain';
+	const qFree: WebGLQuery[] = [];
+	const qPending: { q: WebGLQuery; key: LapKey }[] = [];
+	let qOpen = false;
 	let profT = 0;
 	function profReset() {
 		if (!profGl) return;
-		profGl.finish();
-		profT = performance.now();
+		if (!profExt) {
+			profGl.finish();
+			profT = performance.now();
+			return;
+		}
+		// Harvest completed queries first (oldest-first; stop at the
+		// first unfinished one to keep per-key ordering).
+		const disjoint = profGl.getParameter(profExt.GPU_DISJOINT_EXT);
+		while (qPending.length) {
+			const head = qPending[0];
+			if (!profGl.getQueryParameter(head.q, profGl.QUERY_RESULT_AVAILABLE)) break;
+			qPending.shift();
+			if (!disjoint) {
+				const ms = Number(profGl.getQueryParameter(head.q, profGl.QUERY_RESULT)) / 1e6;
+				perf[head.key] = perf[head.key] * 0.8 + ms * 0.2;
+			}
+			qFree.push(head.q);
+		}
+		// Begin the frame's chain. (Nothing runs between gpuMain's end
+		// and here, so inter-frame time is never attributed.)
+		if (!qOpen) {
+			const q = qFree.pop() ?? profGl.createQuery()!;
+			profGl.beginQuery(profExt.TIME_ELAPSED_EXT, q);
+			qPending.push({ q, key: 'gpuRipple' });
+			qOpen = true;
+		}
 	}
-	function lap(key: 'gpuRipple' | 'gpuFft' | 'gpuCaustic' | 'gpuFoam' | 'gpuMain') {
+	function lap(key: LapKey) {
 		if (!profGl) return;
-		profGl.finish();
-		const now = performance.now();
-		perf[key] = now - profT;
-		profT = now;
+		if (!profExt) {
+			profGl.finish();
+			const now = performance.now();
+			perf[key] = now - profT;
+			profT = now;
+			return;
+		}
+		if (!qOpen) return;
+		// The open query becomes this segment's measurement: label it.
+		qPending[qPending.length - 1].key = key;
+		profGl.endQuery(profExt.TIME_ELAPSED_EXT);
+		qOpen = false;
+		if (key !== 'gpuMain') {
+			const q = qFree.pop() ?? profGl.createQuery()!;
+			profGl.beginQuery(profExt.TIME_ELAPSED_EXT, q);
+			qPending.push({ q, key });
+			qOpen = true;
+		}
 	}
 	// The MAIN scene render (where the water fragment — refraction,
 	// shadeUnderwater, the subpixel caustic taps — actually runs) happens
