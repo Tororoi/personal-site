@@ -94,6 +94,14 @@ export const ENABLE = {
    * the term leaves the shader and the transform stops running.
    */
   fftDetail: true,
+  /**
+   * WIND GUST MASK (the first Tier A shading mask, water-features plan
+   * 1a): travelling cat's-paw patches where a second FFT cascade of
+   * tight, steep ripple (WIND.gust*) fades in over the normal detail.
+   * Deliberately VISUAL-ONLY: foam drift, spray and the boat feel the
+   * steady wind — revisit only if the mismatch ever reads wrong.
+   */
+  gustMask: true,
   /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
    * study replaced them with loop-driven emission. */
   whitecapEvents: false,
@@ -820,6 +828,56 @@ export const WIND = {
   /** Gust strength as a multiple of base wind speed. */
   gustSpeedMin: 1.4,
   gustSpeedVar: 1.6,
+  /**
+   * GUST MASK (ENABLE.gustMask): where the mask is open, a dedicated
+   * FFT cascade of tight ripple (the look Tom found by pinning
+   * detailMin/detailMax low and detailSlope high) fades in on top of
+   * the normal detail. The mask is 2-octave value noise in the WIND
+   * FRAME — gustLengthM/gustWidthM set a spot's scale along/across the
+   * wind (near-equal = round cow patches), gustDensity how much of the
+   * sea hosts spots at all (a coarse population noise gates whole
+   * regions, so density moves without touching spot size). gustDirJitter rotates the frame per REGION (coarse
+   * noise, ~3 spacings), so neighbouring gusts head a little
+   * differently instead of marching in formation. gustCover sets how
+   * much sea inside a cell is gusty (threshold: mapped so 0 is almost
+   * none and 1 is most of it — patches, never a connected sheet),
+   * gustSharp the edge feather. Patches ride the integrated wind at
+   * wind speed (a separate propagation dial measured indistinguishable
+   * from wind speed and was retired).
+   */
+  gustLambdaMin: 0.1,
+  gustLambdaMax: 0.5,
+  gustSlopeAmp: 0.14,
+  gustLengthM: 15,
+  gustWidthM: 30,
+  gustDensity: 0.7,
+  /** Directional sharpening of the gust cascade's spectrum: kdotw^2 is
+   * raised to this power, so higher = ripple running visibly WITH the
+   * wind inside a gust. Live (rebuild-throttled); the spectrum also
+   * re-aligns itself when the wandering wind turns more than ~10 deg. */
+  gustDirPow: 5,
+  // (gustDirJitter retired 2026-08-24: a spatially varying frame
+  // rotation swirls the noise about the origin — the swirling-lines
+  // bug — and round spots make per-patch direction meaningless.)
+  /**
+   * Fresnel grazing strength INSIDE gusts (the sea-wide dial is
+   * UNDERWATER.fresnelGrazing): a roughened patch scatters the sky's
+   * mirror, which is why real cat's-paws read dark on a bright sea.
+   * 1 = neutral (no difference), toward 0 = matte dark gusts, above 1 =
+   * glassier than the surrounding water.
+   */
+  gustFresnelGrazing: 1.25,
+  /**
+   * Base surface reflectivity INSIDE gusts (sea-wide dial:
+   * UNDERWATER.surfaceReflect, default 0.02 — this starts equal, so the
+   * knob begins neutral). Lowering it darkens the whole spot, not just
+   * the grazing rim; together with gustFresnelGrazing it gives the full
+   * dark-matte-patch to glassy-patch range.
+   */
+  gustSurfaceReflect: 0.04,
+  gustCover: 1.0,
+  gustSharp: 0.2,
+  gustGain: 1.0,
 }
 
 /**
@@ -1718,7 +1776,7 @@ export const SEA = {
   /** 0 clear blue .. 1 heavy overcast. */
   weather: 0.4,
   /** m/s. Spray advection, gusts, and the FFT detail spectrum's shape. */
-  windSpeed: 9,
+  windSpeed: 15,
   /** Compass bearing the wind blows toward. 68 = the presets' heading. */
   windCompassDeg: 68,
   /** Compass bearing the surface current sets toward. */
@@ -1912,7 +1970,7 @@ export const UNDERWATER = {
    * water. Grazing angles still mirror the sky regardless: the term
    * rises to 1 as the surface turns edge-on.
    */
-  surfaceReflect: 0.02,
+  surfaceReflect: 0.06,
   /**
    * Strength of the GRAZING rise in the surface reflection — the part of
    * Fresnel that climbs toward a full mirror as a wave face tilts

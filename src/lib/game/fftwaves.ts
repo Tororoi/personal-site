@@ -126,7 +126,7 @@ function butterflyData() {
  * wavelengths between its own Nyquist and the next cascade up, or the
  * two would both contain the same mid frequencies and double them.
  */
-function spectrumData(patch: number, minL: number, maxL: number, seed: number) {
+function spectrumData(patch: number, minL: number, maxL: number, seed: number, dirPow = 1) {
   const rand = mulberry32(seed)
   const data = new Float32Array(N * N * 4)
   // Accumulated mean-square slope of the field this spectrum will produce,
@@ -155,11 +155,13 @@ function spectrumData(patch: number, minL: number, maxL: number, seed: number) {
       }
       const kdotw = (kx * wx + kz * wz) / klen
       // Phillips, with the short-wave suppression term that keeps the
-      // very smallest components from dominating the slope.
+      // very smallest components from dominating the slope. dirPow > 1
+      // sharpens the directional factor (kdotw^2 -> kdotw^(2*dirPow)):
+      // the GUST cascade uses it so the ripple inside a gust visibly
+      // runs WITH the wind instead of scattering.
       let ph =
         (Math.exp(-1 / (klen * bigL * (klen * bigL))) / Math.pow(klen, 4)) *
-        kdotw *
-        kdotw
+        Math.pow(kdotw * kdotw, dirPow)
       ph *= Math.exp(-klen * klen * 0.004)
       const amp = Math.sqrt(Math.max(ph, 0) / 2)
       const [g1, g2] = gauss(rand)
@@ -300,7 +302,7 @@ export class FftWaveField {
   /** Per-cascade output scale, chosen so the summed field hits `slope`. */
   private gains: number[]
 
-  constructor(minL: number, maxL: number, slope: number) {
+  constructor(minL: number, maxL: number, slope: number, dirPow = 1) {
     // N wide, STAGES tall — see the note in butterflyFragment.
     this.butterfly = new THREE.DataTexture(
       butterflyData(),
@@ -325,7 +327,7 @@ export class FftWaveField {
     this.h0 = CASCADES.map((patch, i) => {
       const lo = Math.max(minL, (patch / N) * MIN_TEXELS)
       const hi = i === 0 ? maxL : Math.min(maxL, crossover)
-      const built = spectrumData(patch, lo, hi, activeField.seed + 7331 + i * 17)
+      const built = spectrumData(patch, lo, hi, activeField.seed + 7331 + i * 17, dirPow)
       rms.push(built.rms)
       const t = new THREE.DataTexture(built.data, N, N, THREE.RGBAFormat, THREE.FloatType)
       t.needsUpdate = true
@@ -388,13 +390,13 @@ export class FftWaveField {
    * call at any time — the seed is unchanged, so the random phases are
    * identical and the field deforms rather than reshuffling.
    */
-  rebuild(minL: number, maxL: number, slope: number) {
+  rebuild(minL: number, maxL: number, slope: number, dirPow = 1) {
     const crossover = (CASCADES[0] / N) * MIN_TEXELS
     const rms: number[] = []
     CASCADES.forEach((patch, i) => {
       const lo = Math.max(minL, (patch / N) * MIN_TEXELS)
       const hi = i === 0 ? maxL : Math.min(maxL, crossover)
-      const built = spectrumData(patch, lo, hi, activeField.seed + 7331 + i * 17)
+      const built = spectrumData(patch, lo, hi, activeField.seed + 7331 + i * 17, dirPow)
       rms.push(built.rms)
       ;(this.h0[i].image.data as Float32Array).set(built.data)
       this.h0[i].needsUpdate = true
@@ -469,5 +471,22 @@ uniform sampler2D uFftB;
 vec2 detailSlope(vec2 p, float t) {
 	return texture2D(uFftA, p / ${CASCADES[0].toFixed(3)}).rg
 		+ texture2D(uFftB, p / ${CASCADES[1].toFixed(3)}).rg;
+}`
+}
+
+/**
+ * The GUST cascade's sampler — a second FftWaveField carrying the
+ * tight-ripple spectrum that only exists inside wind gusts (see the
+ * gust mask in Scene). Same patch sizes, its own textures; the band
+ * limiting inside the spectrum build is what makes it a different sea.
+ */
+export function gustSlopeGlsl(): string {
+  return `
+uniform sampler2D uGustA;
+uniform sampler2D uGustB;
+
+vec2 gustSlope(vec2 p) {
+	return texture2D(uGustA, p / ${CASCADES[0].toFixed(3)}).rg
+		+ texture2D(uGustB, p / ${CASCADES[1].toFixed(3)}).rg;
 }`
 }

@@ -110,6 +110,17 @@ if (SAVED.BOAT && 'motorFoam' in SAVED.BOAT) {
 	saveOverrides(SAVED);
 }
 
+// MIGRATION — gustSpacingM renamed BACK to gustLengthM (it briefly went
+// the other way; the density job it was renamed for belongs to the
+// dedicated gustDensity knob now). A stored value from the spacing era
+// may exceed the new 2-60 range, so it is capped.
+if (SAVED.WIND && 'gustSpacingM' in SAVED.WIND) {
+	const v = SAVED.WIND.gustSpacingM;
+	if (typeof v === 'number') SAVED.WIND.gustLengthM = Math.min(v, 60);
+	delete SAVED.WIND.gustSpacingM;
+	saveOverrides(SAVED);
+}
+
 /**
  * Patch one config group in place from the saved set, and hand it back so
  * it can be used as an initialiser.

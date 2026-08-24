@@ -286,6 +286,18 @@
 		'SEA.detailMin': { min: 0.1, max: 2, step: 0.01 },
 		'SEA.detailMax': { min: 0.5, max: 8, step: 0.05 },
 		'SEA.detailSlope': { min: 0, max: 0.15, step: 0.001 },
+		'WIND.gustLambdaMin': { min: 0.05, max: 1, step: 0.01 },
+		'WIND.gustLambdaMax': { min: 0.2, max: 3, step: 0.05 },
+		'WIND.gustSlopeAmp': { min: 0, max: 0.3, step: 0.005 },
+		'WIND.gustLengthM': { min: 2, max: 60, step: 1 },
+		'WIND.gustWidthM': { min: 2, max: 60, step: 1 },
+		'WIND.gustDensity': { min: 0, max: 1, step: 0.02 },
+		'WIND.gustDirPow': { min: 1, max: 8, step: 0.5 },
+		'WIND.gustFresnelGrazing': { min: 0, max: 1.5, step: 0.01 },
+		'WIND.gustSurfaceReflect': { min: 0, max: 0.6, step: 0.002 },
+		'WIND.gustCover': { min: 0, max: 1, step: 0.02 },
+		'WIND.gustSharp': { min: 0.02, max: 0.6, step: 0.01 },
+		'WIND.gustGain': { min: 0, max: 2, step: 0.05 },
 		'SEA.stepEvery': { min: 1, max: 6, step: 1 },
 		'DROPLET.maxCount': { min: 0, max: 8192, step: 64 },
 		// Chop thresholds, so they need the chop range — not the 0..1 the
@@ -448,7 +460,7 @@
 			['look', ['opacityGain', 'brightStart', 'brightEnd', 'hover']]
 		],
 		ENABLE: [
-			['water', ['caustics', 'fftDetail', 'objectWave']],
+			['water', ['caustics', 'fftDetail', 'gustMask', 'objectWave']],
 			['whitewater', ['loopWhite', 'loopStretch', 'froth', 'crestPlumes', 'whitecapEvents', 'bowCrest']],
 			['spray', ['splashDroplets', 'buoySpray', 'dropletFoam']],
 			['foam', ['foamField', 'foamTrail', 'contactFoam', 'contactEmit', 'turbDissipation']],

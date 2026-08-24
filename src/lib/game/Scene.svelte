@@ -33,7 +33,7 @@
 		windBase,
 		windVector,
 		sampleOceanTracked } from './whitecaps';
-	import { fftSlopeGlsl, makeFftDetail } from './fftwaves';
+	import { FftWaveField, fftSlopeGlsl, gustSlopeGlsl, makeFftDetail } from './fftwaves';
 	import { injectRipple, RIPPLE_EXTENT, RippleSim, ripplesGlsl, setRippleClock, rippleDisplayGain, injectRippleOver } from './ripples';
 	import { CAUSTIC_EXTENT, CAUSTIC_PLANE_DEPTH, CAUSTIC_RESOLUTION, CausticMap } from './caustics';
 	import {
@@ -59,7 +59,7 @@
 		foamNoiseGlsl,
 		FOAM_EXTENT
 	} from './foam';
-	import {
+	import { WIND,
 		CAUSTICS,
 		BOAT,
 		DROPLET,
@@ -459,6 +459,20 @@
 		// after the first step rather than at construction.
 		uFftA: { value: null as THREE.Texture | null },
 		uFftB: { value: null as THREE.Texture | null },
+		uGustA: { value: null as THREE.Texture | null },
+		uGustB: { value: null as THREE.Texture | null },
+		// Integrated wind travel (x gustSpeedK): the gust mask's noise is
+		// sampled at worldXZ MINUS this, so patches ride the wind and
+		// turn with it instead of streaking along a frozen heading.
+		uGustScroll: { value: new THREE.Vector2(0, 0) },
+		uGustCover: { value: WIND.gustCover },
+		uGustSharp: { value: WIND.gustSharp },
+		uGustLen: { value: WIND.gustLengthM },
+		uGustDensity: { value: WIND.gustDensity },
+		uGustWid: { value: WIND.gustWidthM },
+		uGustGain: { value: WIND.gustGain },
+		uGustFresnel: { value: WIND.gustFresnelGrazing },
+		uGustReflect: { value: WIND.gustSurfaceReflect },
 		// Solid-mode water, pool-style (Wallace/jeantimex): a Fresnel blend
 		// between transmitted water color and reflected sky, plus sun
 		// specular. Facets facing the camera show the water; tilted facets
@@ -1142,12 +1156,48 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 		const d = activeField.detail ?? {};
 		fftDetail.rebuild(d.minLambda ?? 0.35, d.maxLambda ?? 3.5, d.slope ?? 0.05);
 	}
+	// Same throttle idea for the gust spectrum, keyed on its LIVE knobs
+	// (WIND is a live group; a spectrum rebuild is the one thing its
+	// knobs can't do per-frame, so it rides a key check per frame).
+	let gustStaleClock = 0;
+	function syncGustSpectrum(dt: number) {
+		if (!gustDetail) return;
+		gustStaleClock += dt;
+		if (gustStaleClock < FFT_REBUILD_INTERVAL) return;
+		gustStaleClock = 0;
+		// The 10-degree wind bucket re-aligns the directional spectrum as
+		// the wind wanders — without it a sharpened cascade would keep
+		// running ripple along a stale heading.
+		const windBucket = Math.round((activeField.windAngle * 180) / Math.PI / 10);
+		const key = `${WIND.gustLambdaMin},${WIND.gustLambdaMax},${WIND.gustSlopeAmp},${WIND.gustDirPow},${windBucket}`;
+		if (key === gustSpectrumKey) return;
+		gustSpectrumKey = key;
+		gustDetail.rebuild(
+			WIND.gustLambdaMin,
+			WIND.gustLambdaMax,
+			WIND.gustSlopeAmp,
+			WIND.gustDirPow
+		);
+	}
 
 	// The FFT detail-wave cascades that own uFftA/uFftB. Unlike the other
 	// sims this one has no state to carry frame to frame — each step is a
 	// fresh transform of the same spectrum evolved to the current time — so
 	// it can be skipped or restarted freely.
 	const fftDetail = ENABLE.fftDetail ? makeFftDetail() : null;
+	// The GUST cascade: a second FFT field carrying only the tight, steep
+	// ripple that exists inside wind gusts (water-features plan 1a). Same
+	// machinery, its own spectrum (WIND.gustLambda*/gustSlopeAmp, live
+	// via the same rebuild throttle as the detail spectrum).
+	const gustDetail = ENABLE.gustMask
+		? new FftWaveField(
+				WIND.gustLambdaMin,
+				WIND.gustLambdaMax,
+				WIND.gustSlopeAmp,
+				WIND.gustDirPow
+			)
+		: null;
+	let gustSpectrumKey = '';
 	// Frame counter for SEA.stepEvery. Each step is self-contained, so a
 	// skipped frame just leaves the last slope texture in place.
 	let fftFrame = 0;
@@ -1296,6 +1346,67 @@ ${foamGlsl()}
 ${ripplesGlsl()}
 ${wavesGlsl()}
 ${ENABLE.fftDetail ? fftSlopeGlsl() : ''}
+${
+	ENABLE.gustMask
+		? `${gustSlopeGlsl()}
+uniform vec2 uGustScroll;
+uniform float uGustCover;
+uniform float uGustSharp;
+uniform float uGustLen;
+uniform float uGustWid;
+uniform float uGustDensity;
+uniform float uGustGain;
+// Per-gust Fresnel grazing strength: inside a spot the grazing term
+// blends from the sea-wide value toward this — a roughened patch
+// scatters the sky's mirror, which is exactly why real cat's-paws read
+// dark on a bright sea. 1 = no change; 0 = matte gusts; >1 = glassier.
+uniform float uGustFresnel;
+uniform float uGustReflect;
+
+// 2-octave value noise for the gust mask — self-contained on purpose.
+float gustHash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float gustVnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 fp = fract(p);
+	vec2 u2 = fp * fp * (3.0 - 2.0 * fp);
+	return mix(
+		mix(gustHash(i), gustHash(i + vec2(1.0, 0.0)), u2.x),
+		mix(gustHash(i + vec2(0.0, 1.0)), gustHash(i + vec2(1.0, 1.0)), u2.x),
+		u2.y);
+}
+// The mask: COW SPOTS — irregular rounded blobs from one low-frequency
+// noise octave, gently warped. The wind shows through the spots'
+// TRAVEL (uGustScroll advection) and through the ripple direction
+// INSIDE them (the gust cascade's directional spectrum), never through
+// the spots' shape. uGustLen/uGustWid set the spot scale along/across
+// wind — near-equal defaults keep spots round, stretch only if dialed.
+// NO spatially-varying frame rotation here, ever: a per-region angle
+// rotates coordinates about the ORIGIN, displacing far samples by tens
+// of metres and smearing the noise into swirling arcs — the "swirling
+// lines" bug, twice. Direction randomness died with the elongated
+// look (a rotated circle is a circle).
+float gustMaskAt(vec2 wxz) {
+	vec2 q = wxz - uGustScroll;
+	vec2 wf = vec2(
+		dot(q, uWindDir) / uGustLen,
+		dot(q, vec2(-uWindDir.y, uWindDir.x)) / uGustWid);
+	wf += (vec2(gustVnoise(wf * 0.7 + 7.3), gustVnoise(wf * 0.7 + 29.1)) - 0.5) * 0.35;
+	float n = gustVnoise(wf) * 0.8 + gustVnoise(wf * 2.3 + 13.1) * 0.2;
+	// Threshold ABOVE the noise mean: spots are the sparse phase, never
+	// a connected sheet with holes.
+	float th = mix(0.8, 0.5, uGustCover);
+	float m = smoothstep(th, th + uGustSharp, n);
+	// DENSITY: a population noise ~5 spot-lengths coarse gates which
+	// regions host spots at all — density moves without touching spot
+	// size (cell scale) or edge coverage (threshold).
+	float pop = gustVnoise(wf * 0.19 + 71.3);
+	m *= smoothstep(0.9 - uGustDensity * 0.8, 1.05 - uGustDensity * 0.8, pop);
+	return m * uGustGain;
+}`
+		: ''
+}
 ${ENABLE.objectWave ? objWaveGlsl : ''}
 ${ENABLE.objectWave ? objectWaveSlopeGlsl() : ''}
 
@@ -1555,10 +1666,12 @@ void main() {
 	// the surface for lighting without a single extra vertex — and the
 	// specular lives on exactly that, since a glint appears only where
 	// the normal reaches the mirror angle.
+	${ENABLE.gustMask ? 'float gustM = gustMaskAt(vWorld.xz);' : ''}
 	vec2 slope = ${
 		PROFILE.vertexSlope ? 'vSlope' : 'waveSlope(vRest, uTime, uAmp)'
 	} + ${PROFILE.skipRipple ? 'vec2(0.0)' : 'rippleShadeGrad(vWorld.xz)'}
 		${ENABLE.fftDetail ? '+ detailSlope(vWorld.xz, uTime)' : ''}
+		${ENABLE.gustMask ? '+ gustSlope(vWorld.xz) * gustM' : ''}
 		${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
 	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
 	// THE view direction for this pixel. Under the isometric camera it is
@@ -1740,8 +1853,11 @@ void main() {
 	// on a 25-degree wave face where real Fresnel gives ~21% — under a
 	// dark sky that read as the water blackening whatever lay beneath the
 	// face, strongest exactly where a wave passed over something shallow.
+	${ENABLE.gustMask ? 'float sRefl = mix(uUwSurfaceReflect, uGustReflect, gustM);' : 'float sRefl = uUwSurfaceReflect;'}
 	float fresnel = clamp(
-		uUwSurfaceReflect + (1.0 - uUwSurfaceReflect) * uUwFresnelGraze * pow(1.0 - facing, 5.0),
+		sRefl + (1.0 - sRefl)
+			* ${ENABLE.gustMask ? 'mix(uUwFresnelGraze, uGustFresnel, gustM)' : 'uUwFresnelGraze'}
+			* pow(1.0 - facing, 5.0),
 		0.0, 1.0);
 	vec3 skyCol = mix(uSkyHorizon, uSkyZenith, clamp(reflectedRay.y, 0.0, 1.0));
 	vec3 col = mix(transmitted, skyCol, fresnel);`}
@@ -3820,7 +3936,24 @@ void main() {
 		const silhouette = new THREE.Group();
 		add(silGeo, mat('#f2f5f3'), silhouette).position.y = 0.14;
 		g.add(silhouette);
-		return { group: g, silhouette };
+		// WIND MARKER: a second rim wedge exactly like north's, bright
+		// green, orbiting the bezel at tick height — it sits at the
+		// azimuth the wind (and the gust spots riding it) is travelling
+		// toward, the way N sits at north.
+		const wind = new THREE.Group();
+		{
+			const tri = new THREE.Shape();
+			tri.moveTo(0.3, 0);
+			tri.lineTo(-0.14, 0.16);
+			tri.lineTo(-0.14, -0.16);
+			tri.closePath();
+			const geo = new THREE.ExtrudeGeometry(tri, { depth: 0.06, bevelEnabled: false });
+			geo.rotateX(-Math.PI / 2);
+			const m2 = add(geo, mat('#35f05a'), wind);
+			m2.position.set(1.28, 0.12, 0);
+		}
+		g.add(wind);
+		return { group: g, silhouette, wind };
 	})();
 
 	const boatMesh = buildBoatMesh();
@@ -4366,6 +4499,7 @@ void main() {
 			// are actually travelling in the world; the gap between it and
 			// the real hull's bow on screen IS your drift angle.
 			hudCompass.silhouette.rotation.y = -boat.course;
+			hudCompass.wind.rotation.y = -activeField.windAngle;
 		}
 		winCenter.set(Math.round(boat.x * 2) / 2, Math.round(boat.z * 2) / 2);
 		if (waterMeshRef) waterMeshRef.position.set(winCenter.x, 0, winCenter.y);
@@ -4531,6 +4665,27 @@ void main() {
 				const [a, b] = fftDetail.textures;
 				waterUniforms.uFftA.value = a;
 				waterUniforms.uFftB.value = b;
+			}
+			if (gustDetail) {
+				syncGustSpectrum(delta);
+				if (fftFrame % SEA.stepEvery === 1 || SEA.stepEvery === 1) {
+					gustDetail.step(renderer, waveTime);
+					const [ga, gb] = gustDetail.textures;
+					waterUniforms.uGustA.value = ga;
+					waterUniforms.uGustB.value = gb;
+				}
+				// Advect the mask by the real (wandering) wind so patches
+				// travel and turn; live knobs straight to uniforms.
+				waterUniforms.uGustScroll.value.x += windSteady.x * delta;
+				waterUniforms.uGustScroll.value.y += windSteady.z * delta;
+				waterUniforms.uGustCover.value = WIND.gustCover;
+				waterUniforms.uGustSharp.value = WIND.gustSharp;
+				waterUniforms.uGustLen.value = WIND.gustLengthM;
+				waterUniforms.uGustDensity.value = WIND.gustDensity;
+				waterUniforms.uGustWid.value = WIND.gustWidthM;
+				waterUniforms.uGustGain.value = WIND.gustGain;
+				waterUniforms.uGustFresnel.value = WIND.gustFresnelGrazing;
+				waterUniforms.uGustReflect.value = WIND.gustSurfaceReflect;
 			}
 			lap('gpuFft');
 			backdropUniforms.uRippleCTex.value = rippleSim.texture;
