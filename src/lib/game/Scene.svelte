@@ -1115,7 +1115,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 		// now. Joining the whole group is cheap next to the rebuild it
 		// guards.
 		// The moved state knobs still rebuild the sea: join them in.
-		const key = `U${Object.values(SEA).join(',')},${WIND.windSpeed},${WIND.windCompassDeg},${WEATHER.overcast}`;
+		const key = `U${Object.values(SEA).join(',')},${WIND.windSpeed},${WIND.windCompassDeg},${WEATHER.overcast},${WEATHER.skyClearZenith},${WEATHER.skyClearHorizon},${WEATHER.skyOvercastZenith},${WEATHER.skyOvercastHorizon}`;
 		if (key === seaApplied) return;
 		seaApplied = key;
 		applySeaState(seaEased, SEA.chopOverride);
@@ -4810,11 +4810,11 @@ void main() {
 				const spike =
 					smooth01(bodyPh, SPECULAR.spikeInStart, SPECULAR.spikeInEnd) *
 					(1 - smooth01(bodyPh, SPECULAR.spikeOutStart, SPECULAR.spikeOutEnd));
-				const base = mixc(SPECULAR.sharpClear, SPECULAR.sharpClearStorm);
+				const base = mixc(SPECULAR.sharp, SPECULAR.sharpClearStorm);
 				const peak = mixc(SPECULAR.sharpPeak, SPECULAR.sharpPeakStorm);
 				const clear = base + (peak - base) * spike;
 				const sharp =
-					clear + (mixc(SPECULAR.sharpOvercast, SPECULAR.sharpOvercastStorm) - clear) * dif;
+					clear + (mixc(SPECULAR.sharp, SPECULAR.sharpOvercastStorm) - clear) * dif;
 				waterUniforms.uSpecSharpCore.value = sharp;
 				uwUniforms.uCausticValid.value.set(
 					causticMap.validCenter.x,
@@ -4900,8 +4900,7 @@ void main() {
 					1.0 // was CAUSTICS.flatEnd
 				);
 				waterUniforms.uSpecSharpWash.value = sharp * SPECULAR.haloSharp;
-				waterUniforms.uSpecGain.value =
-					SPECULAR.gainClear + (SPECULAR.gainOvercast - SPECULAR.gainClear) * dif;
+				waterUniforms.uSpecGain.value = SPECULAR.gain;
 				waterUniforms.uSpecAniso.value = SPECULAR.anisotropy;
 				waterUniforms.uSpecFresnelMix.value = SPECULAR.fresnelMix;
 				if (!PROFILE.perspectiveCamera) {
@@ -4922,25 +4921,31 @@ void main() {
 			// Reflected sky follows the clock: daylight preset colours, sunk
 			// toward the fog as night falls. skyScratch carries the fog tone.
 			skyScratch.setRGB(env.fog[0], env.fog[1], env.fog[2]);
+			// WEATHER.brightness scales the whole daylight package — sun,
+			// ambient and reflected sky together — so heavy overcast can
+			// actually go DARK instead of just grey.
+			const wBright = WEATHER.brightness;
 			waterUniforms.uSkyZenith.value
 				.copy(skyZenithBase)
-				.lerp(skyScratch, env.night * NIGHT_SKY_TO_FOG);
+				.lerp(skyScratch, env.night * NIGHT_SKY_TO_FOG)
+				.multiplyScalar(wBright);
 			waterUniforms.uSkyHorizon.value
 				.copy(skyHorizonBase)
-				.lerp(skyScratch, env.night * NIGHT_SKY_TO_FOG);
+				.lerp(skyScratch, env.night * NIGHT_SKY_TO_FOG)
+				.multiplyScalar(wBright);
 			waterUniforms.uSunColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
-			waterUniforms.uSunI.value = env.lightIntensity;
+			waterUniforms.uSunI.value = env.lightIntensity * wBright;
 			backdropUniforms.uFloorColor.value.setRGB(
 				env.waterDeep[0],
 				env.waterDeep[1],
 				env.waterDeep[2]
 			);
 			backdropUniforms.uLightColor.value.setRGB(env.light[0], env.light[1], env.light[2]);
-			backdropUniforms.uLightI.value = env.lightIntensity;
+			backdropUniforms.uLightI.value = env.lightIntensity * wBright;
 			if (sun) {
 				sun.position.set(env.lightDir[0] * 80, env.lightDir[1] * 80, env.lightDir[2] * 80);
 				sun.color.setRGB(env.light[0], env.light[1], env.light[2], THREE.SRGBColorSpace);
-				sun.intensity = env.lightIntensity * 2;
+				sun.intensity = env.lightIntensity * 2 * wBright;
 				// Point the key light at the actual sun. It was pinned at
 				// (40, 60, 20) — a fixed 49-degree elevation — so everything
 				// in AIR was lit from the same angle at dawn, noon and dusk
@@ -4950,8 +4955,28 @@ void main() {
 				sun.position.set(env.lightDir[0] * 100, env.lightDir[1] * 100, env.lightDir[2] * 100);
 			}
 			if (ambient) {
+				// SKY-HUED scene ambient: the sphere's dry branch builds its
+				// ambient from the weather sky (skyAmb * 0.45), but raster
+				// objects — the boat, dry buoys — were lit by the palette's
+				// fixed grey, so they ignored the WEATHER sky pickers and
+				// the two shading paths visibly disagreed. Take the sky's
+				// HUE at the palette's LUMA (the same luma-match that keeps
+				// the underwater tint from re-distributing energy), so the
+				// boat follows the pickers with no brightness jump.
 				ambient.color.setRGB(env.ambient[0], env.ambient[1], env.ambient[2], THREE.SRGBColorSpace);
-				ambient.intensity = env.ambientIntensity * 1.6;
+				{
+					const z = waterUniforms.uSkyZenith.value;
+					const h = waterUniforms.uSkyHorizon.value;
+					uwScratch.setRGB((z.r + h.r) * 0.5, (z.g + h.g) * 0.5, (z.b + h.b) * 0.5);
+					const lumaSky =
+						0.2126 * uwScratch.r + 0.7152 * uwScratch.g + 0.0722 * uwScratch.b;
+					const lumaAmb =
+						0.2126 * ambient.color.r + 0.7152 * ambient.color.g + 0.0722 * ambient.color.b;
+					if (lumaSky > 1e-4) {
+						ambient.color.copy(uwScratch).multiplyScalar(lumaAmb / lumaSky);
+					}
+				}
+				ambient.intensity = env.ambientIntensity * 1.6 * wBright;
 				// Mirror those two into the underwater shading path. The
 				// conversion matters: the scene lights interpret env colours
 				// as sRGB, so a path reading them as linear runs ~1.4x hot.
@@ -4959,10 +4984,16 @@ void main() {
 				uwUniforms.uUwDirIrr.value
 					.set(uwScratch.r, uwScratch.g, uwScratch.b)
 					.multiplyScalar((env.lightIntensity * 2) / Math.PI);
-				uwScratch.setRGB(env.ambient[0], env.ambient[1], env.ambient[2], THREE.SRGBColorSpace);
+				// Feed the underwater ambient from the SAME sky-hued colour
+				// the scene ambient just computed — one hue for both sides
+				// of the waterline, so the hull cannot change colour as it
+				// crosses. (It previously read the raw palette ambient: the
+				// air side followed the WEATHER sky pickers while the water
+				// side stayed palette-grey — and the turbidity veil, lit by
+				// this same uniform, stayed grey with it.)
 				uwUniforms.uUwAmbIrr.value
-					.set(uwScratch.r, uwScratch.g, uwScratch.b)
-					.multiplyScalar((env.ambientIntensity * 1.6) / Math.PI);
+					.set(ambient.color.r, ambient.color.g, ambient.color.b)
+					.multiplyScalar((env.ambientIntensity * 1.6 * wBright) / Math.PI);
 			}
 
 			// Clamped so a background-tab hiccup can't integrate a huge fall.

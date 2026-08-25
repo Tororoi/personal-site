@@ -575,6 +575,11 @@ const lerpN = (a: number, b: number, t: number) => a + (b - a) * t
 const opt = (x: number | undefined, fallback: number) =>
   x === undefined ? (x ?? fallback) : x
 
+/** 0xRRGGBB knob number -> '#rrggbb'. */
+function numHex(n: number): string {
+  return '#' + (n & 0xffffff).toString(16).padStart(6, '0')
+}
+
 function lerpHex(a: string, b: string, t: number): string {
   const pa = parseInt(a.slice(1), 16)
   const pb = parseInt(b.slice(1), 16)
@@ -883,14 +888,16 @@ export function unifiedField(): WaveFieldConfig {
     timeScale: U.timeScale,
     ripples: { displayGain: 1.6, speed: 2.2, damping: 0.96 },
     sky: {
+      // The endpoints are WEATHER knobs (0xRRGGBB), pickable in the
+      // panel; defaults are the calm/storm preset skies this replaced.
       zenith: lerpHex(
-        SEA_PRESETS.calm.sky.zenith,
-        SEA_PRESETS.storm.sky.zenith,
+        numHex(WEATHER.skyClearZenith),
+        numHex(WEATHER.skyOvercastZenith),
         WEATHER.overcast,
       ),
       horizon: lerpHex(
-        SEA_PRESETS.calm.sky.horizon,
-        SEA_PRESETS.storm.sky.horizon,
+        numHex(WEATHER.skyClearHorizon),
+        numHex(WEATHER.skyOvercastHorizon),
         WEATHER.overcast,
       ),
       diffusion: 0.05 + (0.7 - 0.05) * WEATHER.overcast,

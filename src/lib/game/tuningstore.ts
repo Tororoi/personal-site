@@ -137,6 +137,22 @@ if (SAVED.SEA) {
 	saveOverrides(SAVED);
 }
 
+// MIGRATION — SPECULAR's inert clear/overcast pairs unified (2026-08-24):
+// sharpClear -> sharp, gainClear -> gain; the Overcast twins (always held
+// equal) are dropped.
+if (SAVED.SPECULAR) {
+	if ('sharpClear' in SAVED.SPECULAR) {
+		SAVED.SPECULAR.sharp = SAVED.SPECULAR.sharpClear;
+	}
+	if ('gainClear' in SAVED.SPECULAR) {
+		SAVED.SPECULAR.gain = SAVED.SPECULAR.gainClear;
+	}
+	for (const k of ['sharpClear', 'sharpOvercast', 'gainClear', 'gainOvercast']) {
+		delete SAVED.SPECULAR[k];
+	}
+	saveOverrides(SAVED);
+}
+
 /**
  * Patch one config group in place from the saved set, and hand it back so
  * it can be used as an initialiser.

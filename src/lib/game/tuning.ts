@@ -632,11 +632,11 @@ export const SPECULAR = {
    * not. And on genuinely flat water there will be no highlight at any
    * setting; chop is what supplies the angles.
    */
-  sharpClear: 4000,
-  // Equal to sharpClear, and gainOvercast equals gainClear, so cloud
-  // cover no longer changes the highlight at all. That is a choice, not
-  // an oversight: split them again to get the soft overcast sheen back.
-  sharpOvercast: 4000,
+  // UNIFIED 2026-08-24: this was a sharpClear/sharpOvercast pair whose
+  // values were held equal, making the cloud blend inert. Weather
+  // presets now own per-state values (an overcast preset can set a
+  // softer sharp directly), so the split had no remaining job.
+  sharp: 4000,
   /**
    * Peak brightness, as a multiple of the sun's colour. Above 1 on
    * purpose — a specular highlight is meant to clip to white — but it
@@ -650,8 +650,8 @@ export const SPECULAR = {
    * size, and the reason it read as a blob rather than a glint. Raise
    * `sharp` alongside `gain`, or the highlight grows as it brightens.
    */
-  gainClear: 5,
-  gainOvercast: 5,
+  // Unified from gainClear/gainOvercast, same story as `sharp`.
+  gain: 5,
   /**
    * How much the surface's Fresnel dims the highlight, 0-1. 0 adds it at
    * full strength whatever the angle, 1 obeys Fresnel exactly. Partial,
@@ -710,8 +710,8 @@ export const SPECULAR = {
    * crosses a chosen moment, so the glitter snaps from a shimmer to a hard
    * point and back.
    *
-   * Applied to sharpClear before it blends with sharpOvercast, so splitting
-   * those two later keeps the spike on the clear-sky term where it belongs.
+   * Applied to `sharp` before the overcast-storm blend, so the spike
+   * stays on the clear-sky term where it belongs.
    *
    * Keyed on day PHASE rather than sun altitude, unlike the low-sun ramp
    * below. That is a deliberate difference: the ramp tracks a physical
@@ -721,10 +721,10 @@ export const SPECULAR = {
    * this point at a different time, so they need re-finding.
    */
   sharpPeak: 8000,
-  /** Rise: sharpClear -> sharpPeak across these two phases. */
+  /** Rise: sharp -> sharpPeak across these two phases. */
   spikeInStart: 0.69,
   spikeInEnd: 0.704,
-  /** Fall: back down to sharpClear across these two. Between spikeInEnd
+  /** Fall: back down to sharp across these two. Between spikeInEnd
    * and spikeOutStart it holds at the peak. */
   spikeOutStart: 0.705,
   spikeOutEnd: 0.72,
@@ -825,6 +825,25 @@ export const WEATHER = {
    * diffusion (caustic wash, specular blend, foam sky/sun balance). */
   overcast: 0.4,
   /**
+   * Daylight brightness, 1 = untouched. Scales the sun, the ambient and
+   * the reflected sky together — primarily for setting heavier overcast
+   * DARKER, which the colour transition alone cannot do.
+   */
+  brightness: 1,
+  /**
+   * The overcast transition's ENDPOINT COLOURS, one zenith/horizon pair
+   * per end (the sky is a gradient; a single colour per end would
+   * flatten what the reflections sample). Stored as 0xRRGGBB numbers so
+   * the knob machinery — persistence, migrations, reset — works
+   * unchanged; the panel renders them as colour pickers. Defaults are
+   * the calm and storm presets' skies, i.e. exactly the old hardcoded
+   * behaviour.
+   */
+  skyClearZenith: 0x4a7bff,
+  skyClearHorizon: 0xb3d7ff,
+  skyOvercastZenith: 0xa9b7c4,
+  skyOvercastHorizon: 0xffffff,
+  /**
    * 0 clear .. 1 pea soup. A VIEW-PATH FOG: grey particulate extinction
    * along the refracted eye ray plus an ambient-lit milky in-scatter,
    * so near things stay sharp while distance washes out and the seabed
@@ -855,12 +874,35 @@ export const WEATHER = {
  * an empty set renders as a disabled button: the roadmap, visible.
  * Filled in one at a time as each look is tuned by eye.
  */
-export type WeatherPreset = { name: string; set: Record<string, number | boolean> }
+export type WeatherPreset = {
+  name: string
+  set: Record<string, number | boolean>
+}
 export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
   sky: [
-    { name: 'sunny', set: {} },
+    {
+      name: 'sunny',
+      set: {
+        'WEATHER.overcast': 0,
+        'WEATHER.brightness': 1,
+        'UNDERWATER.fresnelGrazing': 0.5,
+        'WIND.gustFresnelGrazing': 0.5,
+        'UNDERWATER.surfaceReflect': 0.2,
+        'WIND.gustSurfaceReflect': 0.1,
+      },
+    },
     { name: 'partly cloudy', set: {} },
-    { name: 'overcast', set: {} },
+    {
+      name: 'overcast',
+      set: {
+        'WEATHER.overcast': 0.5,
+        'WEATHER.brightness': 0.7,
+        'UNDERWATER.fresnelGrazing': 1.5,
+        'WIND.gustFresnelGrazing': 1.25,
+        'UNDERWATER.surfaceReflect': 0.4,
+        'WIND.gustSurfaceReflect': 0.2,
+      },
+    },
     { name: 'foggy', set: {} },
     { name: 'rainy', set: {} },
     { name: 'stormy', set: {} },
@@ -880,6 +922,7 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
         'WEATHER.turbidity': 0,
         'WEATHER.turbDepthExp': 0.05,
         'UNDERWATER.blueRangeM': 160,
+        'UNDERWATER.greenRangeM': 60,
       },
     },
     { name: 'clear deep', set: {} },
@@ -890,6 +933,7 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
         'WEATHER.turbidity': 0.3,
         'WEATHER.turbDepthExp': 0.05,
         'UNDERWATER.blueRangeM': 50,
+        'UNDERWATER.greenRangeM': 80,
       },
     },
     { name: 'red algae bloom', set: {} },
@@ -958,7 +1002,7 @@ export const WIND = {
    * 1 = neutral (no difference), toward 0 = matte dark gusts, above 1 =
    * glassier than the surrounding water.
    */
-  gustFresnelGrazing: 1.25,
+  gustFresnelGrazing: 0.5,
   /**
    * Base surface reflectivity INSIDE gusts (sea-wide dial:
    * UNDERWATER.surfaceReflect, default 0.02 — this starts equal, so the
@@ -966,7 +1010,7 @@ export const WIND = {
    * the grazing rim; together with gustFresnelGrazing it gives the full
    * dark-matte-patch to glassy-patch range.
    */
-  gustSurfaceReflect: 0.04,
+  gustSurfaceReflect: 0.01,
   gustCover: 1.0,
   gustSharp: 0.2,
   gustGain: 1.0,
@@ -1968,7 +2012,7 @@ export const UNDERWATER = {
    */
   redRangeM: 15,
   greenRangeM: 60,
-  blueRangeM: 160,
+  blueRangeM: 180,
   /**
    * RAYLEIGH backscatter — molecular, per metre, quoted at green (550nm).
    *
@@ -2058,7 +2102,7 @@ export const UNDERWATER = {
    * water. Grazing angles still mirror the sky regardless: the term
    * rises to 1 as the surface turns edge-on.
    */
-  surfaceReflect: 0.06,
+  surfaceReflect: 0.02,
   /**
    * Strength of the GRAZING rise in the surface reflection — the part of
    * Fresnel that climbs toward a full mirror as a wave face tilts
@@ -2073,7 +2117,7 @@ export const UNDERWATER = {
    * through SPECULAR.fresnelMix, so pulling this down also softens how
    * strongly the glitter favours tilted faces.
    */
-  fresnelGrazing: 1.0,
+  fresnelGrazing: 0.5,
   /**
    * Scale on the Fresnel loss of SUNLIGHT entering the water — the
    * "did the light get in" half, distinct from the view-path reflection
@@ -2094,7 +2138,7 @@ export const UNDERWATER = {
    * luma-matched formula pumped the blue channel ~2.2x and starved red,
    * so a stale saved override must not resurrect it.
    */
-  ambientSkyHue: 0.15,
+  ambientSkyHue: 0,
   /**
    * A flat six-band rainbow card beside the sphere, riding at the same
    * height. A measuring instrument, not scenery: each band loses its

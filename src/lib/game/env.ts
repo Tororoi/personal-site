@@ -130,6 +130,10 @@ const NIGHT: Palette = {
 	waveAmp: 0.85
 };
 
+/** The moon's light colour (NIGHT palette), exported for the weather
+ * panel's sun/moon swatches. */
+export const MOON_LIGHT_HEX = NIGHT.light;
+
 const DAWN: Palette = {
 	deep: '#0e3040',
 	shallow: '#c08d5f',

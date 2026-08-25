@@ -22,8 +22,8 @@
 -->
 <script lang="ts">
 	import { ENABLE, LIVE_GROUPS, TUNING_DEFAULTS, TUNING_GROUPS, WEATHER_PRESETS, type WeatherPreset } from './tuning';
-	import { computeEnv, ENV, ENV_DEFAULTS } from './env';
-	import { seaDrive, seaMetrics, SEA_REFERENCE } from './waves';
+	import { computeEnv, ENV, ENV_DEFAULTS, MOON_LIGHT_HEX } from './env';
+	import { activeField, seaDrive, seaMetrics, SEA_REFERENCE } from './waves';
 	import { game, perf as perfTick } from './state.svelte';
 	import {
 		clearOverrides,
@@ -201,6 +201,15 @@
 	 * Explicit bounds for tuning knobs whose sensible range the heuristic
 	 * cannot guess from the default. Keyed "GROUP.knob".
 	 */
+	/** Knobs stored as 0xRRGGBB numbers, rendered as colour pickers. */
+	const COLOR_KNOBS = new Set([
+		'WEATHER.skyClearZenith',
+		'WEATHER.skyClearHorizon',
+		'WEATHER.skyOvercastZenith',
+		'WEATHER.skyOvercastHorizon'
+	]);
+	const numToHex = (n: number) => '#' + (n & 0xffffff).toString(16).padStart(6, '0');
+
 	const TUNING_RANGE: Record<string, { min: number; max: number; step: number }> = {
 		// Defaults to -1 (meaning "leave the preset alone"), so the heuristic
 		// would infer -1..1 — useless for a value spanning the presets' 0.55
@@ -286,6 +295,7 @@
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
 		'SEA.waves': { min: 0, max: 2, step: 0.01 },
 		'WEATHER.overcast': { min: 0, max: 1, step: 0.01 },
+		'WEATHER.brightness': { min: 0.15, max: 1.2, step: 0.01 },
 		'WEATHER.turbidity': { min: 0, max: 1, step: 0.01 },
 		'WEATHER.turbDepthExp': { min: 0, max: 0.4, step: 0.005 },
 		'WEATHER.transitionS': { min: 0, max: 60, step: 0.5 },
@@ -403,7 +413,7 @@
 			['wake', ['wakeAmp', 'wakeOffset', 'centerWakeFoam']]
 		],
 		SPECULAR: [
-			['core', ['sharpClear', 'sharpOvercast', 'gainClear', 'gainOvercast', 'fresnelMix']],
+			['core', ['sharp', 'gain', 'fresnelMix']],
 			['drive', ['driveSlope', 'driveAmp', 'driveChop', 'driveCurve']],
 			['spike', ['sharpPeak', 'spikeInStart', 'spikeInEnd', 'spikeOutStart', 'spikeOutEnd']],
 			['storm', ['sharpClearStorm', 'sharpOvercastStorm', 'sharpPeakStorm', 'cameraEyeDistanceStorm']],
@@ -412,7 +422,8 @@
 			['altitude', ['altHigh', 'altLow', 'fadeAltDeg']]
 		],
 		WEATHER: [
-			['dials', ['overcast', 'turbidity', 'turbDepthExp', 'transitionS']]
+			['dials', ['overcast', 'brightness', 'turbidity', 'turbDepthExp', 'transitionS']],
+			['sky', ['skyClearZenith', 'skyClearHorizon', 'skyOvercastZenith', 'skyOvercastHorizon']]
 		],
 		WIND: [
 			['wind', ['windSpeed', 'windCompassDeg', 'baseWander', 'baseBreath']],
@@ -557,6 +568,34 @@
 
 	// ---- time of day -------------------------------------------------
 	const phase = $derived(((game.time / ENV.daySeconds) % 1 + 1) % 1);
+
+	// SWATCHES beside WEATHER.overcast: the current sky, sun and moon
+	// colours, live — the instrument for judging what the overcast dial
+	// actually moves (and what it fails to move). game.time ticks every
+	// frame and liveTick bumps on every live edit, so these track both
+	// the clock and the sliders.
+	const swEnv = $derived.by(() => {
+		void liveTick;
+		return computeEnv(phase);
+	});
+	const rgbCss = (c: number[], k: number) => {
+		const q = (x: number) => Math.round(Math.min(Math.max(x * k, 0), 1) * 255);
+		return `rgb(${q(c[0])}, ${q(c[1])}, ${q(c[2])})`;
+	};
+	const swSky = $derived.by(() => {
+		void liveTick;
+		void phase;
+		return activeField.sky?.zenith ?? '#000000';
+	});
+	// The sun's contribution: its light colour, gone when it is down.
+	const swSun = $derived(rgbCss(swEnv.light, (1 - swEnv.night) * Math.min(swEnv.lightIntensity, 1)));
+	// The moon's: its fixed palette colour, present only at night.
+	const swMoon = $derived.by(() => {
+		const k = swEnv.night;
+		const hex = MOON_LIGHT_HEX;
+		const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+		return rgbCss(c, k);
+	});
 	/** Name the phase from the same landmarks env.ts keyframes on. */
 	const phaseLabel = $derived(
 		phase < 0.21 || phase >= 0.79
@@ -762,7 +801,57 @@
 								<div class="shead">{k.slice(1)}</div>
 							{:else}
 							{@const v = valueOf(g, k)}
-							{#if typeof v === 'boolean'}
+							{#if COLOR_KNOBS.has(`${g}.${k}`)}
+								<div class="knob" class:staged={isStaged(g, k)}>
+									<div class="head">
+										<span class="name" class:mod={isModified(g, k)}>{k}</span>
+										{#if isModified(g, k)}
+											<button
+												class="rev"
+												title="Back to {numToHex(TUNING_DEFAULTS[g][k] as number)}"
+												onclick={() => revert(g, k)}>↺</button
+											>
+										{/if}
+										<span class="num ro">{numToHex(v as number)}</span>
+										<input
+											type="color"
+											value={numToHex(v as number)}
+											oninput={(e) => setKnob(g, k, parseInt(e.currentTarget.value.slice(1), 16))}
+										/>
+									</div>
+								</div>
+							{:else if g === 'WEATHER' && k === 'overcast'}
+								{@const def = TUNING_DEFAULTS[g][k] as number}
+								{@const r = TUNING_RANGE[`${g}.${k}`] ?? rangeFor(def, v as number)}
+								<div class="knob" class:staged={isStaged(g, k)}>
+									<div class="head">
+										<span class="name" class:mod={isModified(g, k)}>{k}</span>
+										<span class="chip" title="sky" style="background:{swSky}"></span>
+										<span class="chip" title="sun" style="background:{swSun}"></span>
+										<span class="chip" title="moon" style="background:{swMoon}"></span>
+										{#if isModified(g, k)}
+											<button class="rev" title="Back to {show(def)}" onclick={() => revert(g, k)}
+												>↺</button
+											>
+										{/if}
+										<input
+											class="num"
+											type="number"
+											step={r.step}
+											value={show(v as number)}
+											onchange={(e) => setKnob(g, k, +e.currentTarget.value)}
+										/>
+									</div>
+									<input
+										type="range"
+										min={r.min}
+										max={Math.max(r.max, v as number)}
+										step={r.step}
+										value={v}
+										oninput={(e) => setKnob(g, k, +e.currentTarget.value)}
+									/>
+								</div>
+							{:else if typeof v === 'boolean'}
 								<label class="bool" class:staged={isStaged(g, k)}>
 									<input
 										type="checkbox"
@@ -1032,6 +1121,13 @@
 		font: inherit;
 		font-size: 11px;
 		cursor: pointer;
+	}
+	.chip {
+		width: 13px;
+		height: 13px;
+		border-radius: 3px;
+		border: 1px solid rgba(0, 0, 0, 0.45);
+		flex: none;
 	}
 	.preset:disabled {
 		color: #5a6a78;
