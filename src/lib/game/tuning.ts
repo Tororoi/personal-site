@@ -701,6 +701,11 @@ export const SPECULAR = {
    * range where chop put it at 38%. 1.0 gives the plain linear ramp.
    */
   driveCurve: 0.3,
+  // The waves-keyed soft end of the sharpness blend. (A 2026-08-25
+  // attempt merged these into the overcast WEATHER preset's values —
+  // reverted same day: the sunny/overcast presets were TUNED against
+  // this exact wiring, so changing the storm endpoints changed the
+  // looks they were meant to pin down.)
   sharpClearStorm: 100,
   sharpOvercastStorm: 100,
   sharpPeakStorm: 200,
@@ -887,8 +892,11 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
         'WEATHER.brightness': 1,
         'UNDERWATER.fresnelGrazing': 0.5,
         'WIND.gustFresnelGrazing': 0.5,
-        'UNDERWATER.surfaceReflect': 0.2,
-        'WIND.gustSurfaceReflect': 0.1,
+        'UNDERWATER.surfaceReflect': 0.02,
+        'WIND.gustSurfaceReflect': 0.01,
+        'SPECULAR.sharp': 4000,
+        'SPECULAR.gain': 5,
+        'SPECULAR.sharpPeak': 8000,
       },
     },
     { name: 'partly cloudy', set: {} },
@@ -899,8 +907,11 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
         'WEATHER.brightness': 0.7,
         'UNDERWATER.fresnelGrazing': 1.5,
         'WIND.gustFresnelGrazing': 1.25,
-        'UNDERWATER.surfaceReflect': 0.4,
-        'WIND.gustSurfaceReflect': 0.2,
+        'UNDERWATER.surfaceReflect': 0.04,
+        'WIND.gustSurfaceReflect': 0.02,
+        'SPECULAR.sharp': 200,
+        'SPECULAR.gain': 2,
+        'SPECULAR.sharpPeak': 400,
       },
     },
     { name: 'foggy', set: {} },
