@@ -300,6 +300,11 @@
 		'WEATHER.turbidity': { min: 0, max: 1, step: 0.01 },
 		'WEATHER.turbDepthExp': { min: 0, max: 0.4, step: 0.005 },
 		'WEATHER.transitionS': { min: 0, max: 60, step: 0.5 },
+		'WEATHER.cloudCover': { min: 0, max: 1, step: 0.02 },
+		'WEATHER.cloudScaleM': { min: 20, max: 300, step: 5 },
+		'WEATHER.cloudSharp': { min: 0.02, max: 0.6, step: 0.01 },
+		'WEATHER.cloudShadow': { min: 0, max: 1, step: 0.02 },
+		'WEATHER.cloudSpeedK': { min: 0, max: 4, step: 0.05 },
 		'WIND.windSpeed': { min: 0, max: 45, step: 0.5 },
 		'WIND.windCompassDeg': { min: 0, max: 360, step: 1 },
 		'SEA.currentCompassDeg': { min: 0, max: 360, step: 1 },
@@ -424,6 +429,7 @@
 		],
 		WEATHER: [
 			['dials', ['overcast', 'brightness', 'turbidity', 'turbDepthExp', 'turbColor', 'transitionS']],
+			['clouds', ['cloudCover', 'cloudScaleM', 'cloudSharp', 'cloudShadow', 'cloudSpeedK']],
 			['sky', ['skyClearZenith', 'skyClearHorizon', 'skyOvercastZenith', 'skyOvercastHorizon']]
 		],
 		WIND: [
@@ -491,7 +497,7 @@
 			['look', ['opacityGain', 'brightStart', 'brightEnd', 'hover']]
 		],
 		ENABLE: [
-			['water', ['caustics', 'fftDetail', 'gustMask', 'objectWave']],
+			['water', ['caustics', 'fftDetail', 'gustMask', 'cloudShadows', 'objectWave']],
 			['whitewater', ['loopWhite', 'loopStretch', 'froth', 'crestPlumes', 'whitecapEvents', 'bowCrest']],
 			['spray', ['splashDroplets', 'buoySpray', 'dropletFoam']],
 			['foam', ['foamField', 'foamTrail', 'contactFoam', 'contactEmit', 'turbDissipation']],

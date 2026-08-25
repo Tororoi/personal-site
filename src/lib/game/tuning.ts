@@ -102,6 +102,13 @@ export const ENABLE = {
    * steady wind — revisit only if the mismatch ever reads wrong.
    */
   gustMask: true,
+  /**
+   * CLOUD SHADOWS: the partly-cloudy mechanism — overcast-shaded cloud
+   * shapes (WEATHER.cloud*) stamped onto otherwise sunny settings. The
+   * sea only, for now: the boat and dry objects are not cloud-shadowed
+   * yet.
+   */
+  cloudShadows: true,
   /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
    * study replaced them with loop-driven emission. */
   whitecapEvents: false,
@@ -881,6 +888,22 @@ export const WEATHER = {
    * especially: this is their colour lever).
    */
   turbColor: 0x9eae9e,
+  /**
+   * CLOUD SHADOW mask (ENABLE.cloudShadows): cover is the partly-cloudy
+   * dial (0 = none — the sunny default), scale the cloud size in
+   * metres, shadow the darkening strength inside a cloud, speedK the
+   * drift as a multiple of the wind. A shadow is a LOCAL LIGHT LEVEL:
+   * everything under the cloud darkens by the mask, with the
+   * sun-derived terms falling hardest (specular killed, beam and
+   * caustics dimmed). Deliberately not "local overcast" — overcast is
+   * a lightbox that replaces the sun with a bright dome; a cloud just
+   * takes the sun away from one patch of sea.
+   */
+  cloudCover: 0,
+  cloudScaleM: 90,
+  cloudSharp: 0.25,
+  cloudShadow: 0.5,
+  cloudSpeedK: 1,
   /** Seconds a preset change cross-fades over, once the transition
    * engine lands; the preset buttons currently apply instantly. */
   transitionS: 5,
@@ -902,6 +925,7 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
     {
       name: 'sunny',
       set: {
+        'WEATHER.cloudCover': 0,
         'WEATHER.overcast': 0,
         'WEATHER.brightness': 1,
         'UNDERWATER.fresnelGrazing': 0.5,
@@ -913,10 +937,27 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
         'SPECULAR.sharpPeak': 8000,
       },
     },
-    { name: 'partly cloudy', set: {} },
+    {
+      // Sunny's settings with drifting cloud shadows — a starting point
+      // for tuning, per the mask-first design.
+      name: 'partly cloudy',
+      set: {
+        'WEATHER.overcast': 0.15,
+        'WEATHER.brightness': 1,
+        'WEATHER.cloudCover': 0.6,
+        'UNDERWATER.fresnelGrazing': 0.5,
+        'WIND.gustFresnelGrazing': 0.5,
+        'UNDERWATER.surfaceReflect': 0.02,
+        'WIND.gustSurfaceReflect': 0.01,
+        'SPECULAR.sharp': 4000,
+        'SPECULAR.gain': 5,
+        'SPECULAR.sharpPeak': 8000,
+      },
+    },
     {
       name: 'overcast',
       set: {
+        'WEATHER.cloudCover': 0,
         'WEATHER.overcast': 0.5,
         'WEATHER.brightness': 0.7,
         'UNDERWATER.fresnelGrazing': 1.5,
@@ -944,6 +985,7 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
       // loads in).
       name: 'clear shallow',
       set: {
+        'UNDERWATER.seabedDepthM': 10,
         'WEATHER.turbidity': 0,
         'WEATHER.turbDepthExp': 0.05,
         'WEATHER.turbColor': 0x9eae9e,
@@ -951,12 +993,25 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
         'UNDERWATER.greenRangeM': 60,
       },
     },
-    { name: 'clear deep', set: {} },
+    {
+      // Clear shallow's water with the floor dissolved away (80m = the
+      // slider's "effectively no seabed" top, GPU-free once faded).
+      name: 'clear deep',
+      set: {
+        'WEATHER.turbidity': 0,
+        'WEATHER.turbDepthExp': 0.05,
+        'WEATHER.turbColor': 0x9eae9e,
+        'UNDERWATER.blueRangeM': 160,
+        'UNDERWATER.greenRangeM': 60,
+        'UNDERWATER.seabedDepthM': 80,
+      },
+    },
     {
       // Murky's palette at less than half the density: same water, less
       // of it in the way.
       name: 'medium clear',
       set: {
+        'UNDERWATER.seabedDepthM': 10,
         'WEATHER.turbidity': 0.2,
         'WEATHER.turbDepthExp': 0.05,
         'WEATHER.turbColor': 0x466246,
@@ -967,6 +1022,7 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
     {
       name: 'murky',
       set: {
+        'UNDERWATER.seabedDepthM': 10,
         'WEATHER.turbidity': 0.5,
         'WEATHER.turbDepthExp': 0.05,
         'WEATHER.turbColor': 0x466246,
@@ -2123,9 +2179,17 @@ export const UNDERWATER = {
    * is absorbed near the surface, and far less comes back — which is why
    * an overcast sea reads grey and flat rather than merely darker blue.
    * Blended by the sea's own sun diffusion.
+   *
+   * These were set BACKWARDS relative to that description (clear 0,
+   * overcast 0.3) until 2026-08-25, which inverted the sea's response
+   * to weather: sunny deep water had zero column glow and read as a
+   * VOID, while turning toward overcast lit the column and made the
+   * sea lighter and bluer. It stayed hidden while the seabed was
+   * always visible at 10m — the floor supplied the colour that the
+   * column now has to. The seabed dissolve is what exposed it.
    */
-  scatterClear: 0,
-  scatterOvercast: 0.3,
+  scatterClear: 0.2,
+  scatterOvercast: 0,
   /**
    * FRESNEL FLOOR — how much sky the surface reflects when looked at
    * head-on, and the largest single source of blue over anything

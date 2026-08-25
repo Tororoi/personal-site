@@ -475,6 +475,11 @@
 		uGustWid: { value: WIND.gustWidthM },
 		uGustGain: { value: WIND.gustGain },
 		uGustFresnel: { value: WIND.gustFresnelGrazing },
+		uCloudScroll: { value: new THREE.Vector2(0, 0) },
+		uCloudCover: { value: WEATHER.cloudCover },
+		uCloudSharp: { value: WEATHER.cloudSharp },
+		uCloudScale: { value: WEATHER.cloudScaleM },
+		uCloudShadow: { value: WEATHER.cloudShadow },
 		uGustReflect: { value: WIND.gustSurfaceReflect },
 		// Solid-mode water, pool-style (Wallace/jeantimex): a Fresnel blend
 		// between transmitted water color and reflected sky, plus sun
@@ -818,7 +823,7 @@ float causticTapAt(vec3 Pi, vec3 refrLight) {
 // hull itself, shadowed by everything except its own silhouette (A) —
 // a floater reading a channel containing itself darkened its whole wet
 // body the moment it dipped.
-vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow, float graze, float objRecv) {
+vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthBelow, float graze, float objRecv, float cloudM) {
 	vec3 sunN = normalize(uSunDir);
 	vec3 refrLight = refract(-sunN, vec3(0.0, 1.0, 0.0), 0.7519);
 	// Beam incidence, relaxing toward omnidirectional (0.5) as the light
@@ -944,6 +949,10 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// Caustics are a direct-light phenomenon; they wash out with the
 	// beam's direction, not just with overcast.
 	light = mix(1.0, light, dirK);
+	// Under a cloud the caustic pattern flattens toward featureless
+	// light — caustics are a direct-sun phenomenon (same move as the
+	// overcast uCausticFlat wash, applied by the mask).
+	light = mix(light, 1.0, cloudM);
 	// Refracted rays need a little distance to converge, so there is no
 	// pattern AT the interface — but ripples focus within a fraction of a
 	// metre, so it is fully formed just below and then blurs and dims with
@@ -983,7 +992,7 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// arrived ~4x too early and shallow blue objects BRIGHTENED underwater.
 	vec3 glow = uwVolume() * (vec3(1.0) - depthLight) * uUwGlow;
 	vec3 col = albedo
-		* (depthLight * (amb * uUwAmbient + beam * (uUwDirect * inc * min(light, 1.0))) + glow);
+		* (depthLight * (amb * uUwAmbient + beam * ((1.0 - cloudM) * uUwDirect * inc * min(light, 1.0))) + glow);
 	col += beam * max(light - 1.0, 0.0) * uUwRidge * inc * depthLight;
 	return col * uUwExposure;
 }`;
@@ -1354,6 +1363,55 @@ ${foamGlsl()}
 ${ripplesGlsl()}
 ${wavesGlsl()}
 ${ENABLE.fftDetail ? fftSlopeGlsl() : ''}
+
+// 2-octave value noise, shared by the gust and cloud masks.
+float gustHash(vec2 p) {
+	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+float gustVnoise(vec2 p) {
+	vec2 i = floor(p);
+	vec2 fp = fract(p);
+	vec2 u2 = fp * fp * (3.0 - 2.0 * fp);
+	return mix(
+		mix(gustHash(i), gustHash(i + vec2(1.0, 0.0)), u2.x),
+		mix(gustHash(i + vec2(0.0, 1.0)), gustHash(i + vec2(1.0, 1.0)), u2.x),
+		u2.y);
+}
+${
+	ENABLE.cloudShadows
+		? `// CLOUD SHADOWS (WEATHER.cloud*): the partly-cloudy mechanism.
+// Overcast-shaded cloud shapes stamped onto otherwise sunny settings:
+// inside the mask the sun's specular dies and the underwater beam and
+// caustics flatten toward ambient — the same physics overcast applies
+// everywhere, applied somewhere. Shapes are the cow-spot recipe at
+// cloud scale, drifting on their own wind multiple.
+uniform vec2 uCloudScroll;
+uniform float uCloudCover;
+uniform float uCloudSharp;
+uniform float uCloudScale;
+uniform float uCloudShadow;
+float cloudMaskAt(vec2 wxz) {
+	// COVER 0 MUST COST NOTHING. Both sunny and overcast park here, and
+	// the mask below is 4 value-noise evaluations — 16 hashed sines —
+	// on every water pixel. The branch is on a UNIFORM, so the whole
+	// frame agrees and the hardware really skips it rather than
+	// evaluating both sides.
+	if (uCloudCover <= 0.0) return 0.0;
+	vec2 q = (wxz - uCloudScroll) / uCloudScale;
+	q += (vec2(gustVnoise(q * 0.6 + 3.1), gustVnoise(q * 0.6 + 17.9)) - 0.5) * 0.4;
+	float n = gustVnoise(q) * 0.7 + gustVnoise(q * 2.1 + 41.7) * 0.3;
+	float th = mix(0.85, 0.35, uCloudCover);
+	// COVER 0 MUST MEAN NO CLOUD, not "rare cloud". The noise peaks at
+	// 1.0, so the cover-0 threshold of 0.85 still let a few percent of
+	// the sea through at up to a quarter darkening. That was invisible
+	// while the mask only nudged the sun terms; once it multiplied the
+	// whole result it read as deep water going dim on the sunny preset.
+	// The gate closes the mask outright over the bottom of the dial.
+	return smoothstep(th, th + uCloudSharp, n) * uCloudShadow
+		* smoothstep(0.0, 0.04, uCloudCover);
+}`
+		: ''
+}
 ${
 	ENABLE.gustMask
 		? `${gustSlopeGlsl()}
@@ -1371,19 +1429,6 @@ uniform float uGustGain;
 uniform float uGustFresnel;
 uniform float uGustReflect;
 
-// 2-octave value noise for the gust mask — self-contained on purpose.
-float gustHash(vec2 p) {
-	return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-}
-float gustVnoise(vec2 p) {
-	vec2 i = floor(p);
-	vec2 fp = fract(p);
-	vec2 u2 = fp * fp * (3.0 - 2.0 * fp);
-	return mix(
-		mix(gustHash(i), gustHash(i + vec2(1.0, 0.0)), u2.x),
-		mix(gustHash(i + vec2(0.0, 1.0)), gustHash(i + vec2(1.0, 1.0)), u2.x),
-		u2.y);
-}
 // The mask: COW SPOTS — irregular rounded blobs from one low-frequency
 // noise octave, gently warped. The wind shows through the spots'
 // TRAVEL (uGustScroll advection) and through the ripple direction
@@ -1695,6 +1740,7 @@ void main() {
 	// specular lives on exactly that, since a glint appears only where
 	// the normal reaches the mirror angle.
 	${ENABLE.gustMask ? 'float gustM = gustMaskAt(vWorld.xz);' : ''}
+	${ENABLE.cloudShadows ? 'float cloudM = cloudMaskAt(vWorld.xz);' : 'const float cloudM = 0.0;'}
 	vec2 slope = ${
 		PROFILE.vertexSlope ? 'vSlope' : 'waveSlope(vRest, uTime, uAmp)'
 	} + ${PROFILE.skipRipple ? 'vec2(0.0)' : 'rippleShadeGrad(vWorld.xz)'}
@@ -1844,7 +1890,7 @@ void main() {
 		transmitted = turbOdAt(tHit, pEntry.y, refr.y) > TURB_OD_CUT
 			? vec3(0.0)
 			: shadeUnderwater(
-					P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), recvCh);
+					P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), recvCh, cloudM);
 	} else if (tSeabed > 0.0) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
@@ -1859,10 +1905,13 @@ void main() {
 		// with it so extinction and the turbidity fog stay continuous.
 		float sbFade = 1.0 - smoothstep(40.0, 80.0, uUwSeabedD);
 		waterPath = mix(60.0, tSeabed, sbFade);
-		vec3 sb = turbOdAt(tSeabed, pEntry.y, refr.y) > TURB_OD_CUT
+		// sbFade 0 (depth at the slider's 80m top) skips the shading too:
+		// a fully dissolved seabed costs the GPU nothing, exactly like
+		// the toggle.
+		vec3 sb = (sbFade < 0.001 || turbOdAt(tSeabed, pEntry.y, refr.y) > TURB_OD_CUT)
 			? vec3(0.0)
 			: shadeUnderwater(
-					Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tSeabed, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0);
+					Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tSeabed, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0, cloudM);
 		transmitted = sbFade > 0.999 ? sb : mix(uwVolume(), sb, sbFade);
 	} else {
 		// Seabed off, total internal reflection, or a grazing ray with no
@@ -1975,7 +2024,9 @@ void main() {
 	float specWash = exp(-0.5 * (qA / (sigWash * uSpecAniso) + qC * uSpecAniso / sigWash));
 	// No reflection from a sun under the horizon, or one the facet faces away from.
 	float specVis = step(0.001, specH.y) * step(0.0, normalize(uSunDir).y);
-	col += uSunColor * (uSunI * uSpecGain * uSpecFade * specVis
+	// Cloud shadow kills the glitter: the specular is the sun's mirror,
+	// and there is no sun inside the shadow.
+	col += uSunColor * ((1.0 - cloudM) * uSunI * uSpecGain * uSpecFade * specVis
 		* (specCore + uSpecHaloGain * specWash)
 		* mix(1.0, fresnel, uSpecFresnelMix));`
 	}
@@ -2055,6 +2106,17 @@ void main() {
 		col = whitewaterLight(uFoamColor, vec3(0.0, 1.0, 0.0), ${f(1 - FOAM.shapeFloor)});
 	}`
 	}
+
+	// CLOUD SHADOW as a LOCAL LIGHT LEVEL: everything under the cloud
+	// darkens by the mask — water, reflection, foam, the lot — with the
+	// sun-derived terms (specular killed, beam and caustics dimmed
+	// above) falling hardest. This is deliberately NOT local overcast:
+	// overcast is a giant lightbox that replaces the sun with a bright
+	// diffuse dome, while a cloud merely takes the sun away from one
+	// patch of sea that keeps its ordinary ambient. The first version
+	// dimmed only the sun-derived terms and was nearly invisible —
+	// ambient and sky reflection carry most of this sea's brightness.
+	${ENABLE.cloudShadows ? 'col *= 1.0 - cloudM;' : ''}
 
 	${fogGlsl('fog')}
 	col = mix(col, uFogColor, fog);
@@ -2384,7 +2446,7 @@ void main() {
 	// blend band on an exposed crown.
 	float belowS = max(waterY - vWorld.y, 0.0);
 	vec3 wet = shadeUnderwater(vWorld, normal, uSphereColor, belowS, belowS,
-		abs(dot(normal, vec3(${f(CAM_AXIS.x)}, ${f(CAM_AXIS.y)}, ${f(CAM_AXIS.z)}))), 1.0);
+		abs(dot(normal, vec3(${f(CAM_AXIS.x)}, ${f(CAM_AXIS.y)}, ${f(CAM_AXIS.z)}))), 1.0, 0.0);
 
 	vec3 col = mix(dry, wet, submerged);
 
@@ -4744,6 +4806,16 @@ void main() {
 				waterUniforms.uGustFresnel.value = WIND.gustFresnelGrazing;
 				waterUniforms.uGustReflect.value = WIND.gustSurfaceReflect;
 			}
+			{
+				// Clouds drift on their own wind multiple, whatever the gust
+				// mask is doing.
+				waterUniforms.uCloudScroll.value.x += windSteady.x * WEATHER.cloudSpeedK * delta;
+				waterUniforms.uCloudScroll.value.y += windSteady.z * WEATHER.cloudSpeedK * delta;
+				waterUniforms.uCloudCover.value = WEATHER.cloudCover;
+				waterUniforms.uCloudSharp.value = WEATHER.cloudSharp;
+				waterUniforms.uCloudScale.value = WEATHER.cloudScaleM;
+				waterUniforms.uCloudShadow.value = WEATHER.cloudShadow;
+			}
 			lap('gpuFft');
 			backdropUniforms.uRippleCTex.value = rippleSim.texture;
 			if (!PROFILE.skipCausticSim) {
@@ -4907,10 +4979,21 @@ void main() {
 				uwUniforms.uUwExposure.value = UNDERWATER.exposure;
 				// Clear light drives deep and returns blue; overcast light is
 				// absorbed near the surface and returns little.
+				//
+				// Blended straight off the VISIBLE overcast knob. This used
+				// to ride `dif` (the sea's sun diffusion), which is itself a
+				// hidden function of overcast — 0.05 + 0.65*overcast, then
+				// divided by 0.7 here. Composed, that put the blend at 0.071
+				// with the overcast slider hard at zero and capped it at
+				// 0.536 on the overcast preset, so NEITHER endpoint was ever
+				// reachable and both knobs lied about their own labels.
+				// Diffusion keeps driving what it should — caustic blur
+				// radius and uCausticFlat — but scattering answers to the
+				// dial the tuner is actually holding.
 				uwUniforms.uUwScatterI.value =
 					UNDERWATER.scatterClear +
 					(UNDERWATER.scatterOvercast - UNDERWATER.scatterClear) *
-						Math.min(Math.max(dif / 0.7, 0), 1);
+						Math.min(Math.max(WEATHER.overcast, 0), 1);
 				uwUniforms.uUwAmbTint.value = UNDERWATER.ambientSkyHue;
 				uwUniforms.uUwWrap.value = UNDERWATER.wrap;
 				uwUniforms.uUwFresnelGraze.value = UNDERWATER.fresnelGrazing;

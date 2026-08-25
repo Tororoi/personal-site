@@ -247,7 +247,9 @@
 		font-family: var(--font-mono);
 		font-size: 11px;
 		letter-spacing: 0.1em;
-		color: var(--faint);
+		/* Cyan, not the theme's faint grey: this readout sits over open
+		   water and the grey sank into it. */
+		color: #5fd6e6;
 		pointer-events: none;
 	}
 </style>
