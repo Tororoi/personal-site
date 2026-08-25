@@ -147,7 +147,12 @@ if (SAVED.SPECULAR) {
 	if ('gainClear' in SAVED.SPECULAR) {
 		SAVED.SPECULAR.gain = SAVED.SPECULAR.gainClear;
 	}
-	for (const k of ['sharpClear', 'sharpOvercast', 'gainClear', 'gainOvercast']) {
+	for (const k of [
+		'sharpClear',
+		'sharpOvercast',
+		'gainClear',
+		'gainOvercast'
+	]) {
 		delete SAVED.SPECULAR[k];
 	}
 	saveOverrides(SAVED);

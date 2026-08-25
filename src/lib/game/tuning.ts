@@ -701,11 +701,15 @@ export const SPECULAR = {
    * range where chop put it at 38%. 1.0 gives the plain linear ramp.
    */
   driveCurve: 0.3,
-  // The waves-keyed soft end of the sharpness blend. (A 2026-08-25
-  // attempt merged these into the overcast WEATHER preset's values —
-  // reverted same day: the sunny/overcast presets were TUNED against
-  // this exact wiring, so changing the storm endpoints changed the
-  // looks they were meant to pin down.)
+  /**
+   * WAVE-SIZE compensation, NOT weather: calm glitter physics and
+   * big-wave glitter physics demand different sharpness, with the
+   * non-linear drive (driveSlope/driveCurve above) ramping between
+   * them. A 2026-08-25 attempt merged these into the overcast WEATHER
+   * preset's values — wrong coupling (retuning a sky look silently
+   * moved the wave-geometry correction) and the presets' tuned looks
+   * shifted. Any future merge belongs to WAVE presets, not sky ones.
+   */
   sharpClearStorm: 100,
   sharpOvercastStorm: 100,
   sharpPeakStorm: 200,
