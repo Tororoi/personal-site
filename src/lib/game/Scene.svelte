@@ -1659,6 +1659,26 @@ float uwObjectShadow(vec3 Q, vec3 upSun, float objRecv) {
 	return v;
 }
 
+// Turbidity optical depth along a view segment (the fog block's closed
+// form, factored out): cheap enough to evaluate BEFORE shading, so a
+// pixel the veil already owns can skip shadeUnderwater — its caustic
+// taps, shadow ratios and per-channel transcendentals — entirely. At
+// od 5 the veil is 99.3%: whatever shading would have computed
+// contributes under 1%, so skipping is invisible and murk gets CHEAPER
+// than clear water instead of more expensive.
+float turbOdAt(float L, float y0, float ry) {
+	if (uUwTurb < 0.02) return 0.0;
+	float dens = 2.5 * uUwTurb * uUwTurb;
+	float mSink = max(-ry, 0.001);
+	float D0 = max(-y0, 0.0);
+	float km = uUwTurbK * mSink;
+	if (km > 0.01) {
+		return dens * exp(uUwTurbK * D0) * (exp(km * L) - 1.0) / km;
+	}
+	return dens * L * exp(uUwTurbK * D0);
+}
+#define TURB_OD_CUT 5.0
+
 void main() {
 	// SMOOTH shading: interpolated analytic wave slope + per-pixel ripple
 	// slope from the sim texture (rings shade at texture resolution no
@@ -1820,8 +1840,11 @@ void main() {
 	if (tHit > 0.0 && (tSeabed <= 0.0 || tHit < tSeabed)) {
 		vec3 P = pEntry + refr * tHit;
 		waterPath = tHit;
-		transmitted = shadeUnderwater(
-			P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), recvCh);
+		// Veil-owned pixels skip the shading (see turbOdAt).
+		transmitted = turbOdAt(tHit, pEntry.y, refr.y) > TURB_OD_CUT
+			? vec3(0.0)
+			: shadeUnderwater(
+					P, hitN, albedo, tHit, max(pEntry.y - P.y, 0.0), abs(dot(refr, hitN)), recvCh);
 	} else if (tSeabed > 0.0) {
 		// The FLOOR, through the same shading path as everything else. It
 		// used to be a flat colour with baked constants, which meant the
@@ -1830,9 +1853,17 @@ void main() {
 		// "only affects the sphere". Intersect the refracted ray with the
 		// caustic plane and shade it like any other submerged surface.
 		vec3 Pf = pEntry + refr * tSeabed;
-		waterPath = tSeabed;
-		transmitted = shadeUnderwater(
-			Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tSeabed, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0);
+		// DEEP-SEABED FADE: from 40m the floor dissolves toward the
+		// open-water volume, gone by 80m — the slider's top now IS
+		// "no seabed" instead of an abrupt toggle. The waterPath blends
+		// with it so extinction and the turbidity fog stay continuous.
+		float sbFade = 1.0 - smoothstep(40.0, 80.0, uUwSeabedD);
+		waterPath = mix(60.0, tSeabed, sbFade);
+		vec3 sb = turbOdAt(tSeabed, pEntry.y, refr.y) > TURB_OD_CUT
+			? vec3(0.0)
+			: shadeUnderwater(
+					Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tSeabed, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0);
+		transmitted = sbFade > 0.999 ? sb : mix(uwVolume(), sb, sbFade);
 	} else {
 		// Seabed off, total internal reflection, or a grazing ray with no
 		// floor ahead: the water column alone. uwVolume() is its
@@ -1846,33 +1877,19 @@ void main() {
 	// that same distance. A flat mix toward one water colour used to do
 	// both jobs badly — tinting a hull 5cm down as hard as the seabed,
 	// and painting the sea a colour it had no physical reason to be.
-	vec3 through = uwTransmit(waterPath);
-	transmitted = transmitted * through + uwVolume() * (1.0 - through);
 	// TURBIDITY (WEATHER.turbidity) is a VIEW-PATH FOG: suspended
 	// particulate is grey, so it attenuates every channel equally and
 	// scatters AMBIENT light back in as a milky veil — near things stay
-	// clear, far things wash out, the seabed disappears first. The
-	// first attempt shortened the absorption ranges instead, which only
-	// re-coloured the water bluer: absorption picks colours, SCATTERING
-	// makes murk. The veil is lit by the ambient irradiance, so it dims
-	// with dusk instead of glowing in the dark.
+	// clear, far things wash out, the seabed disappears first. (The
+	// closed-form optical depth lives in turbOdAt above, shared with
+	// the veil-skip guards on the shading calls.) The veil is lit by
+	// the ambient irradiance, so it dims with dusk instead of glowing
+	// in the dark.
 	{
-		float turbDens = 2.5 * uUwTurb * uUwTurb;
-		// Density grows exp(uUwTurbK x depth) down the column. Along a
-		// straight ray depth is linear in distance, so the optical depth
-		// has a CLOSED FORM: dens * e^(kD0) * (e^(k m L) - 1) / (k m),
-		// with D0 the entry depth and m the ray's sink rate. The k->0
-		// limit is the uniform fog it replaces; the mix below spans the
-		// removable singularity instead of dividing by ~0.
-		float kD = uUwTurbK;
-		float mSink = max(-refr.y, 0.001);
-		float D0 = max(-pEntry.y, 0.0);
-		float km = kD * mSink;
-		float od;
-		if (km > 0.01) {
-			od = turbDens * exp(kD * D0) * (exp(km * waterPath) - 1.0) / km;
-		} else {
-			od = turbDens * waterPath * exp(kD * D0);
+		float od = turbOdAt(waterPath, pEntry.y, refr.y);
+		if (od < TURB_OD_CUT) {
+			vec3 through = uwTransmit(waterPath);
+			transmitted = transmitted * through + uwVolume() * (1.0 - through);
 		}
 		float turbThrough = exp(-od);
 		// Tint is the WEATHER.turbColor picker; ambient keeps it honest

@@ -301,6 +301,8 @@ export class FftWaveField {
   private matResolve: THREE.ShaderMaterial
   /** Per-cascade output scale, chosen so the summed field hits `slope`. */
   private gains: number[]
+  /** Cascades whose zeroed output texture is already written (see step). */
+  private cleared: boolean[] = CASCADES.map(() => false)
 
   constructor(minL: number, maxL: number, slope: number, dirPow = 1) {
     // N wide, STAGES tall — see the note in butterflyFragment.
@@ -338,6 +340,7 @@ export class FftWaveField {
     // sqrt(count) makes the sum land on `slope` rather than overshooting it.
     const share = slope / Math.sqrt(CASCADES.length)
     this.gains = rms.map((r) => (r > 1e-9 ? share / r : 0))
+    this.cleared = CASCADES.map(() => false)
 
     const common = { depthTest: false, depthWrite: false }
     this.matSpectrum = new THREE.ShaderMaterial({
@@ -403,6 +406,7 @@ export class FftWaveField {
     })
     const share = slope / Math.sqrt(CASCADES.length)
     this.gains = rms.map((r) => (r > 1e-9 ? share / r : 0))
+    this.cleared = CASCADES.map(() => false)
     this.matSpectrum.uniforms.uTimeScale.value = activeField.timeScale ?? 1
   }
 
@@ -410,6 +414,20 @@ export class FftWaveField {
   step(renderer: THREE.WebGLRenderer, t: number) {
     const prev = renderer.getRenderTarget()
     for (let c = 0; c < CASCADES.length; c++) {
+      // DEAD-CASCADE SKIP: a band-limited spectrum can leave a cascade
+      // empty (the GUST field's 0.1-0.5m band fits entirely in the
+      // small patch), and an empty cascade still cost the full FFT
+      // chain — a spectrum evolve plus 2*log2(N) butterfly passes of
+      // zeros, measured at ~0.4ms/frame. Zero its output once and skip.
+      if (this.gains[c] <= 0) {
+        if (!this.cleared[c]) {
+          renderer.setRenderTarget(this.out[c])
+          renderer.setClearColor(0x000000, 1)
+          renderer.clear(true, false, false)
+          this.cleared[c] = true
+        }
+        continue
+      }
       this.matSpectrum.uniforms.uH0.value = this.h0[c]
       this.matSpectrum.uniforms.uTime.value = t
       this.matSpectrum.uniforms.uPatch.value = CASCADES[c]

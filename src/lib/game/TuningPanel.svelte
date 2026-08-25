@@ -253,7 +253,7 @@
 		'BOAT.liftMax': { min: 0, max: 0.5, step: 0.01 },
 		'UNDERWATER.ambient': { min: 0, max: 1.2, step: 0.01 },
 		'UNDERWATER.direct': { min: 0, max: 1.5, step: 0.01 },
-		'UNDERWATER.seabedDepthM': { min: 2, max: 60, step: 0.5 },
+		'UNDERWATER.seabedDepthM': { min: 2, max: 80, step: 0.5 },
 		'CAUSTICS.edgeAA': { min: 0, max: 1, step: 0.02 },
 		'CAUSTICS.maxBright': { min: 2, max: 40, step: 0.5 },
 		'CAUSTICS.temporalAA': { min: 0, max: 0.92, step: 0.02 },
