@@ -203,6 +203,7 @@
 	 */
 	/** Knobs stored as 0xRRGGBB numbers, rendered as colour pickers. */
 	const COLOR_KNOBS = new Set([
+		'WEATHER.turbColor',
 		'WEATHER.skyClearZenith',
 		'WEATHER.skyClearHorizon',
 		'WEATHER.skyOvercastZenith',
@@ -422,7 +423,7 @@
 			['altitude', ['altHigh', 'altLow', 'fadeAltDeg']]
 		],
 		WEATHER: [
-			['dials', ['overcast', 'brightness', 'turbidity', 'turbDepthExp', 'transitionS']],
+			['dials', ['overcast', 'brightness', 'turbidity', 'turbDepthExp', 'turbColor', 'transitionS']],
 			['sky', ['skyClearZenith', 'skyClearHorizon', 'skyOvercastZenith', 'skyOvercastHorizon']]
 		],
 		WIND: [

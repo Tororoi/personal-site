@@ -346,6 +346,7 @@
 		uUwShadowK: { value: CAUSTICS.castShadow },
 		uUwTurb: { value: WEATHER.turbidity },
 		uUwTurbK: { value: WEATHER.turbDepthExp },
+		uUwTurbCol: { value: new THREE.Color(WEATHER.turbColor) },
 		uUwRidge: { value: CAUSTICS.ridgeGain },
 		uUwSigma: { value: new THREE.Vector3() },
 		uUwScatter: { value: new THREE.Vector3() },
@@ -667,9 +668,10 @@ uniform float uUwDirect;
 // caustics.ts — shadows live in the map's G/B/A channels, made of the
 // same rays as the pattern, exactly the reference's system).
 uniform float uUwShadowK;
-// WEATHER.turbidity / turbDepthExp — the water fragment's view-path fog.
+// WEATHER.turbidity / turbDepthExp / turbColor — the view-path fog.
 uniform float uUwTurb;
 uniform float uUwTurbK;
+uniform vec3 uUwTurbCol;
 // HYBRID leg: the map's channels cannot carry underwater-object ->
 // object shadows (a channel per caster doesn't scale), so those come
 // receiver-side: analytic ahead-only tests along the refracted sun
@@ -1873,7 +1875,9 @@ void main() {
 			od = turbDens * waterPath * exp(kD * D0);
 		}
 		float turbThrough = exp(-od);
-		vec3 turbCol = uUwAmbIrr * vec3(0.62, 0.68, 0.62);
+		// Tint is the WEATHER.turbColor picker; ambient keeps it honest
+		// through the day cycle.
+		vec3 turbCol = uUwAmbIrr * uUwTurbCol;
 		transmitted = transmitted * turbThrough + turbCol * (1.0 - turbThrough);
 	}
 
@@ -4874,6 +4878,7 @@ void main() {
 				uwUniforms.uUwShadowK.value = Math.min(Math.max(CAUSTICS.castShadow, 0), 1);
 				uwUniforms.uUwTurb.value = WEATHER.turbidity;
 				uwUniforms.uUwTurbK.value = WEATHER.turbDepthExp;
+				(uwUniforms.uUwTurbCol.value as THREE.Color).setHex(WEATHER.turbColor);
 				uwUniforms.uCausticPyr1.value = causticMap.pyr1Texture;
 				uwUniforms.uCausticShadow.value = causticMap.shadowTexture;
 				uwUniforms.uCausticShadowL1.value = causticMap.shadowL1Texture;

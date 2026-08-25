@@ -871,6 +871,16 @@ export const WEATHER = {
    * — no marching, one exp either way.
    */
   turbDepthExp: 0.05,
+  /**
+   * The turbidity veil's COLOUR (0xRRGGBB picker). The veil is this
+   * tint lit by the ambient, so it still dims at dusk — but the tint
+   * itself decides whether murk reads as grey milk or green-brown pond
+   * water. It was a hardcoded grey-green before this knob existed,
+   * which is exactly why the murky preset came out washed-out grey
+   * under a grey sky. Clarity presets should set it (algae blooms
+   * especially: this is their colour lever).
+   */
+  turbColor: 0x9eae9e,
   /** Seconds a preset change cross-fades over, once the transition
    * engine lands; the preset buttons currently apply instantly. */
   transitionS: 5,
@@ -936,17 +946,30 @@ export const WEATHER_PRESETS: Record<string, WeatherPreset[]> = {
       set: {
         'WEATHER.turbidity': 0,
         'WEATHER.turbDepthExp': 0.05,
+        'WEATHER.turbColor': 0x9eae9e,
         'UNDERWATER.blueRangeM': 160,
         'UNDERWATER.greenRangeM': 60,
       },
     },
     { name: 'clear deep', set: {} },
-    { name: 'medium clear', set: {} },
+    {
+      // Murky's palette at less than half the density: same water, less
+      // of it in the way.
+      name: 'medium clear',
+      set: {
+        'WEATHER.turbidity': 0.2,
+        'WEATHER.turbDepthExp': 0.05,
+        'WEATHER.turbColor': 0x466246,
+        'UNDERWATER.blueRangeM': 50,
+        'UNDERWATER.greenRangeM': 80,
+      },
+    },
     {
       name: 'murky',
       set: {
-        'WEATHER.turbidity': 0.3,
+        'WEATHER.turbidity': 0.5,
         'WEATHER.turbDepthExp': 0.05,
+        'WEATHER.turbColor': 0x466246,
         'UNDERWATER.blueRangeM': 50,
         'UNDERWATER.greenRangeM': 80,
       },
