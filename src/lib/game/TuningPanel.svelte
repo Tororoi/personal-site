@@ -256,7 +256,7 @@
 		'UNDERWATER.seabedDepthM': { min: 2, max: 80, step: 0.5 },
 		'CAUSTICS.edgeAA': { min: 0, max: 1, step: 0.02 },
 		'CAUSTICS.maxBright': { min: 2, max: 40, step: 0.5 },
-		'CAUSTICS.temporalAA': { min: 0, max: 0.92, step: 0.02 },
+		'CAUSTICS.temporalAA': { min: 0, max: 0.97, step: 0.01 },
 		'INSPECT.simpleLambdaM': { min: 8, max: 120, step: 1 },
 		'INSPECT.simpleAmpM': { min: 0.05, max: 3, step: 0.05 },
 		'INSPECT.simpleSteepness': { min: 0, max: 1.3, step: 0.01 },
@@ -266,8 +266,12 @@
 		'CAUSTICS.ridgeGain': { min: 0, max: 2.5, step: 0.02 },
 		'CAUSTICS.castShadow': { min: 0, max: 1, step: 0.05 },
 		'PROFILE.causticMapRes': { min: 1024, max: 4096, step: 512 },
-		'PROFILE.causticRaySpacingM': { min: 0.05, max: 0.6, step: 0.005 },
+		'PROFILE.causticRaySpacingM': { min: 0.05, max: 1.2, step: 0.005 },
+		'PROFILE.causticShadowSpacingM': { min: 0.05, max: 1.2, step: 0.005 },
 		'CAUSTICS.clampCells': { min: 0, max: 4, step: 0.05 },
+		'CAUSTICS.jitterCells': { min: 0, max: 1, step: 0.02 },
+		'CAUSTICS.shadowTemporalAA': { min: 0, max: 0.97, step: 0.01 },
+		'CAUSTICS.shadowEdgeAA': { min: 0, max: 1, step: 0.05 },
 		'PROFILE.renderScale': { min: 0.5, max: 1, step: 0.05 },
 		'UNDERWATER.redRangeM': { min: 0.5, max: 40, step: 0.5 },
 		'UNDERWATER.greenRangeM': { min: 2, max: 150, step: 1 },
@@ -400,7 +404,8 @@
 			['splat', ['maxBright', 'sourceBlurM']],
 			['depth', ['formM', 'focalM', 'blurPerM', 'diffuseDepthM']],
 			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain', 'castShadow']],
-			['stability', ['clampCells']],
+			['stability', ['clampCells', 'jitterCells']],
+			['shadow map', ['shadowTemporalAA', 'shadowEdgeAA']],
 			['inspect', ['showMap']]
 		],
 		UNDERWATER: [
@@ -517,6 +522,7 @@
 					'skipCausticSim',
 					'causticMapRes',
 					'causticRaySpacingM',
+					'causticShadowSpacingM',
 					'skipFoamSim'
 				]
 			],

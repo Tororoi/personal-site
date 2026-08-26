@@ -635,6 +635,16 @@ export class CausticMap {
   private shadowL1: THREE.WebGLRenderTarget
   private shadowL2: THREE.WebGLRenderTarget
   private shadowScratch: THREE.WebGLRenderTarget
+  /** Shadow chain's own AA target + history pair, mirroring the pattern's. */
+  private shadowAA: THREE.WebGLRenderTarget
+  private shadowHistA: THREE.WebGLRenderTarget
+  private shadowHistB: THREE.WebGLRenderTarget
+  private shadowCanon!: THREE.WebGLRenderTarget
+  private shadowGrid = 48
+  private shadowHistSeeded = false
+  private shadowPrevCenter = new THREE.Vector2()
+  private shadowPrevExtent = 0
+  private shadowPrevGrid = 0
   private copyMaterial: THREE.ShaderMaterial
   private copyScene: THREE.Scene
   /**
@@ -790,9 +800,19 @@ export class CausticMap {
     // at any grid; a coarser one only makes visibility vary linearly over
     // bigger patches, which soft shadow fields don't mind. Quarter the
     // vertex work of the pattern pass.
-    this.shadowGeometry = this.buildSplatGeometry(
-      Math.max(Math.round(this.tileGrid / 2), 16),
+    // Its OWN lattice (PROFILE.causticShadowSpacingM), not tileGrid/2:
+    // the pattern's density is chosen against temporal accumulation and
+    // depth blur, neither of which this pass gets.
+    this.shadowGrid = Math.min(
+      Math.max(
+        Math.round(
+          CAUSTIC_EXTENT / TILES / Math.max(PROFILE.causticShadowSpacingM, 0.01),
+        ),
+        16,
+      ),
+      48,
     )
+    this.shadowGeometry = this.buildSplatGeometry(this.shadowGrid)
     this.shadowScene = new THREE.Scene()
     const shadowMesh = new THREE.Mesh(this.shadowGeometry, this.shadowMaterial)
     shadowMesh.frustumCulled = false
@@ -905,6 +925,11 @@ export class CausticMap {
       shadowOpts,
     )
     const q = CAUSTIC_RESOLUTION / 4
+    const sh = CAUSTIC_RESOLUTION / 2
+    this.shadowAA = new THREE.WebGLRenderTarget(sh, sh, shadowOpts)
+    this.shadowHistA = new THREE.WebGLRenderTarget(sh, sh, shadowOpts)
+    this.shadowHistB = new THREE.WebGLRenderTarget(sh, sh, shadowOpts)
+    this.shadowCanon = this.shadowTarget
     this.shadowL1 = new THREE.WebGLRenderTarget(q, q, shadowOpts)
     this.shadowL2 = new THREE.WebGLRenderTarget(q, q, shadowOpts)
     this.shadowScratch = new THREE.WebGLRenderTarget(q, q, shadowOpts)
@@ -1051,7 +1076,7 @@ void main() {
   /** Half-res RGBA shadow map: R clean, G/B/A shadowed light (see the
    *  splat split note). Receivers take ratios of its own channels. */
   get shadowTexture(): THREE.Texture {
-    return this.shadowTarget.texture
+    return this.shadowCanon.texture
   }
 
   /** The shadow map's defocus rungs (~0.5m and ~2m sigma). */
@@ -1142,9 +1167,10 @@ void main() {
       const phaseZ = Math.round(cc0.y / raySp) * raySp - cc0.y
       const j = this.material.uniforms.uJitter.value as THREE.Vector2
       if (taa > 0) {
+        const jit = Math.max(CAUSTICS.jitterCells, 0)
         j.set(
-          phaseX + (halton(this.frameIdx, 2) - 0.5) * raySp,
-          phaseZ + (halton(this.frameIdx, 3) - 0.5) * raySp,
+          phaseX + (halton(this.frameIdx, 2) - 0.5) * raySp * jit,
+          phaseZ + (halton(this.frameIdx, 3) - 0.5) * raySp * jit,
         )
       } else {
         j.set(phaseX, phaseZ)
@@ -1249,6 +1275,7 @@ void main() {
     renderer.setRenderTarget(this.shadowTarget)
     renderer.clear(true, false, false)
     renderer.render(this.shadowScene, this.splatCamera)
+    this.shadowCanon = this.shadowTarget
 
     // Edge-directed antialias (see edgeAAFragment): repair the filament
     // staircase before anything downstream reads the map. Runs over the
@@ -1323,6 +1350,72 @@ void main() {
       this.prevGrid = this.tileGrid
     } else {
       this.histSeeded = false
+    }
+
+    // THE SHADOW CHAIN GETS THE SAME TREATMENT. It used to go straight
+    // from the splat to its pyramid — no antialias, no history — which
+    // was survivable only while the lattice was dense enough that a
+    // frame's occluded-ray fraction barely moved. Coarsen the map and
+    // the fraction quantises, and with nothing integrating it the jitter
+    // lands on screen as flickering shadow edges. The receiver's ratio
+    // read (channel / clean) cancels a lot of shared jitter, but not the
+    // part where numerator and denominator disagree about which rays an
+    // occluder caught. Both stages are the pattern's own materials: the
+    // AA already detects on the clean channel and blends all four, and
+    // the accumulator is per-channel for exactly these fields.
+    const shTexel = 2 / CAUSTIC_RESOLUTION
+    if (CAUSTICS.shadowEdgeAA > 0 && count > 0) {
+      const aaU = this.aaMaterial.uniforms
+      ;(aaU.uRegion.value as THREE.Vector4).copy(this.region)
+      aaU.uAA.value = CAUSTICS.shadowEdgeAA
+      aaU.uTexelAA.value = shTexel
+      aaU.uSrc.value = this.shadowCanon.texture
+      renderer.setRenderTarget(this.shadowAA)
+      renderer.clear(true, false, false)
+      renderer.render(this.aaScene, this.splatCamera)
+      this.shadowCanon = this.shadowAA
+      // Hand the pattern's own AA uniform back, or the next frame's
+      // pattern pass inherits the half-res texel and softens.
+      aaU.uTexelAA.value = 1 / CAUSTIC_RESOLUTION
+    }
+    const shTaa = Math.min(Math.max(CAUSTICS.shadowTemporalAA, 0), 0.99)
+    if (shTaa > 0 && count > 0) {
+      const cc4 = this.material.uniforms.uCenter.value as THREE.Vector2
+      const invalid =
+        !this.shadowHistSeeded ||
+        this.shadowPrevExtent !== this.extent ||
+        this.shadowPrevGrid !== this.shadowGrid ||
+        Math.abs(cc4.x - this.shadowPrevCenter.x) +
+          Math.abs(cc4.y - this.shadowPrevCenter.y) >
+          0.2 * this.extent
+      const aU = this.accumMaterial.uniforms
+      ;(aU.uScroll.value as THREE.Vector2).set(
+        (cc4.x - this.shadowPrevCenter.x) / this.extent,
+        (cc4.y - this.shadowPrevCenter.y) / this.extent,
+      )
+      aU.uAlpha.value = invalid ? 0 : shTaa
+      // Ray cells of the SHADOW lattice, floored at this map's own texel
+      // (half the pattern's).
+      aU.uTexelT.value = Math.max(
+        shTexel,
+        Math.max(CAUSTICS.clampCells, 0) / (TILES * this.shadowGrid),
+      )
+      aU.uHist.value = this.shadowHistB.texture
+      aU.uCur.value = this.shadowCanon.texture
+      ;(aU.uRegion.value as THREE.Vector4).copy(this.region)
+      renderer.setRenderTarget(this.shadowHistA)
+      renderer.clear(true, false, false)
+      renderer.render(this.accumScene, this.splatCamera)
+      this.shadowCanon = this.shadowHistA
+      const swapS = this.shadowHistA
+      this.shadowHistA = this.shadowHistB
+      this.shadowHistB = swapS
+      this.shadowHistSeeded = true
+      this.shadowPrevCenter.copy(cc4)
+      this.shadowPrevExtent = this.extent
+      this.shadowPrevGrid = this.shadowGrid
+    } else {
+      this.shadowHistSeeded = false
     }
 
     // Sun-diffusion blur (see the shader comment). Radius = angular
@@ -1413,7 +1506,7 @@ void main() {
       pass(this.pyr2, this.pyrScratch, s2, 0)
       pass(this.pyrScratch, this.pyr2, 0, s2)
       // Shadow map's rungs at quarter res, same sigmas as the pattern's.
-      this.copyTo(renderer, this.shadowTarget, this.shadowScratch, full)
+      this.copyTo(renderer, this.shadowCanon, this.shadowScratch, full)
       pass(this.shadowScratch, this.shadowL1, s1, 0)
       pass(this.shadowL1, this.shadowScratch, 0, s1)
       // (scratch now holds L1; keep L1 there and build L2 from it)
@@ -1613,6 +1706,9 @@ void main() {
     this.blurMaterial.dispose()
     this.aaTarget.dispose()
     this.shadowTarget.dispose()
+    this.shadowAA.dispose()
+    this.shadowHistA.dispose()
+    this.shadowHistB.dispose()
     this.shadowL1.dispose()
     this.shadowL2.dispose()
     this.shadowScratch.dispose()

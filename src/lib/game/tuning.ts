@@ -1872,6 +1872,25 @@ export const PROFILE = {
    */
   causticRaySpacingM: 0.104,
   /**
+   * SHADOW ray spacing, metres — the occluder pass's own lattice.
+   *
+   * Was derived as half the pattern's grid, which quietly tied object
+   * shadows to a knob meant for the seabed's caustics. They need
+   * opposite things: the pattern survives a coarse lattice because it is
+   * temporally accumulated and then blurred, while the shadow pass has
+   * NO history (it goes straight to its pyramid), so its only defence
+   * against jitter is having enough rays to resolve an occluder's edge.
+   * Coarsen the pattern and the shadows flicker on their own.
+   *
+   * 0.208 reproduces the old derived value exactly. Independent now, so
+   * the seabed can run a sparse pattern lattice while shadows keep a
+   * fine one — the shadow pass is cheap enough to afford it: quarter the
+   * vertex work, a half-res target, and no accumulation chain.
+   *
+   * Staged: baked into the shadow geometry at construction.
+   */
+  causticShadowSpacingM: 0.208,
+  /**
    * RENDER SCALE, 0.5-1: multiplies the canvas pixel ratio (capped 1.5).
    * The frame is fragment-bound at ~7 ms/Mpx, so cost is linear in this
    * SQUARED — 0.8 is 0.64x the pixels, roughly 37 -> 50fps at 4Mpx. The
@@ -2435,6 +2454,37 @@ export const CAUSTICS = {
    * "trailing glitter" the clamp exists to stop comes back eventually).
    */
   clampCells: 1,
+  /**
+   * The SHADOW map's own temporal accumulation and edge antialias. The
+   * occluder pass used to run naked — splat straight to pyramid — which
+   * held only while its lattice was dense enough that the occluded-ray
+   * fraction barely moved between frames. Once the map coarsens, that
+   * fraction quantises and the jitter arrives as flickering shadow
+   * edges, and no amount of the PATTERN's temporalAA touches it.
+   *
+   * Separate from the pattern's dials because the two want different
+   * settings: shadow edges are soft and slow, so they take a longer
+   * history than sharp caustics can without feeling sluggish.
+   */
+  shadowTemporalAA: 0.75,
+  shadowEdgeAA: 1,
+  /**
+   * JITTER AMPLITUDE, in ray cells. The lattice offsets by a Halton step
+   * each frame so the pattern is not locked to it; at 1 the offset spans
+   * a whole cell, which is what full phase coverage asks for.
+   *
+   * The catch is that the amplitude is a fraction of RAY SPACING, so a
+   * coarse lattice jitters far: at 1m spacing every triangle moves up to
+   * half a metre a frame and re-estimates its compression over a
+   * different metre of sea. That per-frame variance is what the
+   * accumulation then has to average away, and it is the residual
+   * flicker once the clamp is measuring properly.
+   *
+   * Below 1 trades phase coverage for stability. The failure mode at the
+   * bottom is the opposite of flicker: the pattern locks to the lattice
+   * and can show standing structure at the ray spacing.
+   */
+  jitterCells: 1,
   /**
    * INSPECTOR: draw the caustic map itself as a panel in the screen's
    * bottom-right, normalised the way receivers normalise it (mid grey =
