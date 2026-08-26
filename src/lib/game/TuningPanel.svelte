@@ -266,6 +266,8 @@
 		'CAUSTICS.ridgeGain': { min: 0, max: 2.5, step: 0.02 },
 		'CAUSTICS.castShadow': { min: 0, max: 1, step: 0.05 },
 		'PROFILE.causticMapRes': { min: 1024, max: 4096, step: 512 },
+		'PROFILE.causticRaySpacingM': { min: 0.05, max: 0.6, step: 0.005 },
+		'CAUSTICS.clampCells': { min: 0, max: 4, step: 0.05 },
 		'PROFILE.renderScale': { min: 0.5, max: 1, step: 0.05 },
 		'UNDERWATER.redRangeM': { min: 0.5, max: 40, step: 0.5 },
 		'UNDERWATER.greenRangeM': { min: 2, max: 150, step: 1 },
@@ -398,6 +400,7 @@
 			['splat', ['maxBright', 'sourceBlurM']],
 			['depth', ['formM', 'focalM', 'blurPerM', 'diffuseDepthM']],
 			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain', 'castShadow']],
+			['stability', ['clampCells']],
 			['inspect', ['showMap']]
 		],
 		UNDERWATER: [
@@ -507,7 +510,16 @@
 		],
 		PROFILE: [
 			['shading', ['vertexSlope', 'skipRefraction', 'skipReflection', 'skipSpecular', 'skipFoam', 'skipRipple', 'skipLoopWhite']],
-			['sims', ['skipRippleSim', 'skipCausticSim', 'causticMapRes', 'skipFoamSim']],
+			[
+				'sims',
+				[
+					'skipRippleSim',
+					'skipCausticSim',
+					'causticMapRes',
+					'causticRaySpacingM',
+					'skipFoamSim'
+				]
+			],
 			['hide', ['hideWater', 'hideObjects', 'hideFroth', 'hideSpray']],
 			['canvas', ['renderScale', 'autoScale', 'noAntialias', 'opaqueCanvas']],
 			['camera', ['perspectiveCamera', 'perspectiveDistance']],

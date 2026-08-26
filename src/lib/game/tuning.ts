@@ -1854,6 +1854,24 @@ export const PROFILE = {
    */
   causticMapRes: 3072,
   /**
+   * RAY SPACING, metres: the splat lattice's target gap between refracted
+   * rays. This is the OTHER half of caustic cost — causticMapRes prices
+   * the generator passes (texels), this prices the splat itself
+   * (vertices), and the two are independent: lowering the map resolution
+   * does not cast fewer rays.
+   *
+   * 0.104 is the density the look was tuned at, roughly one ray per
+   * ripple cell. Coarser trades pattern detail for vertices; the
+   * temporal accumulation and edge AA hide more of that than you would
+   * expect, which is why this was retired as a dial once — it is back
+   * to answer whether the SEABED specifically can live at a coarser
+   * lattice than objects need.
+   *
+   * Staged: the lattice is baked into the splat geometry at
+   * construction, so Apply reloads.
+   */
+  causticRaySpacingM: 0.104,
+  /**
    * RENDER SCALE, 0.5-1: multiplies the canvas pixel ratio (capped 1.5).
    * The frame is fragment-bound at ~7 ms/Mpx, so cost is linear in this
    * SQUARED — 0.8 is 0.64x the pixels, roughly 37 -> 50fps at 4Mpx. The
@@ -2399,6 +2417,24 @@ export const CAUSTICS = {
    * clean channel; 0 = off.
    */
   castShadow: 1,
+  /**
+   * TEMPORAL CLAMP RADIUS, in RAY CELLS: how far the accumulation looks
+   * when it builds the local brightness range it clamps history into.
+   *
+   * The clamp was pinned at one TEXEL, which is only sane while a ray
+   * cell is the finer of the two. The splat lays down TRIANGLES — flat
+   * brightness inside a cell — so once the lattice is coarser than the
+   * texel grid all five taps land in the same triangle, mx-mn collapses
+   * to zero, and the clamp degenerates to "history := current frame".
+   * Temporal accumulation switches itself off exactly when the sparse
+   * lattice needs it most, which is the coarse-spacing FLICKER.
+   *
+   * Measuring in ray cells instead makes the range mean something at any
+   * density. 1 = one cell. Lower trusts the current frame more (crisper,
+   * flickerier); higher lets history integrate longer (calmer, and the
+   * "trailing glitter" the clamp exists to stop comes back eventually).
+   */
+  clampCells: 1,
   /**
    * INSPECTOR: draw the caustic map itself as a panel in the screen's
    * bottom-right, normalised the way receivers normalise it (mid grey =

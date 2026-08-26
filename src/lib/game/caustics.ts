@@ -98,16 +98,23 @@ export const CAUSTIC_RESOLUTION =
 // depth-independent.
 const TILES = 20
 /**
- * Rays per tile side, holding ~0.104m ray spacing — the density the
- * pattern was tuned at (the dynamic window-sized extent once grew the
- * tiles under a fixed 48-ray grid, and the coarser lattice was a visible
- * regression). Floored at 48 a side: on small windows that is finer than
- * the target, and it is the density the look was approved at. Was a live
- * knob (raySpacingM); retired once temporal accumulation + adaptive
- * receiver taps made density a solved problem rather than a dial.
+ * Rays per tile side, holding PROFILE.causticRaySpacingM of ray spacing
+ * — 0.104m is the density the pattern was tuned at (the dynamic
+ * window-sized extent once grew the tiles under a fixed 48-ray grid, and
+ * the coarser lattice was a visible regression).
+ *
+ * The 48-a-side floor exists for SMALL WINDOWS, where the target works
+ * out finer than 48 and 48 is the density the look was approved at. It
+ * SCALES with the knob: pinning it at 48 would have swallowed the top
+ * half of the slider's range whole, and a floor that ignores the dial
+ * driving it is not a floor, it is a bug with a comment.
  */
+const RAY_SPACING_M = Math.max(PROFILE.causticRaySpacingM, 0.01)
 const TILE_GRID = Math.min(
-  Math.max(Math.round(CAUSTIC_EXTENT / TILES / 0.104), 48),
+  Math.max(
+    Math.round(CAUSTIC_EXTENT / TILES / RAY_SPACING_M),
+    Math.max(Math.round((48 * 0.104) / RAY_SPACING_M), 6),
+  ),
   96,
 )
 /** Vertex budget: cap on simultaneously active tiles (~140k verts). */
@@ -1289,6 +1296,13 @@ void main() {
         (cc3.y - this.prevCenter.y) / this.extent,
       )
       aU.uAlpha.value = invalid ? 0 : taa
+      // Clamp neighbourhood in RAY CELLS, never finer than a texel. The
+      // ray cell is 1/(TILES*tileGrid) of the domain in uv — extent
+      // cancels, because the lattice and the domain scale together.
+      aU.uTexelT.value = Math.max(
+        1 / CAUSTIC_RESOLUTION,
+        Math.max(CAUSTICS.clampCells, 0) / (TILES * this.tileGrid),
+      )
       aU.uHist.value = this.histB.texture
       aU.uCur.value = this.canon.texture
       // Region draw over a cleared target (the history is read at a
