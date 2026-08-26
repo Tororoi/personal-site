@@ -72,6 +72,16 @@ const viewHalfAxis = (() => {
  * reach is exactly the one whose pattern is blurred anyway.
  */
 export const CAUSTIC_EXTENT = Math.max(80, Math.ceil(2 * (viewHalfAxis + 16)))
+/**
+ * Floor for the LIVE extent. Deliberately NOT CAUSTIC_EXTENT: that is
+ * baked from window.innerWidth/innerHeight at module load, so using it as
+ * the floor meant a window that later SHRANK kept paying for the domain
+ * the old one needed, and the texels stayed coarse for the rest of the
+ * session with no way back. Scene recomputes the exact footprint from the
+ * live camera quad every frame, so the floor only needs to be a sanity
+ * bound.
+ */
+export const CAUSTIC_MIN_EXTENT = 80
 export const CAUSTIC_RESOLUTION =
   typeof window !== 'undefined' && window.innerWidth < 720 ? 2048 : PROFILE.causticMapRes
 /**
@@ -1463,7 +1473,7 @@ void main() {
    */
   extent = CAUSTIC_EXTENT
   setExtent(e: number) {
-    const want = Math.max(CAUSTIC_EXTENT, Math.ceil(e / 2) * 2)
+    const want = Math.max(CAUSTIC_MIN_EXTENT, Math.ceil(e / 2) * 2)
     // HYSTERESIS: grow immediately (coverage is correctness), shrink only
     // with 6m of slack. The need is recomputed every frame from inputs
     // that wiggle under motion (unprojected corners lag the camera by a

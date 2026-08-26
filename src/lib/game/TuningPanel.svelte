@@ -397,7 +397,8 @@
 		CAUSTICS: [
 			['splat', ['maxBright', 'sourceBlurM']],
 			['depth', ['formM', 'focalM', 'blurPerM', 'diffuseDepthM']],
-			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain', 'castShadow']]
+			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain', 'castShadow']],
+			['inspect', ['showMap']]
 		],
 		UNDERWATER: [
 			['light', ['ambient', 'direct', 'dim', 'glow', 'exposure']],
@@ -672,11 +673,6 @@
 				<button onclick={resetAll}>Reset</button>
 			</div>
 			<input class="search" placeholder="filter knobs…" bind:value={search} />
-			{#if pendingCount}
-				<p class="note">
-					Staged edits are baked into shader source — they land on Apply, which reloads.
-				</p>
-			{/if}
 		</header>
 
 		<div class="body">

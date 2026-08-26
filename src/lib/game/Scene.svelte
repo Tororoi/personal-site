@@ -1223,6 +1223,123 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 	// full wave surface, blurred by the preset's sun diffusion.
 	const causticMap = new CausticMap();
 
+	// CAUSTIC MAP INSPECTOR (CAUSTICS.showMap). The map drawn as a panel
+	// in the screen's bottom-right, so the domain can be WATCHED while
+	// the seabed depth and the clock move it — the two inputs that resize
+	// and slide it. Normalised exactly the way receivers normalise it, so
+	// mid grey is the map's own mean and what is on the panel is what the
+	// water is reading.
+	//
+	// A scene child rather than a second render pass: the only other pass
+	// that draws the scene is the boat image, and that isolates layer 3,
+	// so a default-layer mesh with depth testing off and a high render
+	// order lands on top of the frame and nowhere else.
+	const causticViewUniforms = {
+		uMap: { value: null as THREE.Texture | null },
+		uMean: { value: null as THREE.Texture | null },
+		uDomain: { value: new THREE.Vector3() },
+		uRectC: { value: new THREE.Vector2() },
+		uRect: { value: new THREE.Vector3() }
+	};
+	const causticView = new THREE.Mesh(
+		new THREE.PlaneGeometry(1, 1),
+		new THREE.ShaderMaterial({
+			uniforms: causticViewUniforms,
+			depthTest: false,
+			depthWrite: false,
+			vertexShader: `varying vec2 vUv;
+void main() {
+	vUv = uv;
+	gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`,
+			fragmentShader: `uniform sampler2D uMap;
+uniform sampler2D uMean;
+uniform vec3 uDomain;
+uniform vec2 uRectC;
+uniform vec3 uRect;
+varying vec2 vUv;
+void main() {
+	// The receivers' own normalisation (see shadeUnderwater): the splat
+	// is not absolutely calibrated, so the mean is what gives the
+	// pattern a meaning. 1.0 -> mid grey, 2.0 -> white.
+	float mean = texture2D(uMean, vec2(0.5)).r;
+	float c = texture2D(uMap, vUv).r / max(mean, 0.05);
+	vec3 col = vec3(clamp(c * 0.5, 0.0, 1.0));
+	// TRUSTED RECT, in the map's own frame — the rotated rectangle
+	// receivers are allowed to sample. Watching this chase the panel's
+	// edge as the seabed deepens or the sun drops is the point of the
+	// panel: when it reaches the border, the domain is all reach and no
+	// resolution.
+	vec2 w = uDomain.xy + (vUv - 0.5) * uDomain.z;
+	vec2 d = w - uRectC;
+	float a = abs(d.x * 0.70710678 - d.y * 0.70710678);
+	float b = (-d.x - d.y) * 0.70710678;
+	float edge = min(uRect.x - a, min(b + uRect.y, uRect.z - b));
+	float lw = uDomain.z * 0.004;
+	if (uRect.x > 0.5 && abs(edge) < lw) col = vec3(1.0, 0.82, 0.15);
+	vec2 e = min(vUv, 1.0 - vUv);
+	if (min(e.x, e.y) < 0.007) col = vec3(0.37, 0.84, 0.9);
+	gl_FragColor = vec4(col, 1.0);
+}`
+		})
+	);
+	causticView.frustumCulled = false;
+	causticView.renderOrder = 9999;
+	causticView.visible = false;
+	scene.add(causticView);
+	const cvFwd = new THREE.Vector3();
+	const cvRight = new THREE.Vector3();
+	const cvUp = new THREE.Vector3();
+	function updateCausticView() {
+		causticView.visible = CAUSTICS.showMap;
+		if (!CAUSTICS.showMap) return;
+		const cam = camera.current;
+		if (!cam) return;
+		causticViewUniforms.uMap.value = causticMap.texture;
+		causticViewUniforms.uMean.value = causticMap.meanTexture;
+		causticViewUniforms.uDomain.value.set(
+			waterUniforms.uCausticCenter.value.x,
+			waterUniforms.uCausticCenter.value.y,
+			causticMap.extent
+		);
+		causticViewUniforms.uRectC.value.copy(causticMap.validCenter);
+		causticViewUniforms.uRect.value.set(
+			causticMap.validHw,
+			causticMap.validHn,
+			causticMap.validHf
+		);
+		// BOTTOM-LEFT: the tuning panel owns the full right edge
+		// (top: 0; right: 0) and the HUD readout the top-left, so this is
+		// the one free corner. Lifted clear of the knots readout below it.
+		// Size in the camera's own units so the panel keeps a constant
+		// share of the window through zoom and resize.
+		const ortho = cam as THREE.OrthographicCamera;
+		const persp = cam as THREE.PerspectiveCamera;
+		let fw: number;
+		let fh: number;
+		if (ortho.isOrthographicCamera) {
+			fw = (ortho.right - ortho.left) / ortho.zoom;
+			fh = (ortho.top - ortho.bottom) / ortho.zoom;
+		} else {
+			fh = 2 * Math.tan((persp.fov * Math.PI) / 360);
+			fw = fh * persp.aspect;
+		}
+		const side = 0.42 * Math.min(fw, fh);
+		const margin = 0.03 * Math.min(fw, fh);
+		cam.getWorldDirection(cvFwd);
+		cvRight.setFromMatrixColumn(cam.matrixWorld, 0).normalize();
+		cvUp.setFromMatrixColumn(cam.matrixWorld, 1).normalize();
+		causticView.quaternion.copy(cam.quaternion);
+		causticView.scale.set(side, side, 1);
+		// Depth is irrelevant with depthTest off and culling disabled; one
+		// unit forward just keeps it in front of the camera's own origin.
+		causticView.position
+			.copy(cam.position)
+			.addScaledVector(cvFwd, 1)
+			.addScaledVector(cvRight, -fw / 2 + side / 2 + margin)
+			.addScaledVector(cvUp, -fh / 2 + side / 2 + margin + 0.06 * fh);
+	}
+
 
 	// Click to drop a ripple, pool-style. This is also the embryo of the
 	// casting input: click -> raycast -> water point.
@@ -4705,47 +4822,109 @@ void main() {
 			// screen-aligned basis around the domain centre (the boat).
 			// The corners already carry EDGE_MARGIN as the sway pad.
 			if (quadCorners.length === 8) {
+				// EXACT VIEW FOOTPRINT. Everything the map must cover is the
+				// camera's own water-plane quad, translated — under this
+				// orthographic camera every eye ray is parallel and the sun is a
+				// single direction, so a receiver's sample point is its surface
+				// point plus two CONSTANT vectors. That makes the domain the
+				// bounding box of a handful of translated corners, computed from
+				// the live quad, rather than the old scheme: a scalar 0.63*depth
+				// on the far side (tan 32deg, hard-coding the 45deg iso) plus an
+				// isotropic sun pad added to EVERY side including the two the sun
+				// never walks toward. Those pads bought domain — and this map's
+				// resolution is fixed, so every metre of domain coarsens the
+				// caustics everywhere, near-surface receivers included.
+				//
+				// The quad is re-derived per frame, so window size and aspect are
+				// handled for free; nothing here may bake a load-time size.
+				//
+				// A DISSOLVED floor contributes nothing: past 80m sbFade is 0 and
+				// the seabed is not drawn (see the shader's sbFade), so reaching
+				// for it spent texels on a surface nobody can see. This is the
+				// rest of "80m == the seabed toggled off, from the GPU's side".
+				const sbFadeD = 1 - smooth01(UNDERWATER.seabedDepthM, 40, 80);
+				const floorD =
+					UNDERWATER.seabed && sbFadeD > 0.001 ? UNDERWATER.seabedDepthM : 0;
+				// The floor is not the only receiver. Submerged OBJECTS sample
+				// the map from their own depth and walk exactly as far as a
+				// floor pixel at that depth would, so the reach is the deepest
+				// thing that reads — sphere, rainbow card (which rides the
+				// sphere's dial) and whale included. Sizing this off the seabed
+				// alone meant that with the seabed OFF the domain collapsed to
+				// the bare view quad and a deep object's sample point fell
+				// outside the trusted rect: no caustics on it at all, silently.
+				// Anything added later that reads the map underwater (fish)
+				// belongs in this max.
+				let reachD = Math.max(floorD, -UNDERWATER.sphereDepth);
+				if (UNDERWATER.whale) reachD = Math.max(reachD, -UNDERWATER.whaleY);
+
+				// Eye offset: where a floor pixel's surface point sits relative to
+				// the pixel. Taken from the CAMERA (centre ray, unprojected) and
+				// refracted through Snell, so it tracks the real view angle
+				// instead of assuming one. Parallel rays make the centre ray
+				// exact; under PROFILE.perspectiveCamera it is an approximation.
+				let offX = 0;
+				let offZ = 0;
+				const cam = camera.current;
+				if (reachD > 0 && cam) {
+					quadNear.set(0, 0, -1).unproject(cam);
+					quadFar.set(0, 0, 1).unproject(cam);
+					const ex = quadFar.x - quadNear.x;
+					const ey = quadFar.y - quadNear.y;
+					const ez = quadFar.z - quadNear.z;
+					const eh = Math.hypot(ex, ez);
+					const eLen = Math.hypot(eh, ey) || 1;
+					if (eh > 1e-4) {
+						const sinR = Math.min(eh / eLen / 1.33, 0.999);
+						const reach = (sinR / Math.sqrt(1 - sinR * sinR)) * reachD;
+						offX = (ex / eh) * reach;
+						offZ = (ez / eh) * reach;
+					}
+				}
+				// Sun offset: a receiver below the beam plane samples the map
+				// along the refracted sun, walking TOWARD the sun by the
+				// refracted tangent x its depth below the plane. One above the
+				// plane walks the other way, at most the plane's own depth —
+				// that is the anti-sun term, and it is why a shallow receiver
+				// still needs a little reach on the sun's near side.
+				const sunN = waterUniforms.uSunDir.value;
+				const sh = Math.hypot(sunN.x, sunN.z);
+				let antiX = 0;
+				let antiZ = 0;
+				if (sh > 1e-4) {
+					const slant = sh / Math.max(sunN.y, 0.12);
+					const sinW = Math.min(slant / Math.hypot(1, slant) / 1.33, 0.999);
+					const tanW = sinW / Math.sqrt(1 - sinW * sinW);
+					const walk = tanW * Math.max(reachD - CAUSTIC_PLANE_DEPTH, 0);
+					offX += (sunN.x / sh) * walk;
+					offZ += (sunN.z / sh) * walk;
+					const back = tanW * CAUSTIC_PLANE_DEPTH;
+					antiX = -(sunN.x / sh) * back;
+					antiZ = -(sunN.z / sh) * back;
+				}
+				// Every sample point for every depth lies on the segment between
+				// a corner and its translated twin (both offsets are linear in
+				// depth), so bounding the endpoints bounds the whole column.
 				let vHw = 0;
 				let vHn = 0;
 				let vHf = 0;
 				for (let i = 0; i < 4; i++) {
-					const dx = quadCorners[i * 2] - boat.x;
-					const dz = quadCorners[i * 2 + 1] - boat.z;
-					const a = Math.abs(dx * 0.70710678 - dz * 0.70710678);
-					const b = (-dx - dz) * 0.70710678;
-					if (a > vHw) vHw = a;
-					if (-b > vHn) vHn = -b;
-					if (b > vHf) vHf = b;
+					const qx = quadCorners[i * 2] - boat.x;
+					const qz = quadCorners[i * 2 + 1] - boat.z;
+					for (let j = 0; j < 3; j++) {
+						const dx = qx + (j === 1 ? offX : j === 2 ? antiX : 0);
+						const dz = qz + (j === 1 ? offZ : j === 2 ? antiZ : 0);
+						const a = Math.abs(dx * 0.70710678 - dz * 0.70710678);
+						const b = (-dx - dz) * 0.70710678;
+						if (a > vHw) vHw = a;
+						if (-b > vHn) vHn = -b;
+						if (b > vHf) vHf = b;
+					}
 				}
-				// Floor pixels shade through surface points DOWN-screen of
-				// them: the eye ray keeps travelling as it refracts, landing
-				// ~0.63 x depth up-screen (tan 32deg, the underwater angle of
-				// our 45deg view). The map must reach that far past the
-				// window top; near-surface receivers still need the base
-				// rect, so only the far side grows.
-				const floorD = UNDERWATER.seabed ? UNDERWATER.seabedDepthM : 0;
-				vHf += 0.63 * floorD;
-				// Receivers deeper than the beam plane sample the map along
-				// the refracted sun from where they sit; direction turns
-				// with the day, so pad every side for the worst walk — the
-				// REFRACTED tangent x the depth below the plane, uncapped
-				// except for sanity (the domain grows to hold it now).
-				const sunN = waterUniforms.uSunDir.value;
-				const slant = Math.hypot(sunN.x, sunN.z) / Math.max(sunN.y, 0.12);
-				const sinW = slant / Math.hypot(1, slant) / 1.33;
-				const sunPad = Math.min(
-					(sinW / Math.sqrt(1 - sinW * sinW)) *
-						Math.max(floorD - CAUSTIC_PLANE_DEPTH, 0),
-					60
-				);
-				// Grow the domain to whatever the rect demands (never below
-				// the load-time base): coverage stays complete at any seabed
-				// depth, trading texel size only when the depth actually
-				// asks for the reach.
-				causticMap.setExtent(
-					1.4143 * (vHw + sunPad + Math.max(vHn, vHf) + sunPad) + 4
-				);
-				causticMap.setViewRect(vHw + sunPad, vHn + sunPad, vHf + sunPad);
+				// The rotated rect must fit the domain square (setViewRect caps
+				// it if not); size the square to exactly that and no more.
+				causticMap.setExtent(1.4143 * (vHw + Math.max(vHn, vHf)) + 4);
+				causticMap.setViewRect(vHw, vHn, vHf);
 				waterUniforms.uCausticExtent.value = causticMap.extent;
 			}
 			const wind = windVector(waveTime);
@@ -4917,6 +5096,7 @@ void main() {
 				);
 				uwUniforms.uCausticValidF.value = causticMap.validHf;
 				uwUniforms.uCausticMean.value = causticMap.meanTexture;
+				updateCausticView();
 				// One sphere height, pushed to every consumer.
 				SPHERE_CY = UNDERWATER.sphereDepth;
 				sphereCUniform.value.y = SPHERE_CY;

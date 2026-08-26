@@ -101,14 +101,14 @@ export const ENABLE = {
    * Deliberately VISUAL-ONLY: foam drift, spray and the boat feel the
    * steady wind — revisit only if the mismatch ever reads wrong.
    */
-  gustMask: true,
+  gustMask: false,
   /**
    * CLOUD SHADOWS: the partly-cloudy mechanism — overcast-shaded cloud
    * shapes (WEATHER.cloud*) stamped onto otherwise sunny settings. The
    * sea only, for now: the boat and dry objects are not cloud-shadowed
    * yet.
    */
-  cloudShadows: true,
+  cloudShadows: false,
   /** Whitecap EVENTS (crest bursts + drizzle). Off since the loop
    * study replaced them with loop-driven emission. */
   whitecapEvents: false,
@@ -126,7 +126,7 @@ export const ENABLE = {
    * draw-call and triangle counts describe only the final scene render
    * and say nothing about the four render-target sims that precede it.
    */
-  gpuProfile: false,
+  gpuProfile: true,
   /**
    * Stream perf samples to tools/perf-logger.mjs, four times a second.
    *
@@ -2399,6 +2399,16 @@ export const CAUSTICS = {
    * clean channel; 0 = off.
    */
   castShadow: 1,
+  /**
+   * INSPECTOR: draw the caustic map itself as a panel in the screen's
+   * bottom-right, normalised the way receivers normalise it (mid grey =
+   * the map's own mean), with the trusted rect outlined in amber.
+   *
+   * Lives here and not in INSPECT because that group is STAGED — this
+   * one has to toggle live, since its whole job is showing what the
+   * domain does WHILE seabedDepthM or the clock is being dragged.
+   */
+  showMap: false,
 }
 
 /**
