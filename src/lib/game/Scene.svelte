@@ -3967,6 +3967,10 @@ void main() {
 	};
 	const boatSurf = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 };
 	const propScratch = new THREE.Vector3();
+	/** Screw position along the hull's own axis, metres aft of origin.
+	 *  Shared by the submersion test and the wash emitter so the two can
+	 *  never disagree about where the motor is. */
+	const PROP_LOCAL_X = -2.48;
 	// Prop spin as a fraction of full-throttle thrust, SIGNED. The screw
 	// takes a moment to bite and a real motor freewheels down rather than
 	// stopping dead at throttle release — foam emission follows this, not
@@ -4368,7 +4372,7 @@ void main() {
 		// and steers nothing; a hull clear of the water sheds no momentum
 		// (hull drag gates on the heave contact, since the hull can drag
 		// while a lifted stern has the prop out).
-		propScratch.set(-2.48, -0.2, 0);
+		propScratch.set(PROP_LOCAL_X, -0.2, 0);
 		boatMesh.localToWorld(propScratch);
 		// propUnder is the physical fact (screw below the surface, however
 		// deep); propWet is the CONTROL gate, which airControl may fake.
@@ -4430,11 +4434,18 @@ void main() {
 		// on purpose: a buried screw churns just as hard and the bubbles
 		// rise. The ONLY quiet states are a wound-down motor and a prop in
 		// the air (spin still decays in flight; landing resumes the wash).
-		// Deposits come off the SCREW and stream aft of it — propScratch,
-		// the same boat-local point propUnder tests, so the wash and the
-		// submersion test can never disagree about where the motor is.
-		// It rides the full pose, so a stern that lifts on a wave takes
-		// its wash with it.
+		// Deposits come off the SCREW and stream aft of it: the same
+		// boat-local point propUnder tests, placed at the motor's spot ON
+		// THE SURFACE.
+		//
+		// YAW ONLY, deliberately. propScratch is the screw's true 3D
+		// position, pitch and roll included, and its XZ is therefore the
+		// vertical projection of a point that swings as the hull works —
+		// foreshortened toward the centre when the bow rides up, thrown
+		// out past the transom when it drops. Foam is a surface decal, so
+		// the emitter wants where the motor is ON THE WATER, which does
+		// not move when the boat tilts about it. Depth belongs to the
+		// submersion test and nowhere else.
 		//
 		// This used to seed at MID-HULL instead: foam is laid in place
 		// while the boat moves on, so a stern emitter opened a visible gap
@@ -4475,8 +4486,8 @@ void main() {
 			// step, wakeFoamLeadS for the pipeline. Constant at any speed,
 			// which the fixed mid-hull seed offset could never be.
 			const lead = dt + Math.max(BOAT.wakeFoamLeadS, 0);
-			const bx = propScratch.x + boat.vx * lead;
-			const bz = propScratch.z + boat.vz * lead;
+			const bx = boat.x + fwdX * PROP_LOCAL_X + boat.vx * lead;
+			const bz = boat.z + fwdZ * PROP_LOCAL_X + boat.vz * lead;
 			for (let k = 0; k < 2; k++) {
 				const back = k * 0.9;
 				const wx = bx - fwdX * back + (Math.random() - 0.5) * 0.6;
