@@ -133,7 +133,12 @@
 						sEmit: +perf.sEmit.toFixed(2),
 						sScan: +perf.sScan.toFixed(2),
 						sTracks: +perf.sTracks.toFixed(2),
-						sParticles: +perf.sParticles.toFixed(2)
+						sParticles: +perf.sParticles.toFixed(2),
+						gpuMain: +perf.gpuMain.toFixed(2),
+						gpuCaustic: +perf.gpuCaustic.toFixed(2),
+						gpuFft: +perf.gpuFft.toFixed(2),
+						gpuFoam: +perf.gpuFoam.toFixed(2),
+						gpuRipple: +perf.gpuRipple.toFixed(2)
 					});
 					sAcc = 0;
 					sFrames = 0;

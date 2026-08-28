@@ -14,7 +14,7 @@
  */
 
 import { activeField } from './waves'
-import { ENABLE, PROFILE } from './tuning'
+import { CAUSTICS, ENABLE, PROFILE } from './tuning'
 
 const URL = 'http://127.0.0.1:8787/perf'
 /** How often a sample is taken. */
@@ -51,6 +51,21 @@ export type Sample = {
   sScan: number
   sTracks: number
   sParticles: number
+  /**
+   * Per-pass GPU milliseconds. Only meaningful with ENABLE.gpuProfile on
+   * — zero otherwise — and only trustworthy when perf.gpuClock reads 'q'
+   * (real timer queries). These are the rows that matter for comparing
+   * two configurations: this machine throttles ~2x under sustained load,
+   * so wall-clock fps conflates the change under test with how warm the
+   * GPU happened to be. Every pass inflating together IS the throttle
+   * signature, and having them per-sample makes it visible after the
+   * fact instead of guessable.
+   */
+  gpuMain: number
+  gpuCaustic: number
+  gpuFft: number
+  gpuFoam: number
+  gpuRipple: number
 }
 
 let queue: string[] = []
@@ -93,6 +108,9 @@ export function startPerfLog(label: string) {
       sea: { chop: activeField.chop, windSpeed: activeField.windSpeed, seed: activeField.seed },
       enable: { ...ENABLE },
       profile: { ...PROFILE },
+      // The live groups a run's result depends on but PROFILE does not
+      // carry — accumulation and clamp settings are tuned mid-session.
+      caustics: { ...CAUSTICS },
     }),
   )
   setInterval(flush, FLUSH_MS)

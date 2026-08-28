@@ -1159,7 +1159,11 @@ void main() {
     // spacing — inside the tile marking's rr pad), so motion no longer
     // changes what the rays sample; only the deliberate jitter does.
     this.frameIdx = (this.frameIdx + 1) % 1024
-    const taa = Math.min(Math.max(CAUSTICS.temporalAA, 0), 0.92)
+    // 0.97 matches the slider. This clamp sat at 0.92 after the slider's
+    // ceiling was raised, so the top of the range was silently inert —
+    // exactly the stretch a sparse lattice needs, and exactly where
+    // someone chasing flicker would be dragging it.
+    const taa = Math.min(Math.max(CAUSTICS.temporalAA, 0), 0.97)
     {
       const raySp = this.extent / (TILES * this.tileGrid)
       const cc0 = this.material.uniforms.uCenter.value as THREE.Vector2
