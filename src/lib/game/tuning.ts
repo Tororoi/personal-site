@@ -2603,6 +2603,20 @@ export const BOAT = {
    * throttle release instead of stopping dead.
    */
   centerWakeFoam: 2,
+  /**
+   * Seconds the wake deposit is placed AHEAD of the boat, to cancel the
+   * delay between depositing and drawing.
+   *
+   * The emitter runs before the step integrates, and the foam field
+   * updates once per two frames, so a deposit is drawn up to ~30ms after
+   * the position it records. The boat has moved by then and the trail
+   * detaches from the stern — at 15 m/s, most of a metre. Seeding at
+   * mid-hull was the original compensation, but a fixed distance cannot
+   * track a delay whose error scales with speed.
+   *
+   * ~0.03 matches the two-frame field update. 0 disables the lead.
+   */
+  wakeFoamLeadS: 0.03,
   /** Linear + quadratic hull drag; together they set the top speed
    * (~5.8 m/s at the defaults: thrust = dragLinear*v + dragQuad*v^2). */
   dragLinear: 0.45,

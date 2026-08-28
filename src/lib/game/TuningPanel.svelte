@@ -223,6 +223,7 @@
 		'BOAT.reverseThrust': { min: 0, max: 4, step: 0.1 },
 		'BOAT.horsepower': { min: 0, max: 20, step: 0.1 },
 		'BOAT.centerWakeFoam': { min: 0, max: 3, step: 0.05 },
+		'BOAT.wakeFoamLeadS': { min: 0, max: 0.12, step: 0.005 },
 		'BOAT.dragLinear': { min: 0.05, max: 1, step: 0.01 },
 		'BOAT.dragQuad': { min: 0, max: 0.15, step: 0.002 },
 		'BOAT.turnRate': { min: 0, max: 2.5, step: 0.05 },
@@ -426,7 +427,7 @@
 			['buoyancy', ['bobPeriod', 'bobZeta', 'maxSubmersion', 'entryDrag']],
 			['swing', ['rollGain', 'rollRighting', 'rollZeta', 'pitchGain', 'pitchRighting', 'pitchZeta']],
 			['trim', ['sternTrim', 'trimPerSpeed', 'trimPerAccel', 'liftPerSpeed', 'liftMax']],
-			['wake', ['wakeAmp', 'wakeOffset', 'centerWakeFoam']]
+			['wake', ['wakeAmp', 'wakeOffset', 'centerWakeFoam', 'wakeFoamLeadS']]
 		],
 		SPECULAR: [
 			['core', ['sharp', 'gain', 'fresnelMix']],

@@ -3743,7 +3743,15 @@ void main() {
 
 	function depositContactFoam(t: number) {
 		for (const b of buoys) {
-			const s = sampleOcean(b.x, b.z, t, 1, 1);
+			// THREE iterations, not one: addFoam works in REST space, so
+			// every deposit subtracts the Gerstner sway, and that sway is
+			// a fixed-point inversion. One pass converges while the
+			// displacement is small and falls behind as chop grows — the
+			// deposit then lands at a wrong rest position that MOVES with
+			// the waves, so successive blobs scatter instead of stacking
+			// and the foam thins out. It broke down above chop ~4, which
+			// is where the sway stops being small.
+			const s = sampleOcean(b.x, b.z, t, 1, 3);
 			// Touching = riding the surface, not tossed clear of it.
 			if (Math.abs(b.y - (s.height + 0.15)) > 0.5) continue;
 			for (let k = 0; k < 6; k++) {
@@ -3752,12 +3760,13 @@ void main() {
 					b.x - s.swayX + Math.cos(a) * 0.3,
 					b.z - s.swayZ + Math.sin(a) * 0.3,
 					0.14,
-					0.9
+					0.9,
+					1
 				);
 			}
 		}
 
-		const crown = sampleOcean(SPHERE_CX, SPHERE_CZ, t, 1, 1);
+		const crown = sampleOcean(SPHERE_CX, SPHERE_CZ, t, 1, 3);
 		if (crown.height >= SPHERE_CY + SPHERE_CR) return;
 		const ANGLES = 14;
 		for (let k = 0; k < ANGLES; k++) {
@@ -3770,19 +3779,20 @@ void main() {
 			let hi = SPHERE_CR - 0.01;
 			for (let i = 0; i < 6; i++) {
 				const mid = (lo + hi) / 2;
-				const s = sampleOcean(SPHERE_CX + dx * mid, SPHERE_CZ + dz * mid, t, 1, 1);
+				const s = sampleOcean(SPHERE_CX + dx * mid, SPHERE_CZ + dz * mid, t, 1, 3);
 				const ySphere = SPHERE_CY + Math.sqrt(Math.max(SPHERE_CR * SPHERE_CR - mid * mid, 0));
 				if (s.height < ySphere) lo = mid;
 				else hi = mid;
 			}
 			const r = (lo + hi) / 2;
-			const s = sampleOcean(SPHERE_CX + dx * r, SPHERE_CZ + dz * r, t, 1, 1);
+			const s = sampleOcean(SPHERE_CX + dx * r, SPHERE_CZ + dz * r, t, 1, 3);
 			const spacing = (2 * Math.PI * Math.max(r, 0.5)) / ANGLES;
 			addFoam(
 				SPHERE_CX + dx * r - s.swayX,
 				SPHERE_CZ + dz * r - s.swayZ,
 				Math.max(0.16, spacing * 0.4),
-				0.95
+				0.95,
+				1
 			);
 		}
 	}
@@ -3973,6 +3983,39 @@ void main() {
 	// is ahead-only and therefore depth-correct. Both ends are soft, so
 	// the fade never snaps.
 	let boatSub = 0;
+	/** Drop one thick foam deposit at the boat: window.dropFoam(sigma, amp).
+	 *  Rest-space like the real emitters, so it lands where the wake lands
+	 *  — the point is to compare one fat deposit against the wake's thin
+	 *  per-frame dribble under the same sea. */
+	if (typeof window !== 'undefined') {
+		(window as unknown as Record<string, unknown>).dropFoam = (sigma = 1, amp = 0.9) => {
+			const s = sampleOcean(boat.x, boat.z, waveTime, 1, 3);
+			addFoam(boat.x - s.swayX, boat.z - s.swayZ, sigma, amp, 1);
+			return { x: +boat.x.toFixed(2), z: +boat.z.toFixed(2), sigma, amp };
+		};
+	}
+	/** See the wake emitter: counters behind window.wakeStats(). */
+	const wakeDbg = { frames: 0, under: 0, spinning: 0, emits: 0, ampSum: 0, subSum: 0 };
+	if (typeof window !== 'undefined') {
+		(window as unknown as Record<string, unknown>).wakeStats = () => {
+			const f = Math.max(wakeDbg.frames, 1);
+			const out = {
+				frames: wakeDbg.frames,
+				propUnderFrac: +(wakeDbg.under / f).toFixed(3),
+				spinningFrac: +(wakeDbg.spinning / f).toFixed(3),
+				emitFrac: +(wakeDbg.emits / f).toFixed(3),
+				meanBoatSub: +(wakeDbg.subSum / f).toFixed(3),
+				meanAmp: +(wakeDbg.ampSum / Math.max(wakeDbg.emits, 1)).toFixed(5)
+			};
+			wakeDbg.frames = 0;
+			wakeDbg.under = 0;
+			wakeDbg.spinning = 0;
+			wakeDbg.emits = 0;
+			wakeDbg.ampSum = 0;
+			wakeDbg.subSum = 0;
+			return out;
+		};
+	}
 	// Local-space top of the hull (set from the SDF bake's box).
 	let boatHullTopY = 1.0;
 	const orbScratch = { x: 0, z: 0 };
@@ -4387,26 +4430,60 @@ void main() {
 		// on purpose: a buried screw churns just as hard and the bubbles
 		// rise. The ONLY quiet states are a wound-down motor and a prop in
 		// the air (spin still decays in flight; landing resumes the wash).
-		// Deposits sit at MID-HULL and just aft of it: foam is laid in
-		// place while the boat moves on, so a stern-line emitter opens a
-		// visible gap behind the transom within a frame or two — seeding
-		// under the hull keeps the trail visually attached and the hull
-		// itself churns over it on the way out. REST-space, so subtract
-		// the sway like every other addFoam caller.
+		// Deposits come off the SCREW and stream aft of it — propScratch,
+		// the same boat-local point propUnder tests, so the wash and the
+		// submersion test can never disagree about where the motor is.
+		// It rides the full pose, so a stern that lifts on a wave takes
+		// its wash with it.
+		//
+		// This used to seed at MID-HULL instead: foam is laid in place
+		// while the boat moves on, so a stern emitter opened a visible gap
+		// behind the transom within a frame or two, and seeding forward
+		// hid it. That was compensating a TIME delay with a fixed
+		// DISTANCE, which only holds at one speed — wakeFoamLeadS now
+		// cancels the delay properly, so the emitter can sit where the
+		// bubbles actually come from. REST-space, so subtract the sway
+		// like every other addFoam caller.
 		const spinTarget = throttle / Math.max(BOAT.thrust, 0.001);
 		propSpin +=
 			(spinTarget - propSpin) *
 			Math.min(dt / (Math.abs(spinTarget) > Math.abs(propSpin) ? SPIN_UP_TAU : SPIN_DOWN_TAU), 1);
+		// WAKE EMITTER DIAGNOSTIC (window.wakeStats()). Which of the gates
+		// actually fires is not visible from the water, and guessing at it
+		// costs a round trip each time. Drive for a few seconds, then call
+		// wakeStats() in the console: it reports the fraction of frames
+		// the prop counted as submerged, the fraction that emitted, and
+		// the mean deposit amplitude, then resets.
+		wakeDbg.frames++;
+		if (propUnder) wakeDbg.under++;
+		if (Math.abs(propSpin) > 0.02) wakeDbg.spinning++;
+		wakeDbg.subSum += boatSub;
 		if (propUnder && Math.abs(propSpin) > 0.02 && BOAT.centerWakeFoam > 0) {
 			// Faded with submergence: prop bubbles from a shallow hull
 			// reach the surface; from a sunk one they dissolve on the way.
 			const amp = BOAT.centerWakeFoam * Math.abs(propSpin) * dt * (1 - boatSub);
+			wakeDbg.emits++;
+			wakeDbg.ampSum += amp;
+			// LEAD THE BOAT. Two delays sit between this call and the foam
+			// appearing: the deposit is made BEFORE the step integrates
+			// (boat.x is still the start-of-step position), and the field
+			// injects on its own clock — one update per two frames. The
+			// deposit lands exactly where it was asked to, just late, so
+			// by the time it draws, the stern has moved on and the trail
+			// detaches. Both delays are a duration, so both are corrected
+			// by advancing along the velocity that caused them: dt for the
+			// step, wakeFoamLeadS for the pipeline. Constant at any speed,
+			// which the fixed mid-hull seed offset could never be.
+			const lead = dt + Math.max(BOAT.wakeFoamLeadS, 0);
+			const bx = propScratch.x + boat.vx * lead;
+			const bz = propScratch.z + boat.vz * lead;
 			for (let k = 0; k < 2; k++) {
 				const back = k * 0.9;
-				const wx = boat.x - fwdX * back + (Math.random() - 0.5) * 0.6;
-				const wz = boat.z - fwdZ * back + (Math.random() - 0.5) * 0.6;
-				const s = sampleOcean(wx, wz, waveTime, 1, 1);
-				addFoam(wx - s.swayX, wz - s.swayZ, 0.5, amp * (k === 0 ? 1 : 0.6));
+				const wx = bx - fwdX * back + (Math.random() - 0.5) * 0.6;
+				const wz = bz - fwdZ * back + (Math.random() - 0.5) * 0.6;
+				// Rest-space deposit: three iterations (see depositContactFoam).
+				const s = sampleOcean(wx, wz, waveTime, 1, 3);
+				addFoam(wx - s.swayX, wz - s.swayZ, 0.5, amp * (k === 0 ? 1 : 0.6), 1);
 			}
 		}
 		if (boat.wet) {

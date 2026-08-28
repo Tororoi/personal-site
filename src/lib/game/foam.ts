@@ -138,17 +138,40 @@ const FOAM_DRIFT = FOAM.drift
 const MAX_INJECT = 24
 
 type FoamDeposit = { x: number; z: number; sigma: number; amp: number }
-const pending: FoamDeposit[] = []
+/**
+ * TWO queues, drained in order. The field consumes MAX_INJECT deposits a
+ * step — a per-fragment loop over a uniform array, so the ceiling is
+ * paid by every texel in the field and cannot simply be raised.
+ *
+ * With one queue that ceiling starves by arrival rate rather than by
+ * importance. Spray landings are an AMBIENT emitter: hundreds a step in
+ * a steep sea, individually invisible. The boat's prop wash is a SIGNAL
+ * emitter: a couple a frame, and the only thing drawing the wake. Sharing
+ * a queue, the wake won a 24/inflow lottery and lost it outright above
+ * chop ~4, where spray crosses the drain rate — the deposits were being
+ * discarded inside addFoam, long before anything in the sim could act on
+ * them. (That is also why foamMass READ LOW in a foamy sea: mass counts
+ * deposits that land.)
+ *
+ * Signal deposits therefore get their own queue and the first slots.
+ * Ambient deposits take what is left, and losing some of those is
+ * invisible by construction.
+ */
+const pendingHi: FoamDeposit[] = []
+const pendingLo: FoamDeposit[] = []
 
 /**
  * Deposit foam residue at REST-space (x, z). Accumulates: landing on an
  * existing bank raises it back toward solid (density top-up); landing on
  * bare water starts a new dot. NEW deposits always win: when the queue
  * is full the OLDEST queued deposit is dropped, never the incoming one.
+ *
+ * priority 1 = signal (hulls, objects, the wake); 0 = ambient (spray).
  */
-export function addFoam(x: number, z: number, sigma: number, amp = 0.9) {
-  if (pending.length >= 512) pending.shift()
-  pending.push({ x, z, sigma, amp })
+export function addFoam(x: number, z: number, sigma: number, amp = 0.9, priority = 0) {
+  const q = priority > 0 ? pendingHi : pendingLo
+  if (q.length >= (priority > 0 ? 128 : 512)) q.shift()
+  q.push({ x, z, sigma, amp })
 }
 
 // Debug hook: paint foam from the console and watch it spread and die,
@@ -160,7 +183,10 @@ if (typeof window !== 'undefined') {
   // Deposits waiting to be injected. The field drains MAX_INJECT per
   // step, so a number that sits high means deposits are being queued
   // faster than they can land — and the queue drops its OLDEST first.
-  ;(window as unknown as Record<string, unknown>).foamPending = () => pending.length
+  ;(window as unknown as Record<string, unknown>).foamPending = () => ({
+    hi: pendingHi.length,
+    lo: pendingLo.length,
+  })
 }
 
 const simVertex = `
@@ -849,7 +875,8 @@ export class FoamField {
 
     const inject = this.material.uniforms.uInject.value as THREE.Vector4[]
     for (let i = 0; i < MAX_INJECT; i++) {
-      const p = pending.shift()
+      // Signal first, ambient with the remainder.
+      const p = pendingHi.shift() ?? pendingLo.shift()
       if (p) {
         inject[i].set(p.x, p.z, p.sigma, p.amp)
         massEst += p.amp * p.sigma * p.sigma
