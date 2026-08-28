@@ -508,10 +508,19 @@ uniform sampler2D uHist;
 uniform sampler2D uCur;
 uniform float uAlpha;
 uniform vec2 uScroll;
+uniform float uHistScale;
 uniform float uTexelT;
+uniform float uClipSigma;
 varying vec2 vUv;
 void main() {
-	vec2 huv = vUv + uScroll;
+	// HISTORY REMAP. A world point p sits at u = (p - c)/E + 0.5 this
+	// frame and u' = (p - c')/E' + 0.5 in the history, so
+	//   u' = (u - 0.5) * (E/E') + (c - c')/E' + 0.5
+	// The scale term used to be missing, which is why a changed extent
+	// had to throw the whole history away and show one raw jittered
+	// frame — the flicker that only appeared while driving, because
+	// driving is what moves the extent.
+	vec2 huv = (vUv - 0.5) * uHistScale + uScroll + 0.5;
 	float inH =
 		huv.x > 0.0 && huv.x < 1.0 && huv.y > 0.0 && huv.y < 1.0 ? 1.0 : 0.0;
 	vec4 h = texture2D(uHist, huv);
@@ -528,10 +537,29 @@ void main() {
 	vec4 cr = texture2D(uCur, vUv + vec2(uTexelT, 0.0));
 	vec4 cd = texture2D(uCur, vUv - vec2(0.0, uTexelT));
 	vec4 cu = texture2D(uCur, vUv + vec2(0.0, uTexelT));
-	vec4 mn = min(c, min(min(cl, cr), min(cd, cu)));
-	vec4 mx = max(c, max(max(cl, cr), max(cd, cu)));
-	vec4 pad = 0.35 * (mx - mn) + 0.05;
-	vec4 hc = clamp(h, mn - pad, mx + pad);
+	vec4 lo;
+	vec4 hi;
+	if (uClipSigma > 0.0) {
+		// VARIANCE CLIPPING (CAUSTICS.clipSigma). The min/max box below is
+		// decided by the two most extreme taps, and near a caustic FOLD
+		// one tap is exactly where the estimator's heavy tail lives — a
+		// single outlier throws the window open and the history follows
+		// it out. Fitting a Gaussian to the neighbourhood and clipping to
+		// mean +/- k*sigma weights every tap instead, so one wild sample
+		// widens the window a little rather than setting it outright.
+		vec4 m1 = (c + cl + cr + cd + cu) * 0.2;
+		vec4 m2 = (c * c + cl * cl + cr * cr + cd * cd + cu * cu) * 0.2;
+		vec4 sd = sqrt(max(m2 - m1 * m1, vec4(0.0)));
+		lo = m1 - uClipSigma * sd;
+		hi = m1 + uClipSigma * sd;
+	} else {
+		vec4 mn = min(c, min(min(cl, cr), min(cd, cu)));
+		vec4 mx = max(c, max(max(cl, cr), max(cd, cu)));
+		vec4 pad = 0.35 * (mx - mn) + 0.05;
+		lo = mn - pad;
+		hi = mx + pad;
+	}
+	vec4 hc = clamp(h, lo, hi);
 	gl_FragColor = mix(c, hc, uAlpha * inH);
 }`
 
@@ -863,7 +891,9 @@ export class CausticMap {
         uCur: { value: null },
         uAlpha: { value: 0 },
         uScroll: { value: new THREE.Vector2(0, 0) },
+        uHistScale: { value: 1 },
         uTexelT: { value: 1 / CAUSTIC_RESOLUTION },
+        uClipSigma: { value: 0 },
         uRegion: { value: new THREE.Vector4(0, 0, 1, 1) },
       },
       vertexShader: blurVertex,
@@ -1046,10 +1076,14 @@ uniform vec4 uRectUv;
 uniform sampler2D uPrevMean;
 uniform float uMeanBlend;
 void main() {
+	// 32x32. This is ONE pixel of output, so a thousand fetches is free,
+	// and the estimator's variance falls as 1/N — the mean is a sample of
+	// a heavy-tailed field (filaments reach maxBright x the mean), so it
+	// needs the samples more than most reductions would.
 	float acc = 0.0;
-	for (int j = 0; j < 16; j++) {
-		for (int i = 0; i < 16; i++) {
-			vec2 t = (vec2(float(i), float(j)) + 0.5) / 16.0 * 2.0 - 1.0;
+	for (int j = 0; j < 32; j++) {
+		for (int i = 0; i < 32; i++) {
+			vec2 t = (vec2(float(i), float(j)) + 0.5) / 32.0 * 2.0 - 1.0;
 			acc += texture2D(uMap, uRectUv.xy + t * uRectUv.zw).r;
 		}
 	}
@@ -1059,7 +1093,7 @@ void main() {
 	// FLICKERED every caustic on screen at once. Smoothing converges to
 	// the exact value on a static sea, so frozen waves are unchanged.
 	float prev = texture2D(uPrevMean, vec2(0.5)).r;
-	gl_FragColor = vec4(mix(prev, acc / 256.0, uMeanBlend), 0.0, 0.0, 1.0);
+	gl_FragColor = vec4(mix(prev, acc / 1024.0, uMeanBlend), 0.0, 0.0, 1.0);
 }`,
       depthTest: false,
       depthWrite: false,
@@ -1307,6 +1341,70 @@ void main() {
       this.canon = this.aaTarget
     }
 
+    // Sun-diffusion blur, as a CLOSURE so it can run on either side of
+    // the accumulator (CAUSTICS.blurBeforeAccum). Before, and the clamp
+    // bounds are computed from a filtered frame; after, and the history
+    // keeps the sharp splat and only the output is softened.
+    const runSunBlur = () => {
+      // Sun-diffusion blur (see the shader comment). Radius = angular
+      // spread x plane depth, capped at a practical kernel — the receiver
+      // side's flatten term (uCausticFlat, Scene) carries heavy overcast
+      // the rest of the way to featureless light.
+      const sigmaMeters = Math.min(this.sourceBlurM, 0.62)
+      const sigmaTexels = sigmaMeters / (this.extent / CAUSTIC_RESOLUTION)
+      // Below ~1.5 texels the blur is visually nothing (calm's clear-sky
+      // diffusion lands here): skip both passes outright.
+      if (sigmaTexels > 1.5 && count > 0) {
+        // One tile of margin so the penumbra can spread past the splat
+        // region; taps beyond it read the map's black, consistent with the
+        // "no light computed" convention.
+        const u0 = (Math.max(tx0 - 1, 0) / TILES) * 2 - 1
+        const u1 = (Math.min(tx1 + 2, TILES) / TILES) * 2 - 1
+        const v0 = (Math.max(tz0 - 1, 0) / TILES) * 2 - 1
+        const v1 = (Math.min(tz1 + 2, TILES) / TILES) * 2 - 1
+        const blurU = this.blurMaterial.uniforms
+        ;(blurU.uRegion.value as THREE.Vector4).set(
+          (u0 + u1) / 2,
+          (v0 + v1) / 2,
+          (u1 - u0) / 2,
+          (v1 - v0) / 2,
+        )
+        const step = (0.5 * sigmaTexels) / CAUSTIC_RESOLUTION
+        const stepVec = blurU.uStep.value as THREE.Vector2
+        const pass = (
+          src: THREE.WebGLRenderTarget,
+          dst: THREE.WebGLRenderTarget,
+          sx: number,
+          sy: number,
+        ) => {
+          blurU.uSrc.value = src.texture
+          stepVec.set(sx, sy)
+          renderer.setRenderTarget(dst)
+          renderer.clear(true, false, false)
+          renderer.render(this.blurScene, this.splatCamera)
+        }
+
+        const region = blurU.uRegion.value as THREE.Vector4
+        if (sigmaTexels <= 5) {
+          // Narrow blur: taps are dense enough against full-res content.
+          pass(this.canon, this.blurTarget, step, 0)
+          pass(this.blurTarget, this.target, 0, step)
+        } else {
+          // Wide blur: prefilter down to quarter res (two bilinear 2x2
+          // boxes — a one-tap copy through the minifying bilinear fetch),
+          // blur there, upsample on the way back. Same sigma in UV space;
+          // no aliasing.
+          this.copyTo(renderer, this.canon, this.blurTarget, region)
+          this.copyTo(renderer, this.blurTarget, this.blurQuarterA, region)
+          pass(this.blurQuarterA, this.blurQuarterB, step, 0)
+          pass(this.blurQuarterB, this.target, 0, step)
+        }
+        this.canon = this.target
+      }
+    }
+
+    if (CAUSTICS.blurBeforeAccum) runSunBlur()
+
     // TEMPORAL ACCUMULATION (see accumFragment): blend the jittered
     // fresh splat under the scrolled history, then copy the result back
     // so every downstream consumer — diffusion, pyramids, mean,
@@ -1314,19 +1412,24 @@ void main() {
     // history reseeds whenever its texel<->world mapping changes.
     if (taa > 0 && count > 0) {
       const cc3 = this.material.uniforms.uCenter.value as THREE.Vector2
+      // A changed EXTENT is no longer an invalidation: the remap above
+      // handles it. Only a changed LATTICE (which rewrites what a texel
+      // means) or a jump too far to have overlap still reseeds.
+      const pe = this.prevExtent > 0 ? this.prevExtent : this.extent
       const invalid =
         !this.histSeeded ||
-        this.prevExtent !== this.extent ||
         this.prevGrid !== this.tileGrid ||
         Math.abs(cc3.x - this.prevCenter.x) +
           Math.abs(cc3.y - this.prevCenter.y) >
           0.2 * this.extent
       const aU = this.accumMaterial.uniforms
       ;(aU.uScroll.value as THREE.Vector2).set(
-        (cc3.x - this.prevCenter.x) / this.extent,
-        (cc3.y - this.prevCenter.y) / this.extent,
+        (cc3.x - this.prevCenter.x) / pe,
+        (cc3.y - this.prevCenter.y) / pe,
       )
+      aU.uHistScale.value = this.extent / pe
       aU.uAlpha.value = invalid ? 0 : taa
+      aU.uClipSigma.value = Math.max(CAUSTICS.clipSigma, 0)
       // Clamp neighbourhood in RAY CELLS, never finer than a texel. The
       // ray cell is 1/(TILES*tileGrid) of the domain in uv — extent
       // cancels, because the lattice and the domain scale together.
@@ -1385,19 +1488,21 @@ void main() {
     const shTaa = Math.min(Math.max(CAUSTICS.shadowTemporalAA, 0), 0.99)
     if (shTaa > 0 && count > 0) {
       const cc4 = this.material.uniforms.uCenter.value as THREE.Vector2
+      const spe = this.shadowPrevExtent > 0 ? this.shadowPrevExtent : this.extent
       const invalid =
         !this.shadowHistSeeded ||
-        this.shadowPrevExtent !== this.extent ||
         this.shadowPrevGrid !== this.shadowGrid ||
         Math.abs(cc4.x - this.shadowPrevCenter.x) +
           Math.abs(cc4.y - this.shadowPrevCenter.y) >
           0.2 * this.extent
       const aU = this.accumMaterial.uniforms
       ;(aU.uScroll.value as THREE.Vector2).set(
-        (cc4.x - this.shadowPrevCenter.x) / this.extent,
-        (cc4.y - this.shadowPrevCenter.y) / this.extent,
+        (cc4.x - this.shadowPrevCenter.x) / spe,
+        (cc4.y - this.shadowPrevCenter.y) / spe,
       )
+      aU.uHistScale.value = this.extent / spe
       aU.uAlpha.value = invalid ? 0 : shTaa
+      aU.uClipSigma.value = Math.max(CAUSTICS.clipSigma, 0)
       // Ray cells of the SHADOW lattice, floored at this map's own texel
       // (half the pattern's).
       aU.uTexelT.value = Math.max(
@@ -1422,61 +1527,7 @@ void main() {
       this.shadowHistSeeded = false
     }
 
-    // Sun-diffusion blur (see the shader comment). Radius = angular
-    // spread x plane depth, capped at a practical kernel — the receiver
-    // side's flatten term (uCausticFlat, Scene) carries heavy overcast
-    // the rest of the way to featureless light.
-    const sigmaMeters = Math.min(this.sourceBlurM, 0.62)
-    const sigmaTexels = sigmaMeters / (this.extent / CAUSTIC_RESOLUTION)
-    // Below ~1.5 texels the blur is visually nothing (calm's clear-sky
-    // diffusion lands here): skip both passes outright.
-    if (sigmaTexels > 1.5 && count > 0) {
-      // One tile of margin so the penumbra can spread past the splat
-      // region; taps beyond it read the map's black, consistent with the
-      // "no light computed" convention.
-      const u0 = (Math.max(tx0 - 1, 0) / TILES) * 2 - 1
-      const u1 = (Math.min(tx1 + 2, TILES) / TILES) * 2 - 1
-      const v0 = (Math.max(tz0 - 1, 0) / TILES) * 2 - 1
-      const v1 = (Math.min(tz1 + 2, TILES) / TILES) * 2 - 1
-      const blurU = this.blurMaterial.uniforms
-      ;(blurU.uRegion.value as THREE.Vector4).set(
-        (u0 + u1) / 2,
-        (v0 + v1) / 2,
-        (u1 - u0) / 2,
-        (v1 - v0) / 2,
-      )
-      const step = (0.5 * sigmaTexels) / CAUSTIC_RESOLUTION
-      const stepVec = blurU.uStep.value as THREE.Vector2
-      const pass = (
-        src: THREE.WebGLRenderTarget,
-        dst: THREE.WebGLRenderTarget,
-        sx: number,
-        sy: number,
-      ) => {
-        blurU.uSrc.value = src.texture
-        stepVec.set(sx, sy)
-        renderer.setRenderTarget(dst)
-        renderer.clear(true, false, false)
-        renderer.render(this.blurScene, this.splatCamera)
-      }
-
-      const region = blurU.uRegion.value as THREE.Vector4
-      if (sigmaTexels <= 5) {
-        // Narrow blur: taps are dense enough against full-res content.
-        pass(this.canon, this.blurTarget, step, 0)
-        pass(this.blurTarget, this.target, 0, step)
-      } else {
-        // Wide blur: prefilter down to quarter res (two bilinear 2x2
-        // boxes — a one-tap copy through the minifying bilinear fetch),
-        // blur there, upsample on the way back. Same sigma in UV space;
-        // no aliasing.
-        this.copyTo(renderer, this.canon, this.blurTarget, region)
-        this.copyTo(renderer, this.blurTarget, this.blurQuarterA, region)
-        pass(this.blurQuarterA, this.blurQuarterB, step, 0)
-        pass(this.blurQuarterB, this.target, 0, step)
-      }
-      this.canon = this.target
-    }
+    if (!CAUSTICS.blurBeforeAccum) runSunBlur()
 
     // Build the defocus pyramid (see the pyr1/pyr2 declarations). Full-
     // frame passes at 512^2/256^2 — cheap. uRegion goes full-quad here;
@@ -1534,15 +1585,30 @@ void main() {
         const bc = (this.validHf - this.validHn) / 2
         const sHalf =
           Math.min(this.validHw, (this.validHn + this.validHf) / 2) * R2
-        const mx = this.validCenter.x - R2 * bc
-        const mz = this.validCenter.y - R2 * bc
+        // WORLD-ANCHOR THE TAP LATTICE. The taps sit at fixed offsets
+        // inside this rect, so a rect that slides with the boat draws a
+        // fresh set of samples every frame — and a fresh sample of a
+        // heavy-tailed field is a fresh error. The EMA below can only
+        // smooth an estimate that is temporally correlated; under motion
+        // it was averaging a random walk, and every receiver divides by
+        // the result, so the whole pattern pulsed together. That was the
+        // flicker that appeared only while driving.
+        //
+        // Quantise the half-extent (so the tap SPACING holds still), then
+        // snap the centre to that spacing (so the taps land on the same
+        // world points). Both step occasionally instead of sliding, and a
+        // step is one correlated jump the EMA can absorb.
+        const halfQ = Math.max(Math.round((sHalf * 0.8) / 2) * 2, 2)
+        const sw = (halfQ * 2) / 32
+        const mx = Math.round((this.validCenter.x - R2 * bc) / sw) * sw
+        const mz = Math.round((this.validCenter.y - R2 * bc) / sw) * sw
         rect.set(
           (mx - cc2.x) / this.extent + 0.5,
           (mz - cc2.y) / this.extent + 0.5,
           // inset 20%: the rim mixes with unsplatted black and would drag
           // the mean low
-          (sHalf / this.extent) * 0.8,
-          (sHalf / this.extent) * 0.8,
+          halfQ / this.extent,
+          halfQ / this.extent,
         )
         this.meanMaterial.uniforms.uMap.value = this.canon.texture
         this.meanMaterial.uniforms.uPrevMean.value = this.meanTarget.texture

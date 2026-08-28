@@ -270,6 +270,7 @@
 		'PROFILE.causticShadowSpacingM': { min: 0.05, max: 1.2, step: 0.005 },
 		'CAUSTICS.clampCells': { min: 0, max: 4, step: 0.05 },
 		'CAUSTICS.jitterCells': { min: 0, max: 1, step: 0.02 },
+		'CAUSTICS.clipSigma': { min: 0, max: 3, step: 0.05 },
 		'CAUSTICS.shadowTemporalAA': { min: 0, max: 0.97, step: 0.01 },
 		'CAUSTICS.shadowEdgeAA': { min: 0, max: 1, step: 0.05 },
 		'PROFILE.renderScale': { min: 0.5, max: 1, step: 0.05 },
@@ -404,7 +405,7 @@
 			['splat', ['maxBright', 'sourceBlurM']],
 			['depth', ['formM', 'focalM', 'blurPerM', 'diffuseDepthM']],
 			['look', ['temporalAA', 'edgeAA', 'contrast', 'ridgeGain', 'castShadow']],
-			['stability', ['clampCells', 'jitterCells']],
+			['stability', ['clampCells', 'jitterCells', 'clipSigma', 'blurBeforeAccum']],
 			['shadow map', ['shadowTemporalAA', 'shadowEdgeAA']],
 			['inspect', ['showMap']]
 		],

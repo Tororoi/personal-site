@@ -924,7 +924,15 @@ vec3 shadeUnderwater(vec3 P, vec3 normal, vec3 albedo, float depth, float depthB
 			mix(texture2D(uCausticShadow, cuvC), texture2D(uCausticShadowL1, cuvC), t1),
 			texture2D(uCausticShadowL2, cuvC), t2);
 		float shCh = objRecv < 0.5 ? sm.g : (abs(objRecv - 2.0) < 0.25 ? sm.a : sm.b);
-		float vis = sm.r > 1e-3 ? clamp(shCh / sm.r, 0.0, 1.0) : 1.0;
+		// COVERAGE FADE, not a threshold. This was a hard ternary on
+		// sm.r > 1e-3: a texel with marginal ray coverage flipped between
+		// the visibility ratio and fully-unshadowed between frames, and
+		// what moves sm.r at a fixed world point is the splat region and
+		// its rays sliding — which is to say, driving. A discontinuity
+		// that only fires under motion, and invisible in the map itself
+		// because the map is fine; it is this read that jumps.
+		float cov = smoothstep(1e-3, 8e-3, sm.r);
+		float vis = mix(1.0, clamp(shCh / max(sm.r, 1e-3), 0.0, 1.0), cov);
 		if (objRecv > 0.5) vis *= uwObjectShadow(P, -refrLight, objRecv);
 		caustic = clean * mix(1.0, vis, uUwShadowK);
 	}

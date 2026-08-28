@@ -2455,6 +2455,35 @@ export const CAUSTICS = {
    */
   clampCells: 1,
   /**
+   * VARIANCE CLIPPING, in sigmas. 0 keeps the original min/max box.
+   *
+   * The clamp decides how far history may stray from the current frame.
+   * A min/max box is set by the two most extreme taps, which near a
+   * caustic FOLD is precisely where the estimator's heavy tail lives:
+   * one outlier throws the window open and the accumulated value follows
+   * it out, which is flicker. Clipping to mean +/- k*sigma of the same
+   * neighbourhood lets every tap vote, so an outlier widens the window
+   * a little instead of defining it.
+   *
+   * ~1.0-1.5 is the usual range. Too low and real motion gets clipped
+   * away as though it were noise, which reads as smearing.
+   */
+  clipSigma: 0,
+  /**
+   * Run the sun-diffusion blur BEFORE temporal accumulation instead of
+   * after.
+   *
+   * Ordering matters because the clamp reads the current frame raw: with
+   * the blur after, the bounds are computed from an unfiltered estimate
+   * and jitter as much as it does. Blurring first hands the accumulator
+   * a smoother signal to bound against, which should let history
+   * integrate harder at the same temporalAA.
+   *
+   * It also changes what the history HOLDS — blurred rather than sharp —
+   * so the two are worth judging separately from each other.
+   */
+  blurBeforeAccum: false,
+  /**
    * The SHADOW map's own temporal accumulation and edge antialias. The
    * occluder pass used to run naked — splat straight to pyramid — which
    * held only while its lattice was dense enough that the occluded-ray
