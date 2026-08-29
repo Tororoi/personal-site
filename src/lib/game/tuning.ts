@@ -2918,8 +2918,69 @@ export const FUNNEL = applyOverrides('FUNNEL', {
   tilt: 1,
 })
 
+/**
+ * BREAKER: crests that throw a lip forward as they steepen.
+ *
+ * A plunging breaker happens because the crest outruns its base. This
+ * reproduces that as an AUTHORED bend of the crest region rather than by
+ * pushing Gerstner past its limit — the mesh is already parametric in
+ * (u, v), so it can overhang; what it must not do is pass through
+ * itself, which is exactly what Gerstner's overshoot does.
+ *
+ * VISUAL ONLY, applied in the water's vertex shader. Physics, caustics
+ * and foam keep reading the unbent Gerstner surface, so a lip is a thing
+ * you can see and not a thing you can hit.
+ *
+ * The trigger is the Jacobian the wave sum already produces: 1 is flat
+ * water, 0 is a crest pinched vertical, negative is folded over. It
+ * costs nothing extra to measure — every sine and cosine it needs is
+ * already computed for the displacement itself.
+ *
+ * A STORM AND SHOAL feature by intent: lean defaults to 0, and the
+ * Jacobian range only opens near breaking, so calm and moderate seas
+ * never enter it. Turn it up for violent weather and shallow water.
+ */
+export const BREAKER = applyOverrides('BREAKER', {
+  /**
+   * Maximum BEND at the crest, degrees. 0 is off and the term compiles
+   * out entirely.
+   *
+   * The crest region is rotated forward about a horizontal axis at the
+   * still-water line, by an angle that grows with height — so the top of
+   * the wave swings furthest and the base does not move.
+   *
+   * Past 90 degrees the lip is beyond vertical and genuinely overhangs,
+   * but 180 is only halfway over — a lip that reaches down to the water
+   * ahead of it wants appreciably more. The rotation is rigid, so no
+   * angle self-intersects and there is no reason to cap below a turn.
+   *
+   * A BEND, not Gerstner's overshoot. Gerstner curls by pushing the
+   * horizontal term until the surface passes through itself, which is a
+   * degenerate accident; a bend with a monotone angle is injective up to
+   * ~180 degrees, so the lip overhangs without ever self-crossing.
+   */
+  bendDeg: 100,
+  /**
+   * How sharply the bend concentrates at the top, as an exponent on
+   * height. 1 bends the whole face like a bowing column; higher leaves
+   * the face standing and throws only the lip over.
+   */
+  bendPow: 2.5,
+  /**
+   * Jacobian where the lean begins. Crests reach here well before they
+   * break, so it sets how early a wave starts to nod forward.
+   */
+  jStart: 0.35,
+  /**
+   * Jacobian where the lean is full. At or below 0 the surface has
+   * already folded, so this is the genuinely breaking end of the range.
+   */
+  jFull: 0,
+})
+
 const GROUPS = {
   ENABLE,
+  BREAKER,
   FUNNEL,
   BOAT,
   SEA,

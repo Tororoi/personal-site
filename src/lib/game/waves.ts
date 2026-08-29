@@ -1612,27 +1612,7 @@ vec3 waveDisplacement(vec2 p, float t, float ampScale) {
 		d.z += b.y * amp * a.y * c;
 		d.y += amp * sin(theta);
 	}
-${
-  FUNNEL.enabled && FUNNEL.tilt > 0.0001
-    ? `	// TILT: rotate the displacement so the funnel's surface is the
-	// baseline the wave rides, instead of world-up. Shortest arc from up
-	// to the (blended) funnel normal, by the cross-product identity —
-	// no trig, two crosses. Normal read at the REST point p, so the
-	// horizontal map stays a plain function of the material coordinate
-	// and surfaceHeight's inversion still converges.
-	{
-		vec2 g = funnelGrad(p) * ${FUNNEL.tilt.toFixed(4)};
-		vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
-		vec3 a = vec3(n.z, 0.0, -n.x);
-		float denom = 1.0 + n.y;
-		if (denom > 1e-4) {
-			vec3 c1 = cross(a, d);
-			d = d + c1 + cross(a, c1) / denom;
-		}
-	}
-`
-    : ''
-}	// At the landed position, matching the CPU twin.
+	// At the landed position, matching the CPU twin.
 	d.y += funnelAt(p + d.xz);
 	return d;
 }

@@ -306,6 +306,10 @@
 		'UNDERWATER.whaleY': { min: -20, max: 2, step: 0.1 },
 		'UNDERWATER.whaleX': { min: -40, max: 40, step: 0.5 },
 		'UNDERWATER.whaleZ': { min: -40, max: 40, step: 0.5 },
+		'BREAKER.bendDeg': { min: 0, max: 360, step: 1 },
+		'BREAKER.bendPow': { min: 0.2, max: 6, step: 0.1 },
+		'BREAKER.jStart': { min: -0.5, max: 1, step: 0.01 },
+		'BREAKER.jFull': { min: -1, max: 0.6, step: 0.01 },
 		'FUNNEL.x': { min: -60, max: 60, step: 1 },
 		'FUNNEL.z': { min: -60, max: 60, step: 1 },
 		'FUNNEL.depthM': { min: -6, max: 12, step: 0.25 },
@@ -476,6 +480,7 @@
 			['gustmask', ['gustLambdaMin', 'gustLambdaMax', 'gustSlopeAmp', 'gustDirPow', 'gustLengthM', 'gustWidthM', 'gustDensity', 'gustCover', 'gustSharp', 'gustGain', 'gustFresnelGrazing', 'gustSurfaceReflect']]
 		],
 
+		BREAKER: [['breaker', ['bendDeg', 'bendPow', 'jStart', 'jFull']]],
 		FUNNEL: [['funnel', ['enabled', 'x', 'z', 'depthM', 'sigmaM', 'tilt']]],
 		SEA: [
 			['sea', ['waves', 'lambdaScale', 'chopOverride', 'seaState', 'transitionSecondsPerUnit']],

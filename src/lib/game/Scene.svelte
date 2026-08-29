@@ -62,6 +62,7 @@
 	import { WEATHER, WIND,
 		CAUSTICS,
 		BOAT,
+		BREAKER,
 		DROPLET,
 		ENABLE,
 		f,
@@ -2396,6 +2397,35 @@ void main() {
 	// as though the object's wave were not there.
 	vJacobian = Na.y;
 	vSlope = -Na.xz / max(Na.y, 0.2);
+${
+	BREAKER.bendDeg > 0.01
+		? `	// CREST BEND: rotate the crest region forward about a horizontal
+	// axis at the still-water line, by an angle that grows with height.
+	// The base stays put, the top swings furthest, and past 90 degrees
+	// the lip overhangs.
+	//
+	// A bend rather than Gerstner's overshoot. Gerstner curls by running
+	// its horizontal term past the point where the surface passes
+	// THROUGH itself; a monotone bend is injective, so this overhangs
+	// without ever self-crossing — which is the whole difference between
+	// a lip and a pinch loop.
+	//
+	// Travel direction comes from the pinch-weighted heading votes the
+	// loop stretch already accumulates, so a breaking crest throws the
+	// way the waves that built it are going.
+	{
+		float bAmt = 1.0 - smoothstep(
+			${f(BREAKER.jFull)}, ${f(BREAKER.jStart)}, vJacobian);
+		if (bAmt > 0.001 && wsum > 0.0001 && p.y > 0.0) {
+			vec2 fdir = normalize(vec2(hwx, hwz));
+			float hf = clamp(p.y / max(uDomAmp, 0.001), 0.0, 1.0);
+			float phi = radians(${f(BREAKER.bendDeg)}) * bAmt * pow(hf, ${f(BREAKER.bendPow)});
+			p.xz += fdir * (p.y * sin(phi));
+			p.y *= cos(phi);
+		}
+	}`
+		: ''
+}
 	${ENABLE.loopStretch ? `
 	// STRETCH the pinched loop toward the foam sprite centers: the flat
 	// discs depth-test at their centers ~0.8r behind the surface along
