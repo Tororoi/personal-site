@@ -72,6 +72,8 @@ export const ENABLE = {
    * every droplet deposit in its own landing zone.)
    */
   turbDissipation: true,
+  /** Foam from the ripple field's steepness — the shaped wake. */
+  rippleWakeFoam: true,
   /** Foam left by landing droplets. Switch OFF to see the crest trail
    * on its own — the two sources are otherwise hard to tell apart. */
   dropletFoam: true,
@@ -1489,6 +1491,7 @@ export const FOAM = {
    * the presets: calm 0.55 -> nothing, largeSwell 2.25 -> about a third,
    * storm 5 -> full.
    */
+
   contactChopStart: 1,
   contactChopFull: 5,
   // ---- THE COLLAR (formerly the CONTACT group) ----
@@ -2617,6 +2620,49 @@ export const BOAT = {
    * ~0.03 matches the two-frame field update. 0 disables the lead.
    */
   wakeFoamLeadS: 0.03,
+  /**
+   * Metres between the two prop-wash deposits, measured aft from the
+   * screw. The pair should straddle the wash, not trail behind it.
+   *
+   * Was a hard 0.9, set when the emitter seeded at the HULL CENTRE to
+   * hide the deposit-to-draw gap; measured from a point already at the
+   * screw, that laid the second blob past the transom in open water.
+   */
+  wakeFoamSpreadM: 0.45,
+  /**
+   * RIPPLE WAKE FOAM (ENABLE.rippleWakeFoam): foam keyed to the steepness
+   * of the interactive ripple field, so the trailing V is drawn by the
+   * wave equation that already produces it instead of by stamped blobs.
+   *
+   * Lives in BOAT, not FOAM, for one practical reason: FOAM bakes its
+   * knobs into the shader as literals and reloads to apply, and these
+   * three are the ones you tune by eye against a moving boat. As
+   * uniforms in a live group they answer to the slider.
+   *
+   * Keyed on crest HEIGHT, not slope: slope peaks on the flanks, so any
+   * threshold catching the V's arms also fills the water between them.
+   * Two outputs share the bracket — a paint term that rides the crest
+   * and goes when it goes, and a mild deposit rate that stays as trail. Being a rate is what biases it
+   * toward the boat — the field carries every disturbance, spray
+   * landings included, but a splash is a moment and a wake is a standing
+   * crest, so accrual collects far more under one than the other. Raise
+   * the start if splashes foam; there is no source tag to filter on.
+   */
+  /** Deposit into the foam FIELD — the trail that outlives the crest.
+   *  0 while the paint is being tuned: two sources feeding one web is
+   *  not something you can judge either half of. */
+  wakeFoamRate: 0,
+  wakeFoamCrestStart: 0.05,
+  /** Upper end of the crest bracket: where the paint reaches full
+   *  white. The gap from Start is the band's softness. */
+  wakeFoamCrestFull: 0.12,
+  /**
+   * Crest foam DENSITY, 0-1: the mark that rides the wave and leaves
+   * with it. Drawn through the foam web like the collars, so this reads
+   * as a density dial — the web fuses into a sheet at high coverage and
+   * tears into lace as it drops. Past ~0.55 the crest is a solid band.
+   */
+  wakeFoamPaint: 1,
   /** Linear + quadratic hull drag; together they set the top speed
    * (~5.8 m/s at the defaults: thrust = dragLinear*v + dragQuad*v^2). */
   dragLinear: 0.45,

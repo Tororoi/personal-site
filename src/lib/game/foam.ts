@@ -26,7 +26,7 @@
  */
 
 import * as THREE from 'three'
-import { ENABLE, FOAM, FROTH } from './tuning'
+import { BOAT, ENABLE, FOAM, FROTH } from './tuning'
 import { currentVector } from './current'
 import { activeField, waves, wavesGlsl, onFieldChange, waveUniformA, waveUniformB } from './waves'
 
@@ -308,6 +308,11 @@ uniform float uExtent;
 uniform float uTime;
 uniform float uAmp;
 uniform vec4 uInject[${MAX_INJECT}]; // x, z, sigma, amp
+uniform sampler2D uRippleTex;  // boat/object disturbance: height in x, grad in zw
+uniform vec2 uWakeCrest;       // ripple-height bracket: x = start, y = full
+uniform float uWakeRate;
+uniform vec2 uRippleCenter;
+uniform float uRippleExtent;
 uniform float uDomAmp;
 uniform sampler2D uWebTex;
 uniform mat4 uBuoyInv[3];
@@ -600,8 +605,8 @@ void main() {
 	//
 	// The rate scales with CHOP, so a glassy sea wets its buoys without
 	// foaming them and a storm rings them hard.
+	vec2 surfXZ = world + disp.xz;
 	{
-		vec2 surfXZ = world + disp.xz;
 		float surfY = disp.y;
 		// The water's velocity RELATIVE to the object. Orbital motion plus
 		// the surface current; the objects are moored, so their own
@@ -649,6 +654,41 @@ void main() {
 			* uFoaminess * uDtScale;
 	}
 
+${
+	ENABLE.rippleWakeFoam
+		? `	// RIPPLE WAKE. The interactive ripple field already carries the
+	// boat's disturbance and grows the trailing V by itself — it is a
+	// wave equation, so the shape is physics rather than authorship.
+	// Foam keyed to it inherits that shape for free, and inherits it for
+	// every object that pokes the water, not just the boat.
+	//
+	// Sampled at surfXZ, the DISPLACED position: the foam field is
+	// indexed in rest space and the ripple field in world space, and on a
+	// steep sea those differ by metres. disp comes from the wave probe
+	// this texel already ran.
+	//
+	// A RATE, like the contact collar above and unlike the droplet
+	// stamps below — the wake is a standing condition of the water, not
+	// a sequence of events, so it accrues wherever the ripple is steep
+	// and stops accruing when the ripple passes.
+	{
+		vec2 ruv = (surfXZ - uRippleCenter) / uRippleExtent + 0.5;
+		if (ruv.x > 0.01 && ruv.x < 0.99 && ruv.y > 0.01 && ruv.y < 0.99) {
+			// CRESTS, keyed on HEIGHT. Slope was the obvious choice and the
+			// wrong one: slope peaks on the FLANKS, so a threshold low
+			// enough to catch the wake's arms also painted the disturbed
+			// water between them, and there was no setting that separated
+			// the two. Height picks out the ridges themselves.
+			float rh = texture2D(uRippleTex, ruv).x;
+			// Uniforms, not baked literals: these are eye-tuned against a
+			// moving boat, and a reload per adjustment is not tuning.
+			float wake = smoothstep(uWakeCrest.x, uWakeCrest.y, rh);
+			h += wake * uWakeRate * uDtScale;
+		}
+	}
+`
+		: ''
+}
 	// Deposits below come from landing droplets: discrete splashes, which
 	// genuinely are point events, unlike the break itself.
 
@@ -729,6 +769,11 @@ export class FoamField {
         uTime: { value: 0 },
         uAmp: { value: 1 },
         // Shared with every other wave material; see waveUniformA.
+        uRippleTex: { value: null as THREE.Texture | null },
+        uWakeCrest: { value: new THREE.Vector2(BOAT.wakeFoamCrestStart, BOAT.wakeFoamCrestFull) },
+        uWakeRate: { value: BOAT.wakeFoamRate },
+        uRippleCenter: { value: new THREE.Vector2(0, 0) },
+        uRippleExtent: { value: 1 },
         uWaveA: { value: waveUniformA },
         uWaveB: { value: waveUniformB },
         uInject: {
@@ -808,6 +853,15 @@ export class FoamField {
     return this.material.uniforms.uCenter.value as THREE.Vector2
   }
 
+  /** Point the wake source at the ripple field (see the RIPPLE WAKE
+   *  block). Held by reference where possible so the two can never
+   *  disagree about where the disturbance is. */
+  setRipple(tex: THREE.Texture, center: THREE.Vector2, extent: number) {
+    this.material.uniforms.uRippleTex.value = tex
+    ;(this.material.uniforms.uRippleCenter.value as THREE.Vector2).copy(center)
+    this.material.uniforms.uRippleExtent.value = extent
+  }
+
   step(
     renderer: THREE.WebGLRenderer,
     windX: number,
@@ -846,6 +900,11 @@ export class FoamField {
     u.uDtScale.value = d * 60
     // Follows a live sea-state change; see the onFieldChange hook below.
     u.uFoaminess.value = CONTACT_FOAMINESS
+    ;(u.uWakeCrest.value as THREE.Vector2).set(
+      BOAT.wakeFoamCrestStart,
+      Math.max(BOAT.wakeFoamCrestFull, BOAT.wakeFoamCrestStart + 0.001),
+    )
+    u.uWakeRate.value = BOAT.wakeFoamRate
     // Foam drifts on BOTH: a fraction of the wind (it is blown across
     // the surface) plus the surface current in full (it floats in the
     // skin of the water, so it goes where the water goes).

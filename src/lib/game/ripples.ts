@@ -373,6 +373,17 @@ void applyRipples(inout vec3 p, vec2 worldXZ) {
 // what lets ripples SHADE at texture resolution regardless of how coarse
 // the water mesh is: the fragment adds these slopes onto the interpolated
 // analytic wave normal.
+// The DISPLAYED ripple height. Crest detection wants the height itself,
+// not the gradient: a gradient peaks on the FLANKS, so keying foam to it
+// paints the whole disturbed patch — including the water between a wake's
+// arms — while the crest lines it should be tracing get a dead seam
+// along the ridge where the slope passes through zero.
+float rippleHeightAt(vec2 worldXZ) {
+	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
+	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return 0.0;
+	return texture2D(uRippleTex, ruv).x * uRippleGain;
+}
+
 vec2 rippleShadeGrad(vec2 worldXZ) {
 	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
 	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return vec2(0.0);

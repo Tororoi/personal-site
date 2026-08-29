@@ -224,6 +224,11 @@
 		'BOAT.horsepower': { min: 0, max: 20, step: 0.1 },
 		'BOAT.centerWakeFoam': { min: 0, max: 3, step: 0.05 },
 		'BOAT.wakeFoamLeadS': { min: 0, max: 0.12, step: 0.005 },
+		'BOAT.wakeFoamSpreadM': { min: 0, max: 2, step: 0.05 },
+		'BOAT.wakeFoamRate': { min: 0, max: 3, step: 0.02 },
+		'BOAT.wakeFoamCrestStart': { min: 0, max: 0.4, step: 0.005 },
+		'BOAT.wakeFoamCrestFull': { min: 0.01, max: 1, step: 0.005 },
+		'BOAT.wakeFoamPaint': { min: 0, max: 1, step: 0.02 },
 		'BOAT.dragLinear': { min: 0.05, max: 1, step: 0.01 },
 		'BOAT.dragQuad': { min: 0, max: 0.15, step: 0.002 },
 		'BOAT.turnRate': { min: 0, max: 2.5, step: 0.05 },
@@ -427,7 +432,20 @@
 			['buoyancy', ['bobPeriod', 'bobZeta', 'maxSubmersion', 'entryDrag']],
 			['swing', ['rollGain', 'rollRighting', 'rollZeta', 'pitchGain', 'pitchRighting', 'pitchZeta']],
 			['trim', ['sternTrim', 'trimPerSpeed', 'trimPerAccel', 'liftPerSpeed', 'liftMax']],
-			['wake', ['wakeAmp', 'wakeOffset', 'centerWakeFoam', 'wakeFoamLeadS']]
+			[
+				'wake',
+				[
+					'wakeAmp',
+					'wakeOffset',
+					'centerWakeFoam',
+					'wakeFoamLeadS',
+					'wakeFoamSpreadM',
+					'wakeFoamRate',
+					'wakeFoamCrestStart',
+					'wakeFoamCrestFull',
+					'wakeFoamPaint'
+				]
+			]
 		],
 		SPECULAR: [
 			['core', ['sharp', 'gain', 'fresnelMix']],
@@ -511,7 +529,7 @@
 			['water', ['caustics', 'fftDetail', 'gustMask', 'cloudShadows', 'objectWave']],
 			['whitewater', ['loopWhite', 'loopStretch', 'froth', 'crestPlumes', 'whitecapEvents', 'bowCrest']],
 			['spray', ['splashDroplets', 'buoySpray', 'dropletFoam']],
-			['foam', ['foamField', 'foamTrail', 'contactFoam', 'contactEmit', 'turbDissipation']],
+			['foam', ['foamField', 'foamTrail', 'contactFoam', 'contactEmit', 'turbDissipation', 'rippleWakeFoam']],
 			['mist', ['mist', 'mistGusts']],
 			['meta', ['tuningUI', 'gpuProfile', 'perfLog']]
 		],

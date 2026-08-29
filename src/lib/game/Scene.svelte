@@ -410,6 +410,9 @@
 		// steepest few percent of crests live, saturated just above a true
 		// fold, so breaking events read as bright flashes.
 		uFoamColor: { value: new THREE.Color('#f4f9ff') },
+		// Wake crest paint + the crest bracket it shares with the field.
+		uWakeCrest: { value: new THREE.Vector2(BOAT.wakeFoamCrestStart, BOAT.wakeFoamCrestFull) },
+		uWakePaint: { value: BOAT.wakeFoamPaint },
 		uFoamStart: { value: 0 },
 		uFoamFull: { value: -0.12 },
 		// Whitecap events, refreshed each frame from the same array the CPU
@@ -1391,6 +1394,8 @@ void main() {
 	const solidFragment = `
 uniform vec3 uFogColor;
 uniform float uFogDensity;
+uniform vec2 uWakeCrest;
+uniform float uWakePaint;
 uniform vec3 uFoamColor;
 uniform vec3 uSkyZenith;
 uniform vec3 uSkyHorizon;
@@ -2210,9 +2215,32 @@ void main() {
 			? `max(contactFoam(vWorld), boatContact(vWorld)) * ${f(FOAM.collarAlpha)}`
 			: '0.0'
 	};
+	// WAKE CREST PAINT: the same split the contact collar uses — a mark
+	// that rides the crest and vanishes with it, over a mild deposit into
+	// the field that stays behind as the trail. The field alone cannot do
+	// this: it is a rate, so anything strong enough to read while a crest
+	// passes has already over-accrued by the time it leaves.
+	//
+	// Shares the crest bracket with the deposit, so one pair of knobs
+	// moves paint and trail together and they cannot disagree about where
+	// a crest is.
+	// The crest paint: white ramped across the crest bracket, Start where
+	// it begins and Full where it is solid. The gap between them is the
+	// band's softness, and because it is a HEIGHT range it tapers along
+	// the flank with the wave's own shape.
+	float crestT = 0.0;
+	${
+		ENABLE.rippleWakeFoam
+			? `crestT = smoothstep(uWakeCrest.x, uWakeCrest.y, rippleHeightAt(vWorld.xz)) * uWakePaint;`
+			: ''
+	}
 	// One web over both, so a fading collar tears into the same lace the
 	// field does, and overlapping foam draws one pattern rather than two.
 	float foamAmt = foamWeb(vRest, max(fieldT, contactT), vJacobian);
+	// Outside the web: the crest is a mark on the water's SHAPE, and the
+	// web models floating foam thinning out. Through it, a hard contour
+	// came back torn.
+	foamAmt = max(foamAmt, crestT);
 	vec3 foamN = normalize(vec3(-slope.x, 1.0, -slope.y));
 	vec3 foamLit = whitewaterLight(uFoamColor, foamN, ${f(1 - FOAM.shapeFloor)});
 	col = mix(col, foamLit, foamAmt);`}
@@ -4488,8 +4516,14 @@ void main() {
 			const lead = dt + Math.max(BOAT.wakeFoamLeadS, 0);
 			const bx = boat.x + fwdX * PROP_LOCAL_X + boat.vx * lead;
 			const bz = boat.z + fwdZ * PROP_LOCAL_X + boat.vz * lead;
+			// The pair straddles the screw rather than trailing far behind
+			// it. 0.9m was measured from the HULL CENTRE, back when the
+			// emitter seeded under the boat to hide the pipeline gap; from
+			// a point already 2.48m aft it put the second deposit well
+			// past the transom, laying the trail in open water behind the
+			// boat instead of at the wash.
 			for (let k = 0; k < 2; k++) {
-				const back = k * 0.9;
+				const back = k * Math.max(BOAT.wakeFoamSpreadM, 0);
 				const wx = bx - fwdX * back + (Math.random() - 0.5) * 0.6;
 				const wz = bz - fwdZ * back + (Math.random() - 0.5) * 0.6;
 				// Rest-space deposit: three iterations (see depositContactFoam).
@@ -5105,6 +5139,14 @@ void main() {
 			foamAccum += Math.min(delta, 0.1);
 			foamEven = !foamEven;
 			if (foamEven && !PROFILE.skipFoamSim) {
+				// The wake source reads the ripple field; point it at the
+				// live one each step (it recenters with the boat).
+				foamField.setRipple(rippleSim.texture, rippleSim.center, RIPPLE_EXTENT);
+				waterUniforms.uWakeCrest.value.set(
+					BOAT.wakeFoamCrestStart,
+					Math.max(BOAT.wakeFoamCrestFull, BOAT.wakeFoamCrestStart + 0.001)
+				);
+				waterUniforms.uWakePaint.value = BOAT.wakeFoamPaint;
 				foamField.step(renderer, windSteady.x, windSteady.z, waveTime, foamAccum);
 				foamAccum = 0;
 				waterUniforms.uFoamTex.value = foamField.texture;
