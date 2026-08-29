@@ -384,6 +384,50 @@ float rippleHeightAt(vec2 worldXZ) {
 	return texture2D(uRippleTex, ruv).x * uRippleGain;
 }
 
+// The surface's VERTICAL RATE, metres per second, display-scaled.
+//
+// The sim integrates h += v each step, so the stored v is metres per
+// STEP; x60 puts it in m/s so a threshold reads as a speed rather than
+// as an artefact of the step rate.
+//
+// Signed on purpose. Rising water is a crest arriving, falling water is
+// one leaving, and the peak itself passes through zero — so a positive
+// threshold marks the ADVANCING face of each crest and nothing else,
+// which is one line per crest instead of the two that |v| would give.
+float rippleVelocityAt(vec2 worldXZ) {
+	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
+	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return 0.0;
+	return texture2D(uRippleTex, ruv).y * uRippleGain * 60.0;
+}
+
+// NEGATIVE Laplacian of the ripple surface, 1/m: how tightly the water
+// is curving, signed so that CRESTS are positive.
+//
+// div(grad) is zero on a flat surface and on a uniform slope, so unlike
+// height or rate this measures the shape itself — a sharp little crest
+// and a broad tall one read differently even at the same height, which
+// is what makes it a size-independent way to find ridges.
+//
+// The sign does the trough gate for free: water curving downward (a
+// crest) is positive here, water curving upward (a trough) negative, so
+// any positive threshold excludes troughs without a second test.
+//
+// Four taps, on the gradient the sim already baked into zw — cheaper and
+// smoother than differencing the height field twice.
+float rippleCurvatureAt(vec2 worldXZ) {
+	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
+	if (ruv.x <= ${(2 / RIPPLE_RESOLUTION).toFixed(6)} || ruv.x >= ${(1 - 2 / RIPPLE_RESOLUTION).toFixed(6)} ||
+		ruv.y <= ${(2 / RIPPLE_RESOLUTION).toFixed(6)} || ruv.y >= ${(1 - 2 / RIPPLE_RESOLUTION).toFixed(6)}) return 0.0;
+	float e = ${(1 / RIPPLE_RESOLUTION).toFixed(6)};
+	float gxr = texture2D(uRippleTex, ruv + vec2(e, 0.0)).z;
+	float gxl = texture2D(uRippleTex, ruv - vec2(e, 0.0)).z;
+	float gzu = texture2D(uRippleTex, ruv + vec2(0.0, e)).w;
+	float gzd = texture2D(uRippleTex, ruv - vec2(0.0, e)).w;
+	float cell = uRippleExtent * e;
+	float lap = ((gxr - gxl) + (gzu - gzd)) / (2.0 * cell);
+	return -lap * uRippleGain;
+}
+
 vec2 rippleShadeGrad(vec2 worldXZ) {
 	vec2 ruv = (worldXZ - uRippleCenter) / uRippleExtent + 0.5;
 	if (ruv.x <= 0.0 || ruv.x >= 1.0 || ruv.y <= 0.0 || ruv.y >= 1.0) return vec2(0.0);

@@ -2639,8 +2639,9 @@ export const BOAT = {
    * three are the ones you tune by eye against a moving boat. As
    * uniforms in a live group they answer to the slider.
    *
-   * Keyed on crest HEIGHT, not slope: slope peaks on the flanks, so any
-   * threshold catching the V's arms also fills the water between them.
+   * CURVATURE (1/m) places the mark: tighter bend, more white. Signed so
+   * crests are positive and troughs excluded. Amplitude-independent by
+   * construction, which height was not.
    * Two outputs share the bracket — a paint term that rides the crest
    * and goes when it goes, and a mild deposit rate that stays as trail. Being a rate is what biases it
    * toward the boat — the field carries every disturbance, spray
@@ -2655,7 +2656,7 @@ export const BOAT = {
   wakeFoamCrestStart: 0.1,
   /** Upper end of the crest bracket: where the paint reaches full
    *  white. The gap from Start is the band's softness. */
-  wakeFoamCrestFull: 0.12,
+  wakeFoamCrestFull: 0.8,
   /**
    * Crest foam DENSITY, 0-1: the mark that rides the wave and leaves
    * with it. Drawn through the foam web like the collars, so this reads
@@ -2663,6 +2664,18 @@ export const BOAT = {
    * tears into lace as it drops. Past ~0.55 the crest is a solid band.
    */
   wakeFoamPaint: 1,
+  /**
+   * Vertical rate (m/s) at which a crest counts as fully ALIVE. Below it
+   * the paint fades out; 0 switches the test off and every crest paints
+   * on height alone.
+   *
+   * This is the lever on lingering. The ripple field damps to 3% over
+   * ~13 seconds, so a wake's HEIGHT outlives the boat by a long way
+   * while its ENERGY does not — gating on rate lets the mark die with
+   * the disturbance instead of with its amplitude, without touching the
+   * ripple decay that gives the wake its length.
+   */
+  wakeFoamActivityV: 0,
   /** Linear + quadratic hull drag; together they set the top speed
    * (~5.8 m/s at the defaults: thrust = dragLinear*v + dragQuad*v^2). */
   dragLinear: 0.45,

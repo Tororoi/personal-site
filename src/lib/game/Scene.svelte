@@ -413,6 +413,7 @@
 		// Wake crest paint + the crest bracket it shares with the field.
 		uWakeCrest: { value: new THREE.Vector2(BOAT.wakeFoamCrestStart, BOAT.wakeFoamCrestFull) },
 		uWakePaint: { value: BOAT.wakeFoamPaint },
+		uWakeAct: { value: BOAT.wakeFoamActivityV },
 		uFoamStart: { value: 0 },
 		uFoamFull: { value: -0.12 },
 		// Whitecap events, refreshed each frame from the same array the CPU
@@ -1396,6 +1397,7 @@ uniform vec3 uFogColor;
 uniform float uFogDensity;
 uniform vec2 uWakeCrest;
 uniform float uWakePaint;
+uniform float uWakeAct;
 uniform vec3 uFoamColor;
 uniform vec3 uSkyZenith;
 uniform vec3 uSkyHorizon;
@@ -2224,14 +2226,26 @@ void main() {
 	// Shares the crest bracket with the deposit, so one pair of knobs
 	// moves paint and trail together and they cannot disagree about where
 	// a crest is.
-	// The crest paint: white ramped across the crest bracket, Start where
-	// it begins and Full where it is solid. The gap between them is the
-	// band's softness, and because it is a HEIGHT range it tapers along
-	// the flank with the wave's own shape.
+	// Keyed on CURVATURE: how tightly the water is bending, not how high
+	// it sits or how fast it moves. Height could not separate a small
+	// steep ripple from a broad wake arm — same threshold, wildly
+	// different bands — and rate is zero at the crest and peaks on the
+	// flank, so it striped. Curvature is the shape itself, so a tight
+	// ridge reads strongly whatever its amplitude.
+	//
+	// Signed so crests are positive, which gates out troughs for free.
+	// The optional rate gate below is off by default now that placement
+	// no longer needs it.
 	float crestT = 0.0;
 	${
 		ENABLE.rippleWakeFoam
-			? `crestT = smoothstep(uWakeCrest.x, uWakeCrest.y, rippleHeightAt(vWorld.xz)) * uWakePaint;`
+			? `{
+		float act = uWakeAct > 0.0001
+			? smoothstep(0.0, uWakeAct, abs(rippleVelocityAt(vWorld.xz)))
+			: 1.0;
+		crestT = smoothstep(uWakeCrest.x, uWakeCrest.y, rippleCurvatureAt(vWorld.xz))
+			* act * uWakePaint;
+	}`
 			: ''
 	}
 	// One web over both, so a fading collar tears into the same lace the
@@ -5169,6 +5183,7 @@ void main() {
 					Math.max(BOAT.wakeFoamCrestFull, BOAT.wakeFoamCrestStart + 0.001)
 				);
 				waterUniforms.uWakePaint.value = BOAT.wakeFoamPaint;
+				waterUniforms.uWakeAct.value = BOAT.wakeFoamActivityV;
 				foamField.step(renderer, windSteady.x, windSteady.z, waveTime, foamAccum);
 				foamAccum = 0;
 				waterUniforms.uFoamTex.value = foamField.texture;
