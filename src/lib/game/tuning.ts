@@ -2652,7 +2652,7 @@ export const BOAT = {
    *  0 while the paint is being tuned: two sources feeding one web is
    *  not something you can judge either half of. */
   wakeFoamRate: 0,
-  wakeFoamCrestStart: 0.05,
+  wakeFoamCrestStart: 0.1,
   /** Upper end of the crest bracket: where the paint reaches full
    *  white. The gap from Start is the band's softness. */
   wakeFoamCrestFull: 0.12,
@@ -2828,7 +2828,22 @@ export const BOAT = {
   liftPerSpeed: 0.018,
   liftMax: 0.26,
   /** Wake: continuous ripple poke, per step at full speed. */
-  wakeAmp: 0.016,
+  wakeAmp: 0.05,
+  /**
+   * How much the MOTOR adds to the ripple wake, on top of the speed
+   * term. 0 = speed through the water alone, which is the physical
+   * driver and the default; 1 = full throttle doubles it at speed.
+   *
+   * Kept as a dial rather than removed because the speed term already
+   * falls off when the throttle does — the hull slows through the water
+   * within a second or two — so this is only wanted if the wake should
+   * react FASTER than the boat does.
+   *
+   * Scaled by propSpin rather than the throttle key, so it winds up and
+   * down with the engine — and goes quiet when the prop leaves the water,
+   * since spin decays in flight.
+   */
+  wakeThrustGain: 0,
   /**
    * Where along the hull the wake poke is laid, metres fore of centre
    * (bow +2.3, stern -2.3). The bow shoulder is where a hull actually

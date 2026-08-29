@@ -306,6 +306,7 @@
 		'UNDERWATER.whaleX': { min: -40, max: 40, step: 0.5 },
 		'UNDERWATER.whaleZ': { min: -40, max: 40, step: 0.5 },
 		'BOAT.wakeAmp': { min: 0, max: 0.05, step: 0.001 },
+		'BOAT.wakeThrustGain': { min: 0, max: 4, step: 0.05 },
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
 		'SEA.waves': { min: 0, max: 2, step: 0.01 },
 		'WEATHER.overcast': { min: 0, max: 1, step: 0.01 },
@@ -436,6 +437,7 @@
 				'wake',
 				[
 					'wakeAmp',
+					'wakeThrustGain',
 					'wakeOffset',
 					'centerWakeFoam',
 					'wakeFoamLeadS',

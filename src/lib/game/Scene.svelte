@@ -4791,9 +4791,31 @@ void main() {
 		// turns the moving disturbance into the trailing V by itself.
 		// Faded out with submergence: a hull under the surface displaces
 		// the column, not the interface.
-		if (!airborne && Math.abs(boat.speed) > 0.6 && boatSub < 0.999) {
+		// SPEED THROUGH THE WATER, not over ground. A wake is the hull
+		// pushing water aside, so what makes it is motion RELATIVE to the
+		// water — the same frame the drag above works in (orbital motion
+		// times orbitalMotion). A boat carried along by a wave's orbital
+		// flow is barely moving through the water however fast the world
+		// slides past, and should throw almost nothing; one driving
+		// against that flow should throw more than its ground speed
+		// suggests. Along the hull, because a beam drift shoulders water
+		// aside without the bow wave that makes a wake.
+		//
+		// Only NEW injections see this. The field propagates what it was
+		// already given, so easing the throttle thins the ripples being
+		// laid from that moment and leaves everything already travelling
+		// exactly as it was.
+		const wakeWpx = boat.wvx * BOAT.orbitalMotion;
+		const wakeWpz = boat.wvz * BOAT.orbitalMotion;
+		const wakeRel = Math.abs(
+			(boat.vx - wakeWpx) * fwdX + (boat.vz - wakeWpz) * fwdZ
+		);
+		if (!airborne && wakeRel > 0.6 && boatSub < 0.999) {
+			const drive = Math.min(Math.abs(propSpin), 1);
 			const amp =
-				BOAT.wakeAmp * Math.min(Math.abs(boat.speed) / 5, 1) * (1 - boatSub);
+				BOAT.wakeAmp *
+				(Math.min(wakeRel / 5, 1) + BOAT.wakeThrustGain * drive) *
+				(1 - boatSub);
 			if (amp > 0.002) {
 				injectRipple(
 					boat.x + Math.cos(boat.heading) * BOAT.wakeOffset,
