@@ -306,6 +306,11 @@
 		'UNDERWATER.whaleY': { min: -20, max: 2, step: 0.1 },
 		'UNDERWATER.whaleX': { min: -40, max: 40, step: 0.5 },
 		'UNDERWATER.whaleZ': { min: -40, max: 40, step: 0.5 },
+		'FUNNEL.x': { min: -60, max: 60, step: 1 },
+		'FUNNEL.z': { min: -60, max: 60, step: 1 },
+		'FUNNEL.depthM': { min: -6, max: 12, step: 0.25 },
+		'FUNNEL.sigmaM': { min: 1, max: 30, step: 0.5 },
+		'FUNNEL.tilt': { min: 0, max: 1, step: 0.02 },
 		'BOAT.wakeAmp': { min: 0, max: 0.05, step: 0.001 },
 		'BOAT.wakeThrustGain': { min: 0, max: 4, step: 0.05 },
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
@@ -470,6 +475,8 @@
 			['gusting', ['gustCycle', 'gustDurMin', 'gustDurVar', 'gustTurnMin', 'gustTurnVar', 'gustSpeedMin', 'gustSpeedVar']],
 			['gustmask', ['gustLambdaMin', 'gustLambdaMax', 'gustSlopeAmp', 'gustDirPow', 'gustLengthM', 'gustWidthM', 'gustDensity', 'gustCover', 'gustSharp', 'gustGain', 'gustFresnelGrazing', 'gustSurfaceReflect']]
 		],
+
+		FUNNEL: [['funnel', ['enabled', 'x', 'z', 'depthM', 'sigmaM', 'tilt']]],
 		SEA: [
 			['sea', ['waves', 'lambdaScale', 'chopOverride', 'seaState', 'transitionSecondsPerUnit']],
 			['current', ['currentSpeed', 'currentCompassDeg']],

@@ -21,7 +21,7 @@
  */
 
 import * as THREE from 'three'
-import { WEATHER, WIND, CURRENT, INSPECT, SEA } from './tuning'
+import { FUNNEL, WEATHER, WIND, CURRENT, INSPECT, SEA } from './tuning'
 
 export type WaveParams = {
   /** Unit direction of travel. */
@@ -1264,6 +1264,31 @@ export const TRIG_SCALE = TRIG_N / (Math.PI * 2)
 
 const scratch = { x: 0, y: 0, z: 0, jxx: 1, jzz: 1, jxz: 0 }
 
+/**
+ * FUNNEL height at a WORLD position, and its gradient. Twin of the GLSL
+ * below; the two must agree or the boat rides a different bowl than the
+ * one being drawn.
+ *
+ * A gaussian, because it differentiates in closed form — the shading
+ * needs the slope every fragment, and finite-differencing it would cost
+ * three more evaluations.
+ */
+export function funnelAt(x: number, z: number): number {
+  if (!FUNNEL.enabled) return 0
+  const dx = x - FUNNEL.x
+  const dz = z - FUNNEL.z
+  const s2 = Math.max(FUNNEL.sigmaM * FUNNEL.sigmaM, 0.0001)
+  return -FUNNEL.depthM * Math.exp(-(dx * dx + dz * dz) / (2 * s2))
+}
+
+/** Funnel gradient (dh/dx, dh/dz) at a world position. */
+export function funnelGrad(x: number, z: number): [number, number] {
+  if (!FUNNEL.enabled) return [0, 0]
+  const s2 = Math.max(FUNNEL.sigmaM * FUNNEL.sigmaM, 0.0001)
+  const h = funnelAt(x, z)
+  return [(-h * (x - FUNNEL.x)) / s2, (-h * (z - FUNNEL.z)) / s2]
+}
+
 function displace(u: number, v: number, t: number, ampScale: number) {
   let dx = 0
   let dy = 0
@@ -1291,8 +1316,44 @@ function displace(u: number, v: number, t: number, ampScale: number) {
     jzz -= qak * w.dirZ * w.dirZ * s
     jxz -= qak * w.dirX * w.dirZ * s
   }
+  // TILT: rotate the whole displacement so the funnel's surface, not
+  // world-up, is the baseline the wave sits on. Shortest-arc rotation
+  // from up to the funnel normal, applied by the cross-product identity
+  // (no trig): v' = v + a x v + (a x (a x v)) / (1 + c).
+  if (FUNNEL.enabled && FUNNEL.tilt > 0.0001) {
+    const [gx, gz] = funnelGrad(u, v)
+    const k = FUNNEL.tilt
+    // Blend toward the funnel normal, then renormalise.
+    let nx = -gx * k
+    let nz = -gz * k
+    const inv = 1 / Math.hypot(nx, 1, nz)
+    nx *= inv
+    nz *= inv
+    const ny = inv
+    // a = cross(up, n); c = dot(up, n)
+    const ax = nz
+    const az = -nx
+    const c = ny
+    const denom = 1 + c
+    if (denom > 1e-4) {
+      // a x v
+      const cx = -az * dy
+      const cy = az * dx - ax * dz
+      const cz = ax * dy
+      // a x (a x v)
+      const ccx = -az * cy
+      const ccy = az * cx - ax * cz
+      const ccz = ax * cy
+      dx = dx + cx + ccx / denom
+      dy = dy + cy + ccy / denom
+      dz = dz + cz + ccz / denom
+    }
+  }
   scratch.x = dx
-  scratch.y = dy
+  // Sampled where the water LANDS (u + dx, v + dz), not at the rest
+  // point: the hollow is a feature of the world, so water should move
+  // through it rather than carry it along as the wave sways.
+  scratch.y = dy + funnelAt(u + dx, v + dz)
   scratch.z = dz
   scratch.jxx = jxx
   scratch.jzz = jzz
@@ -1516,6 +1577,29 @@ export function wavesGlsl(): string {
 uniform vec4 uWaveA[WAVE_COUNT]; // dirX, dirZ, k, omega
 uniform vec3 uWaveB[WAVE_COUNT]; // amp, q, phase
 
+// FUNNEL, twin of funnelAt()/its gradient on the CPU. Baked literals:
+// the shape is staged, so it costs a few instructions and no uniforms.
+float funnelAt(vec2 w) {
+${
+  FUNNEL.enabled
+    ? `	vec2 r = w - vec2(${FUNNEL.x.toFixed(3)}, ${FUNNEL.z.toFixed(3)});
+	return ${(-FUNNEL.depthM).toFixed(4)} * exp(-dot(r, r) / ${(2 * Math.max(FUNNEL.sigmaM * FUNNEL.sigmaM, 0.0001)).toFixed(4)});`
+    : '	return 0.0;'
+}
+}
+
+// Closed-form gradient of the above: d/dx of -D*exp(-r2/2s2) is
+// -h * r / s2. The fragment needs slope per pixel, and finite
+// differencing it would cost three more evaluations.
+vec2 funnelGrad(vec2 w) {
+${
+  FUNNEL.enabled
+    ? `	vec2 r = w - vec2(${FUNNEL.x.toFixed(3)}, ${FUNNEL.z.toFixed(3)});
+	return -funnelAt(w) * r / ${Math.max(FUNNEL.sigmaM * FUNNEL.sigmaM, 0.0001).toFixed(4)};`
+    : '	return vec2(0.0);'
+}
+}
+
 vec3 waveDisplacement(vec2 p, float t, float ampScale) {
 	vec3 d = vec3(0.0);
 	for (int i = 0; i < WAVE_COUNT; i++) {
@@ -1528,6 +1612,28 @@ vec3 waveDisplacement(vec2 p, float t, float ampScale) {
 		d.z += b.y * amp * a.y * c;
 		d.y += amp * sin(theta);
 	}
+${
+  FUNNEL.enabled && FUNNEL.tilt > 0.0001
+    ? `	// TILT: rotate the displacement so the funnel's surface is the
+	// baseline the wave rides, instead of world-up. Shortest arc from up
+	// to the (blended) funnel normal, by the cross-product identity —
+	// no trig, two crosses. Normal read at the REST point p, so the
+	// horizontal map stays a plain function of the material coordinate
+	// and surfaceHeight's inversion still converges.
+	{
+		vec2 g = funnelGrad(p) * ${FUNNEL.tilt.toFixed(4)};
+		vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+		vec3 a = vec3(n.z, 0.0, -n.x);
+		float denom = 1.0 + n.y;
+		if (denom > 1e-4) {
+			vec3 c1 = cross(a, d);
+			d = d + c1 + cross(a, c1) / denom;
+		}
+	}
+`
+    : ''
+}	// At the landed position, matching the CPU twin.
+	d.y += funnelAt(p + d.xz);
 	return d;
 }
 

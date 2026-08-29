@@ -1878,7 +1878,13 @@ void main() {
 	} + ${PROFILE.skipRipple ? 'vec2(0.0)' : 'rippleShadeGrad(vWorld.xz)'}
 		${ENABLE.fftDetail ? '+ detailSlope(vWorld.xz, uTime)' : ''}
 		${ENABLE.gustMask ? '+ gustSlope(vWorld.xz) * gustM' : ''}
-		${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''};
+		${ENABLE.objectWave ? '+ objectWaveSlope(vWorld.xz, vWorld.y)' : ''}
+		// The funnel's own slope. The MESH already has the shape (it is in
+		// waveDisplacement), but this normal is rebuilt analytically per
+		// pixel, so without its gradient the bowl would light dead flat —
+		// correct silhouette, wrong shading, which reads as a hole in the
+		// lighting rather than a hollow in the water.
+		+ funnelGrad(vWorld.xz);
 	vec3 normal = normalize(vec3(-slope.x, 1.0, -slope.y));
 	// THE view direction for this pixel. Under the isometric camera it is
 	// one constant for the whole screen — which is exactly why that camera

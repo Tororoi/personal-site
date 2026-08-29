@@ -2875,8 +2875,52 @@ export const BOAT = {
  * metadata to maintain alongside 260 values.
  */
 // Panel display order (GROUP_NAMES is Object.keys of this map).
+/**
+ * FUNNEL: a standing depression in the water surface that the sea runs
+ * over unchanged.
+ *
+ * The opposite approach to flattening a patch. Nothing is subtracted —
+ * every wave, its Jacobian, its caustics and its foam carry on exactly
+ * as before — so nothing can disagree about whether there are waves
+ * here. The SURFACE ITSELF is shaped, and the sea rides the shape.
+ *
+ * Added at the LANDED position, after the Gerstner offset, so it is a
+ * feature of the world rather than of the water's material coordinates:
+ * the hollow stays put while water moves through it, instead of swaying
+ * along with the wave that carries it. Being vertical-only it leaves the
+ * horizontal map alone, which is what keeps surfaceHeight's fixed-point
+ * inversion valid and lets one edit reach every consumer.
+ */
+export const FUNNEL = applyOverrides('FUNNEL', {
+  enabled: true,
+  /** Centre, world metres. The sphere sits at (3, 2), radius 5. */
+  x: 16,
+  z: 12,
+  /** Depth at the middle, metres. Negative would make a dome. */
+  depthM: 3,
+  /** Gaussian width. The visible mouth runs roughly 2-3x this. */
+  sigmaM: 7,
+  /**
+   * How far the wave field adopts the funnel's SURFACE as its baseline,
+   * 0..1. At 0 the sea heaves straight up and down through the bowl and
+   * the bowl is just a dent. At 1 the displacement is rotated into the
+   * wall's tangent plane, so a wave climbing the slope leans with it and
+   * its orbital motion runs along the wall — surf on a beach rather than
+   * a swell over a hole.
+   *
+   * The tilt normal is read at the REST coordinate, not the landed one.
+   * Rotating by a normal sampled where the water ENDS UP would make the
+   * horizontal displacement depend on its own result, and
+   * surfaceHeight's fixed-point inversion would be solving a moving
+   * target. At rest it stays a plain function of the material point and
+   * the inversion is untouched.
+   */
+  tilt: 1,
+})
+
 const GROUPS = {
   ENABLE,
+  FUNNEL,
   BOAT,
   SEA,
   WEATHER,
