@@ -86,15 +86,37 @@
 		bendPow: 5,
 		jStart: 0,
 		jFull: 0,
-		lambda: 37,
-		amp: 5.5,
+		lambda: 20,
+		amp: 3,
 		q: 1,
 		/** Half-width of the rotated window, radians of phase. */
 		lipWindow: 3.14,
 		/** Hinge depth below the crest, in amplitudes. 1 = still line. */
 		pivotFrac: 1,
-		/** Force the break amount instead of reading it from J. -1 = auto. */
+		/**
+		 * LIFECYCLE position, 0..1: build, break, collapse. -1 hands
+		 * amplitude and break amount back to the sliders.
+		 */
 		scrub: 0.4,
+		/**
+		 * Amplitude at which the bend starts, as a fraction of lambda.
+		 * Gerstner pinches (J = 0) at A = lambda / (2*pi*q) = 0.159*lambda,
+		 * so this defaults there rather than to a tuned constant — the
+		 * 20:3 that felt right by eye IS the steepness limit.
+		 */
+		steepRatio: 0.159,
+		/** Lifecycle position where the crest starts to throw. */
+		tBreak: 0.62,
+		/** How much of the lifecycle the throw occupies. Short on purpose:
+		 *  waves build over many periods and collapse inside one. */
+		breakSpan: 0.22,
+		/** Amplitude left after collapsing, as a fraction of the peak. A
+		 *  broken wave becomes a smaller wave, not flat water. */
+		collapseTo: 0.45,
+		/** How far through the throw the collapse waits before starting,
+		 *  0..1 of the bend. The crest holds its height until the tip has
+		 *  come round far enough to reach back into the face. */
+		collapseLag: 0.35,
 		ghosts: 5,
 		showPlain: true
 	});
@@ -110,6 +132,11 @@
 		['lipWindow', 0.2, 3.14, 0.02],
 		['pivotFrac', 0, 3, 0.05],
 		['scrub', -1, 1, 0.01],
+		['steepRatio', 0.02, 0.3, 0.002],
+		['tBreak', 0, 1, 0.01],
+		['breakSpan', 0.02, 0.6, 0.01],
+		['collapseTo', 0, 1, 0.02],
+		['collapseLag', 0, 0.95, 0.01],
 		['ghosts', 0, 8, 1]
 	];
 
@@ -119,19 +146,61 @@
 	 * trigger and the same shortest-arc rotation, reduced to 2D where
 	 * that rotation is a plain angle.
 	 */
+	/**
+	 * The lifecycle: one scrub position to an amplitude and a break
+	 * amount. Build to the steepness limit, throw the crest, collapse to
+	 * a fraction of the peak.
+	 */
+	function lifecycle(tau: number) {
+		const peak = bk.lambda * bk.steepRatio;
+		const bEnd = Math.min(bk.tBreak + bk.breakSpan, 1);
+		// Build: ease in so the wave grows fastest as it nears the limit,
+		// which is how wind input compounds on an already-steep wave.
+		const up = Math.min(Math.max(tau / Math.max(bk.tBreak, 0.0001), 0), 1);
+		let amp = peak * up * up * (3 - 2 * up) * (0.35 + 0.65 * up);
+		const raw = Math.min(
+			Math.max((tau - bk.tBreak) / Math.max(bEnd - bk.tBreak, 0.0001), 0),
+			1
+		);
+		const bThrow = raw * raw * (3 - 2 * raw);
+		// COLLAPSE runs on the lifecycle clock, not on the throw's, so it
+		// can outlast the throw and unwind gently. It starts collapseLag
+		// of the way through the bend — the crest holds its height until
+		// the tip has come round far enough to reach back into the face —
+		// and finishes at the end of the lifecycle.
+		const cStart = bk.tBreak + bk.collapseLag * (bEnd - bk.tBreak);
+		const cRaw = Math.min(
+			Math.max((tau - cStart) / Math.max(1 - cStart, 0.0001), 0),
+			1
+		);
+		const c = cRaw * cRaw * (3 - 2 * cRaw);
+		amp = amp * (1 - c) + peak * bk.collapseTo * c;
+		// The bend UNWINDS with the collapse. A wave that has spent itself
+		// is a smaller ordinary wave, not a permanently bent one — so the
+		// throw has to come back out as the height comes down, leaving the
+		// surface where the build had it at the same amplitude.
+		const b = bThrow * (1 - c);
+		return { amp, b };
+	}
+
 	function breakerPoint(u: number, time: number, forceB = -1) {
 		const kk = (2 * Math.PI) / bk.lambda;
 		const omega = Math.sqrt(G * kk);
 		const theta = u * kk - omega * time;
 		const sn = Math.sin(theta);
-		const px = u + bk.q * bk.amp * Math.cos(theta);
-		const py = bk.amp * sn;
+		// Lifecycle drives BOTH amplitude and break amount when scrubbing;
+		// the sliders take over at -1.
+		const live = bk.scrub >= 0 ? lifecycle(bk.scrub) : null;
+		const amp = live ? live.amp : bk.amp;
+		const px = u + bk.q * amp * Math.cos(theta);
+		const py = amp * sn;
 		// One wave travelling +x: jzz = 1 and jxz = 0, so the determinant
 		// is just jxx. At the crest this is 1 - q*A*k, the classic
 		// Gerstner steepness limit.
-		const J = 1 - bk.q * bk.amp * kk * sn;
+		const J = 1 - bk.q * amp * kk * sn;
 		let b: number;
 		if (forceB >= 0) b = forceB;
+		else if (live) b = live.b;
 		else {
 			const span = Math.max(bk.jStart - bk.jFull, 0.0001);
 			const raw = Math.min(Math.max((bk.jStart - J) / span, 0), 1);
@@ -180,7 +249,7 @@
 		// and level with the water; more than that drives it into the face.
 		const uCrest = (theta - psi + omega * time) / kk;
 		const cxp = uCrest;
-		const cyp = bk.amp * (1 - bk.pivotFrac);
+		const cyp = amp * (1 - bk.pivotFrac);
 		const rx = px - cxp;
 		const ry = py - cyp;
 		const cs = Math.cos(phi);
@@ -201,7 +270,7 @@
 	let canvas: HTMLCanvasElement;
 	let bcanvas: HTMLCanvasElement | undefined = $state();
 	let stats = $state({ c: 0, particles: 0, ms: 0 });
-	let bstats = $state({ maxB: 0, minJ: 1 });
+	let bstats = $state({ maxB: 0, minJ: 1, amp: 0, peak: 0 });
 	/** Which graph is on screen. Only the visible one is stepped or drawn:
 	 *  a hidden canvas has zero client size, and sizing to that would
 	 *  leave it blank when it came back. */
@@ -263,7 +332,10 @@
 		const span = bk.lambda * 2;
 		const sx = PW / span;
 		// Vertical scale leaves room for a crest that has pitched over.
-		const sy = Math.min(sx, PH / (bk.amp * 6));
+		// Scale to the lifecycle PEAK so the wave does not appear to
+		// grow and shrink the graph as it builds and collapses.
+		const peakAmp = bk.scrub >= 0 ? bk.lambda * bk.steepRatio : bk.amp;
+		const sy = Math.min(sx, PH / (peakAmp * 6));
 		const y0 = PH * 0.55;
 		const px = (wx: number) => wx * sx;
 		const py = (wy: number) => y0 - wy * sy;
@@ -282,16 +354,22 @@
 		// amounts, faintest first, so the curl's whole life is on screen
 		// at once instead of having to be caught as it happens.
 		for (let g = 1; g <= bk.ghosts; g++) {
-			const bg = g / (bk.ghosts + 1);
-			ctx.strokeStyle = `rgba(224, 163, 62, ${(0.12 + 0.18 * bg).toFixed(3)})`;
+			const tau = g / (bk.ghosts + 1);
+			// Ghosts walk the whole LIFECYCLE, not just the throw: the
+			// build is most of the story, and a set of ghosts that all
+			// share one amplitude cannot show it.
+			const saved = bk.scrub;
+			bk.scrub = tau;
+			ctx.strokeStyle = `rgba(224, 163, 62, ${(0.12 + 0.18 * tau).toFixed(3)})`;
 			ctx.lineWidth = dpr;
 			ctx.beginPath();
 			for (let i = 0; i <= N; i++) {
-				const p = breakerPoint((i / N) * span, t, bg);
+				const p = breakerPoint((i / N) * span, t);
 				if (i === 0) ctx.moveTo(px(p.x), py(p.y));
 				else ctx.lineTo(px(p.x), py(p.y));
 			}
 			ctx.stroke();
+			bk.scrub = saved;
 		}
 
 		// The untilted wave, for comparison.
@@ -309,12 +387,11 @@
 
 		// The tilted wave, coloured by how far into breaking it is.
 		ctx.lineWidth = 2 * dpr;
-		const forced = bk.scrub >= 0 ? bk.scrub : -1;
-		let prev = breakerPoint(0, t, forced);
+		let prev = breakerPoint(0, t);
 		let maxB = 0;
 		let minJ = 1;
 		for (let i = 1; i <= N; i++) {
-			const p = breakerPoint((i / N) * span, t, forced);
+			const p = breakerPoint((i / N) * span, t);
 			maxB = Math.max(maxB, p.b);
 			minJ = Math.min(minJ, p.J);
 			// Amber where it is pitching, red once the surface has folded.
@@ -327,6 +404,9 @@
 		}
 		bstats.maxB = maxB;
 		bstats.minJ = minJ;
+		const lc = bk.scrub >= 0 ? lifecycle(bk.scrub) : null;
+		bstats.amp = lc ? lc.amp : bk.amp;
+		bstats.peak = peakAmp;
 	}
 
 	onMount(() => {
@@ -511,6 +591,8 @@
 		</div>
 		<div class="row"><span class="name">min J</span><span class="val">{bstats.minJ.toFixed(3)}</span></div>
 		<div class="row"><span class="name">max lean</span><span class="val">{bstats.maxB.toFixed(3)}</span></div>
+		<div class="row"><span class="name">amp now</span><span class="val">{bstats.amp.toFixed(2)}</span></div>
+		<div class="row"><span class="name">amp peak</span><span class="val">{bstats.peak.toFixed(2)}</span></div>
 		<p class="note">
 			One Gerstner wave in section, bent by BREAKER. The crest
 			region rotates forward about the still-water line by an angle
