@@ -838,7 +838,16 @@ const UNIFIED_BANDS: WaveBand[] = [
  * calibration against the DEFAULT sun path, not a live link: retuning the
  * sun does not silently rotate the wind.
  */
-const UNIFIED_NORTH_DEG = 316
+/**
+ * World azimuth of NORTH, degrees. 315 = a clean diagonal, which puts
+ * the cardinals on the screen's diagonals under the isometric camera and
+ * makes every derived bearing a round number.
+ *
+ * Exported because the compass rose and the buoy labels both need it —
+ * it was duplicated as a literal 316 in two places in Scene, which is
+ * exactly the kind of constant that drifts apart.
+ */
+export const UNIFIED_NORTH_DEG = 315
 
 /**
  * Energy landmarks for the `waves` dial: the factor to apply to every

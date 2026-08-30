@@ -160,7 +160,8 @@ ${sdfAtlasGlsl}
 uniform mat4 uBoatInv;
 uniform mat4 uBuoyInv[3];
 // Must match Scene.svelte's water shader.
-const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
+const vec3 BUOY_HALF = vec3(0.5, 0.9, 0.5);
+const float BUOY_R = 0.5;
 uniform vec4 uCardRect; // rainbow card: cx, cz, hx, hz
 uniform float uCardY;
 uniform float uCardOn;
@@ -208,23 +209,48 @@ float boatShadowVis(vec3 P, vec3 dirW) {
 	return smoothstep(0.0, 0.12, minD);
 }
 
-// A buoy on the sun line: analytic box, arithmetic only.
+// A buoy on the sun line: analytic CYLINDER, arithmetic only.
+//
+// Was a box, which cast a square shadow from a round float — and unlike
+// the silhouette, a shadow is read flat on the seabed where corners are
+// obvious. Nearest-distance along the ray, same as before; only the
+// distance function changed.
 float buoyShadowVis(mat4 inv, vec3 P, vec3 dirW) {
 	vec3 o = (inv * vec4(P, 1.0)).xyz;
 	vec3 d = normalize((inv * vec4(dirW, 0.0)).xyz);
-	vec3 invD = 1.0 / d;
-	vec3 s0 = (-BUOY_HALF - o) * invD;
-	vec3 s1 = (BUOY_HALF - o) * invD;
-	vec3 tmin3 = min(s0, s1);
-	vec3 tmax3 = max(s0, s1);
-	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
-	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
+	// Bound the march by the barrel's slab plus the caps, so the samples
+	// land where the buoy actually is.
+	float a = dot(d.xz, d.xz);
+	float tN = 0.0;
+	float tF = 0.0;
+	if (a > 1e-8) {
+		float b = dot(o.xz, d.xz);
+		float c = dot(o.xz, o.xz) - BUOY_R * BUOY_R;
+		float disc = b * b - a * c;
+		if (disc <= 0.0) return 1.0;
+		float sq = sqrt(disc);
+		tN = (-b - sq) / a;
+		tF = (-b + sq) / a;
+	} else {
+		if (dot(o.xz, o.xz) > BUOY_R * BUOY_R) return 1.0;
+		tN = -1e4;
+		tF = 1e4;
+	}
+	if (abs(d.y) > 1e-8) {
+		float c0 = (-BUOY_HALF.y - o.y) / d.y;
+		float c1 = (BUOY_HALF.y - o.y) / d.y;
+		tN = max(tN, min(c0, c1));
+		tF = min(tF, max(c0, c1));
+	} else if (abs(o.y) > BUOY_HALF.y) {
+		return 1.0;
+	}
 	if (tN > tF) return 1.0;
 	float minD = 1e9;
 	for (int i = 0; i < 8; i++) {
 		vec3 p = o + d * mix(tN, tF, (float(i) + 0.5) / 8.0);
-		vec3 q = abs(p) - BUOY_HALF;
-		minD = min(minD, length(max(q, vec3(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0));
+		// Cylinder SDF: radial and axial distances combined.
+		vec2 q = vec2(length(p.xz) - BUOY_R, abs(p.y) - BUOY_HALF.y);
+		minD = min(minD, min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0))));
 	}
 	return smoothstep(0.0, 0.06, minD);
 }

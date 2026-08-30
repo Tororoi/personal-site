@@ -315,6 +315,13 @@
 		'FUNNEL.depthM': { min: -6, max: 12, step: 0.25 },
 		'FUNNEL.sigmaM': { min: 1, max: 30, step: 0.5 },
 		'FUNNEL.tilt': { min: 0, max: 1, step: 0.02 },
+		'BUOY.freeboardM': { min: -0.5, max: 1.2, step: 0.01 },
+		'BUOY.bobPeriodS': { min: 0.3, max: 3, step: 0.05 },
+		'BUOY.bobZeta': { min: 0, max: 1, step: 0.01 },
+		'BUOY.maxSubmersionM': { min: 0.1, max: 2, step: 0.05 },
+		'BUOY.slopeFollow': { min: 0, max: 2, step: 0.05 },
+		'BUOY.righting': { min: 5, max: 400, step: 5 },
+		'BUOY.swingZeta': { min: 0, max: 1.5, step: 0.02 },
 		'BOAT.wakeAmp': { min: 0, max: 0.05, step: 0.001 },
 		'BOAT.wakeThrustGain': { min: 0, max: 4, step: 0.05 },
 		'BOAT.wakeOffset': { min: -2.5, max: 2.5, step: 0.1 },
@@ -434,6 +441,10 @@
 			['interface', ['surfaceReflect', 'fresnelGrazing', 'entryLoss']],
 			['seabed', ['seabed', 'seabedDepthM']],
 			['testing', ['sphereDepth', 'rainbowCard', 'whale', 'whaleY', 'whaleX', 'whaleZ']]
+		],
+		BUOY: [
+			['float', ['freeboardM', 'bobPeriodS', 'bobZeta', 'maxSubmersionM']],
+			['ballast', ['slopeFollow', 'righting', 'swingZeta']]
 		],
 		BOAT: [
 			['drive', ['pinned', 'thrust', 'reverseThrust', 'horsepower', 'propDepthM']],

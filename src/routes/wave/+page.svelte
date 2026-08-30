@@ -264,17 +264,131 @@
 		};
 	}
 
+	/**
+	 * STOKES LAB — linear vs Gerstner vs Stokes at matched steepness.
+	 *
+	 * The distillation of the HOS paper's physics into something a line
+	 * graph can show. HOS solves fully nonlinear potential flow
+	 * numerically; for a REGULAR wave it converges to Stokes, which has a
+	 * closed form. So this is the same nonlinearity HOS computes, in the
+	 * one case where it can be written down.
+	 *
+	 * What it answers: how much of a sharpened crest is real nonlinearity
+	 * and how much is Gerstner's trochoid, which sharpens for a different
+	 * reason (horizontal particle crowding) and by a different amount.
+	 */
+	const st = $state({
+		lambda: 40,
+		/** Steepness ka. Stokes' limiting value is ~0.443 (H/lambda = 1/7),
+		 *  past which no steady wave exists and the crest angle hits 120. */
+		eps: 0.25,
+		/** Gerstner's own steepness parameter, for the comparison curve. */
+		q: 1,
+		order: 3,
+		showLinear: true,
+		showGerstner: true
+	});
+
+	const STOKES_ROWS: [keyof typeof st, number, number, number][] = [
+		['lambda', 8, 120, 1],
+		['eps', 0, 0.443, 0.005],
+		['q', 0, 1.5, 0.02],
+		['order', 1, 3, 1]
+	];
+
+	/**
+	 * Deep-water Stokes elevation to third order (Dean & Dalrymple):
+	 *   eta = a cos t + (1/2) k a^2 cos 2t + (3/8) k^2 a^3 cos 3t
+	 * Written in steepness so the harmonics read as what they are: the
+	 * second raises the crest and fills the trough, the third sharpens.
+	 */
+	function stokesEta(theta: number, a: number, eps: number, order: number) {
+		let e = Math.cos(theta);
+		if (order >= 2) e += (eps / 2) * Math.cos(2 * theta);
+		if (order >= 3) e += ((3 * eps * eps) / 8) * Math.cos(3 * theta);
+		return a * e;
+	}
+
+	/**
+	 * PACKET LAB — one Lagrangian wave packet.
+	 *
+	 * The primitive the third family is built from (Wave Particles,
+	 * Water Wave Packets, Wave Curves): not a field sampled on a grid but
+	 * a closed-form function you can evaluate anywhere and SUM, which is
+	 * why it fits an engine whose physics probes arbitrary points.
+	 *
+	 *   eta(x,t) = A * exp(-(x - cg t)^2 / 2 sigma^2) * cos(k(x - c t))
+	 *
+	 * Two speeds, and the gap between them is the whole point. The
+	 * CARRIER moves at the phase speed c = sqrt(g/k); the ENVELOPE moves
+	 * at the group speed cg = dw/dk, which in deep water is exactly half
+	 * of it. Crests are born at the back of the packet, run forward
+	 * through it, and die at the front — something no plane-wave sum can
+	 * express, since a plane wave has nowhere for a crest to be born.
+	 *
+	 * The packet also SPREADS, because its component wavenumbers travel
+	 * at different speeds. That is real dispersion, carried by a handful
+	 * of numbers rather than a simulation.
+	 */
+	const pk = $state({
+		lambda: 30,
+		amp: 2,
+		/** Envelope half-width at birth, metres. */
+		width: 25,
+		/** Domain shown, metres. */
+		spanM: 400,
+		/** Dispersive spreading, x1 = the physical rate. */
+		spread: 1,
+		ghosts: 4,
+		showEnvelope: true
+	});
+
+	const PACKET_ROWS: [keyof typeof pk, number, number, number][] = [
+		['lambda', 4, 80, 1],
+		['amp', 0.2, 8, 0.1],
+		['width', 5, 120, 1],
+		['spanM', 100, 900, 10],
+		['spread', 0, 6, 0.1],
+		['ghosts', 0, 8, 1]
+	];
+
+	/** Packet state at a given age: centre, width, and the two speeds. */
+	function packetAt(age: number) {
+		const kk = (2 * Math.PI) / pk.lambda;
+		const omega = Math.sqrt(G * kk);
+		const c = omega / kk;
+		// Deep water: w = sqrt(gk), so dw/dk = c/2 exactly.
+		const cg = c / 2;
+		// Second derivative of w(k) sets how fast a packet spreads. Same
+		// algebra as a quantum wave packet — dispersion does not care what
+		// is doing the waving.
+		const d2 = -0.25 * Math.sqrt(G) * Math.pow(kk, -1.5) * pk.spread;
+		const sigma =
+			pk.width * Math.sqrt(1 + Math.pow((d2 * age) / (2 * pk.width * pk.width), 2));
+		return { kk, omega, c, cg, sigma, centre: cg * age };
+	}
+
+	function packetEta(x: number, age: number) {
+		const p = packetAt(age);
+		const env = pk.amp * Math.exp(-Math.pow(x - p.centre, 2) / (2 * p.sigma * p.sigma));
+		return { y: env * Math.cos(p.kk * (x - p.c * age)), env };
+	}
+
 	const slice = new FlipSlice();
 	let t = 0;
 	let seededAt = { lambda: 0, amplitude: 0, depth: 0, slopeStart: 0, gridNx: 0 };
 	let canvas: HTMLCanvasElement;
 	let bcanvas: HTMLCanvasElement | undefined = $state();
+	let scanvas: HTMLCanvasElement | undefined = $state();
+	let pcanvas: HTMLCanvasElement | undefined = $state();
 	let stats = $state({ c: 0, particles: 0, ms: 0 });
 	let bstats = $state({ maxB: 0, minJ: 1, amp: 0, peak: 0 });
+	let sstats = $state({ ratio: 1, amp: 0 });
+	let pstats = $state({ c: 0, cg: 0, sigma: 0 });
 	/** Which graph is on screen. Only the visible one is stepped or drawn:
 	 *  a hidden canvas has zero client size, and sizing to that would
 	 *  leave it blank when it came back. */
-	let tab: 'tank' | 'bend' = $state('bend');
+	let tab: 'tank' | 'bend' | 'stokes' | 'packet' = $state('bend');
 
 	function flipParams() {
 		return {
@@ -409,9 +523,164 @@
 		bstats.peak = peakAmp;
 	}
 
+	function drawStokes(ctx: CanvasRenderingContext2D) {
+		if (!scanvas) return;
+		const dpr = window.devicePixelRatio || 1;
+		const W = scanvas.clientWidth;
+		const H = scanvas.clientHeight;
+		if (scanvas.width !== W * dpr || scanvas.height !== H * dpr) {
+			scanvas.width = W * dpr;
+			scanvas.height = H * dpr;
+		}
+		const PW = scanvas.width;
+		const PH = scanvas.height;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.clearRect(0, 0, PW, PH);
+		ctx.fillStyle = '#0d1319';
+		ctx.fillRect(0, 0, PW, PH);
+
+		const kk = (2 * Math.PI) / st.lambda;
+		const a = st.eps / kk;
+		const spanX = st.lambda * 2;
+		const sx = PW / spanX;
+		const sy = Math.min(sx, PH / (a * 5));
+		const y0 = PH * 0.5;
+		const px = (wx: number) => wx * sx;
+		const py = (wy: number) => y0 - wy * sy;
+
+		ctx.strokeStyle = '#22303e';
+		ctx.lineWidth = dpr;
+		ctx.beginPath();
+		ctx.moveTo(0, py(0));
+		ctx.lineTo(PW, py(0));
+		ctx.stroke();
+
+		const N = 800;
+		const curve = (
+			colour: string,
+			width: number,
+			pt: (u: number) => [number, number]
+		) => {
+			ctx.strokeStyle = colour;
+			ctx.lineWidth = width * dpr;
+			ctx.beginPath();
+			for (let i = 0; i <= N; i++) {
+				const [x, y] = pt((i / N) * spanX);
+				if (i === 0) ctx.moveTo(px(x), py(y));
+				else ctx.lineTo(px(x), py(y));
+			}
+			ctx.stroke();
+		};
+
+		// Linear: the reference. Symmetric by definition.
+		if (st.showLinear)
+			curve('#3d5468', 1, (u) => [u, a * Math.cos(kk * u - t * 0.6)]);
+		// Gerstner: sharpens by moving particles horizontally, so its
+		// curve is parametric and its crest can pass its own base.
+		if (st.showGerstner)
+			curve('#5fd6e6', 1.5, (u) => {
+				const th = kk * u - t * 0.6;
+				return [u - st.q * a * Math.sin(th), a * Math.cos(th)];
+			});
+		// Stokes: sharpens by adding bound harmonics, staying a function
+		// of x. This is what the water actually does.
+		curve('#e0a33e', 2, (u) => [
+			u,
+			stokesEta(kk * u - t * 0.6, a, st.eps, st.order)
+		]);
+
+		// Crest-to-trough asymmetry is the signature of real nonlinearity:
+		// 1.0 for a sine, above 1 once the harmonics bite.
+		const crest = stokesEta(0, a, st.eps, st.order);
+		const trough = -stokesEta(Math.PI, a, st.eps, st.order);
+		sstats.ratio = trough > 1e-6 ? crest / trough : 1;
+		sstats.amp = a;
+	}
+
+	function drawPacket(ctx: CanvasRenderingContext2D) {
+		if (!pcanvas) return;
+		const dpr = window.devicePixelRatio || 1;
+		const W = pcanvas.clientWidth;
+		const H = pcanvas.clientHeight;
+		if (pcanvas.width !== W * dpr || pcanvas.height !== H * dpr) {
+			pcanvas.width = W * dpr;
+			pcanvas.height = H * dpr;
+		}
+		const PW = pcanvas.width;
+		const PH = pcanvas.height;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.clearRect(0, 0, PW, PH);
+		ctx.fillStyle = '#0d1319';
+		ctx.fillRect(0, 0, PW, PH);
+
+		const sx = PW / pk.spanM;
+		const sy = Math.min(PH / (pk.amp * 4), sx * 40);
+		const y0 = PH * 0.5;
+		const px = (wx: number) => wx * sx;
+		const py = (wy: number) => y0 - wy * sy;
+
+		ctx.strokeStyle = '#22303e';
+		ctx.lineWidth = dpr;
+		ctx.beginPath();
+		ctx.moveTo(0, py(0));
+		ctx.lineTo(PW, py(0));
+		ctx.stroke();
+
+		// Time for the packet to cross the domain at the GROUP speed —
+		// which is what actually carries it.
+		const base = packetAt(0);
+		const cross = pk.spanM / Math.max(base.cg, 0.001);
+		const N = 1400;
+
+		const drawAt = (age: number, colour: string, width: number, env: boolean) => {
+			ctx.strokeStyle = colour;
+			ctx.lineWidth = width * dpr;
+			ctx.beginPath();
+			for (let i = 0; i <= N; i++) {
+				const x = (i / N) * pk.spanM;
+				const e = packetEta(x, age);
+				if (i === 0) ctx.moveTo(px(x), py(e.y));
+				else ctx.lineTo(px(x), py(e.y));
+			}
+			ctx.stroke();
+			if (!env) return;
+			// Envelope, both signs: this is the part moving at cg, and
+			// seeing it lag the crests is the point of the whole tab.
+			for (const sgn of [1, -1]) {
+				ctx.strokeStyle = 'rgba(95, 214, 230, 0.35)';
+				ctx.lineWidth = dpr;
+				ctx.beginPath();
+				for (let i = 0; i <= N; i++) {
+					const x = (i / N) * pk.spanM;
+					const e = packetEta(x, age);
+					if (i === 0) ctx.moveTo(px(x), py(sgn * e.env));
+					else ctx.lineTo(px(x), py(sgn * e.env));
+				}
+				ctx.stroke();
+			}
+		};
+
+		// Ghosts: the SAME packet at fixed points along its journey, so
+		// the spreading is visible as a shape rather than as a memory.
+		for (let g = 1; g <= pk.ghosts; g++) {
+			const frac = g / (pk.ghosts + 1);
+			drawAt(frac * cross, `rgba(224, 163, 62, ${(0.10 + 0.14 * frac).toFixed(3)})`, 1, false);
+		}
+
+		const age = (t * 0.6) % cross;
+		drawAt(age, '#e0a33e', 2, pk.showEnvelope);
+
+		const now = packetAt(age);
+		pstats.c = now.c;
+		pstats.cg = now.cg;
+		pstats.sigma = now.sigma;
+	}
+
 	onMount(() => {
 		const ctx = canvas.getContext('2d')!;
 		const bctx = bcanvas?.getContext('2d') ?? null;
+		const sctx = scanvas?.getContext('2d') ?? null;
+		const pctx = pcanvas?.getContext('2d') ?? null;
 		reseed();
 		let raf = 0;
 		function frame() {
@@ -429,9 +698,13 @@
 				if (!k.paused && k.simSpeed > 0) stepFrame();
 				draw(ctx);
 			} else {
-				// The bend graph animates on the same clock the tank uses.
+				// Both line graphs animate on the same clock the tank uses.
 				if (!k.paused && k.simSpeed > 0) t += (1 / 60) * k.simSpeed;
-				if (bctx) drawBreaker(bctx);
+				if (tab === 'bend') {
+					if (bctx) drawBreaker(bctx);
+				} else if (tab === 'stokes') {
+					if (sctx) drawStokes(sctx);
+				} else if (pctx) drawPacket(pctx);
 			}
 		}
 		frame();
@@ -577,6 +850,63 @@
 		<div class="row"><span class="name">phase c</span><span class="val">{stats.c.toFixed(2)} m/s</span></div>
 		<div class="row"><span class="name">particles</span><span class="val">{stats.particles}</span></div>
 		<div class="row"><span class="name">step</span><span class="val">{stats.ms.toFixed(1)} ms</span></div>
+		{:else if tab === 'packet'}
+		<div class="group">packet (Lagrangian)</div>
+		{#each PACKET_ROWS as [key, min, max, step] (key)}
+			<div class="row">
+				<span class="name">{key}</span>
+				<input type="range" {min} {max} {step} bind:value={pk[key] as number} />
+				<span class="val">{(pk[key] as number).toFixed(1)}</span>
+			</div>
+		{/each}
+		<div class="head">
+			<label><input type="checkbox" bind:checked={pk.showEnvelope} /> envelope</label>
+		</div>
+		<div class="row"><span class="name">phase c</span><span class="val">{pstats.c.toFixed(2)} m/s</span></div>
+		<div class="row"><span class="name">group cg</span><span class="val">{pstats.cg.toFixed(2)} m/s</span></div>
+		<div class="row"><span class="name">sigma now</span><span class="val">{pstats.sigma.toFixed(1)} m</span></div>
+		<p class="note">
+			One Lagrangian wave packet — the primitive behind wave
+			particles, water wave packets and Skrivan's wave curves. Not a
+			field on a grid: a closed form you can evaluate anywhere and
+			SUM, which is the property an engine needs when its physics
+			probes arbitrary points.
+			Watch the crests, not the packet: they run forward THROUGH the
+			envelope, appearing at the back and dying at the front, because
+			the carrier moves at c and the envelope at cg = c/2 in deep
+			water. A plane-wave sum cannot do that — a plane wave has
+			nowhere for a crest to be born. Faint ghosts are the same
+			packet further along its journey, showing it SPREAD as its
+			component wavenumbers separate. That spreading is real
+			dispersion carried by a handful of numbers.
+		</p>
+		{:else if tab === 'stokes'}
+		<div class="group">nonlinear (Stokes)</div>
+		{#each STOKES_ROWS as [key, min, max, step] (key)}
+			<div class="row">
+				<span class="name">{key}</span>
+				<input type="range" {min} {max} {step} bind:value={st[key] as number} />
+				<span class="val">{(st[key] as number).toFixed(3)}</span>
+			</div>
+		{/each}
+		<div class="head">
+			<label><input type="checkbox" bind:checked={st.showLinear} /> linear</label>
+			<label><input type="checkbox" bind:checked={st.showGerstner} /> gerstner</label>
+		</div>
+		<div class="row"><span class="name">amp</span><span class="val">{sstats.amp.toFixed(2)} m</span></div>
+		<div class="row"><span class="name">crest/trough</span><span class="val">{sstats.ratio.toFixed(3)}</span></div>
+		<p class="note">
+			Amber is Stokes, the closed form the HOS paper's method
+			converges to for a regular wave — real nonlinearity, added as
+			bound harmonics, so the surface stays a function of x. Cyan is
+			Gerstner, which sharpens by moving particles sideways instead,
+			and grey is the plain sine. All three at the same steepness ka.
+			crest/trough is the tell: 1.0 for a sine, above 1 once the
+			harmonics bite, and it is the asymmetry Gerstner gets by a
+			different route and a different amount. Stokes has no steady
+			solution past ka 0.443 (H/lambda = 1/7) — that limit is the
+			same one BREAKER's 20:3 ratio lands on.
+		</p>
 		{:else}
 		<div class="group">breaker (BREAKER)</div>
 		{#each BREAKER_ROWS as [key, min, max, step] (key)}
@@ -630,9 +960,13 @@
 		<div class="tabs">
 			<button class:on={tab === 'tank'} onclick={() => (tab = 'tank')}>fluid tank</button>
 			<button class:on={tab === 'bend'} onclick={() => (tab = 'bend')}>wave bend</button>
+			<button class:on={tab === 'stokes'} onclick={() => (tab = 'stokes')}>nonlinear</button>
+			<button class:on={tab === 'packet'} onclick={() => (tab = 'packet')}>packet</button>
 		</div>
 		<canvas bind:this={canvas} hidden={tab !== 'tank'}></canvas>
 		<canvas bind:this={bcanvas} hidden={tab !== 'bend'}></canvas>
+		<canvas bind:this={scanvas} hidden={tab !== 'stokes'}></canvas>
+		<canvas bind:this={pcanvas} hidden={tab !== 'packet'}></canvas>
 	</div>
 </div>
 

@@ -22,6 +22,8 @@
 		orbitalVelocityInto,
 		filteredSlopeInto,
 		onFieldChange
+	,
+		UNIFIED_NORTH_DEG
 	} from './waves';
 	import {
 		events,
@@ -62,6 +64,7 @@
 	import { WEATHER, WIND,
 		CAUSTICS,
 		BOAT,
+		BUOY,
 		BREAKER,
 		DROPLET,
 		ENABLE,
@@ -1488,7 +1491,8 @@ float rainbowHit(vec3 ro, vec3 rd, out vec3 albedoOut) {
 uniform mat4 uBuoyInv[3];
 uniform vec3 uBuoyColor;
 // Half extents of buoyGeometry (BoxGeometry 0.5 x 0.9 x 0.5).
-const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
+const vec3 BUOY_HALF = vec3(0.5, 0.9, 0.5);
+const float BUOY_R = 0.5;
 
 ${underwaterShadeGlsl}
 ${whitewaterLightGlsl()}
@@ -1662,8 +1666,11 @@ float contactFoam(vec3 P) {
 	// nothing and let plain water cut across the collar behind them.
 	for (int i = 0; i < 3; i++) {
 		vec3 lp = (uBuoyInv[i] * vec4(P, 1.0)).xyz;
-		vec2 q = abs(lp.xz) - BUOY_HALF.xz;
-		float d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0);
+		// Radial distance to the barrel. This is the PAINTED collar, a
+		// separate SDF from the one the foam field emits with — both had
+		// to change, and this is the one actually drawn as a ring on the
+		// water, so it is what a square collar looks like.
+		float d = length(lp.xz) - BUOY_R;
 		if (d > w) continue;
 		float vk = pow(
 			1.0 - smoothstep(0.0, ${f(FOAM.collarOverwash)}, max(lp.y - BUOY_HALF.y, 0.0)),
@@ -1675,9 +1682,9 @@ float contactFoam(vec3 P) {
 	return m;
 }
 
-// Ray vs a buoy's oriented box: slab test in the box's local frame.
-// Returns the entering t (world units, both frames are rigid) or -1;
-// writes the world-space face normal.
+// Ray vs a buoy's oriented CYLINDER: barrel quadratic plus cap planes in
+// the buoy's local frame. Returns the entering t (world units, both
+// frames are rigid) or -1; writes the world-space normal.
 uniform mat4 uBoatInv;
 uniform sampler2D uBoatTex;
 // Three auto-declares viewMatrix in fragment shaders but NOT
@@ -1757,19 +1764,49 @@ float boatHit(vec3 ro, vec3 rd, out vec3 nWorld) {
 float buoyHit(mat4 inv, vec3 ro, vec3 rd, out vec3 nWorld) {
 	vec3 o = (inv * vec4(ro, 1.0)).xyz;
 	vec3 d = (inv * vec4(rd, 0.0)).xyz;
-	vec3 invD = 1.0 / d;
-	vec3 t0 = (-BUOY_HALF - o) * invD;
-	vec3 t1 = (BUOY_HALF - o) * invD;
-	vec3 tmin3 = min(t0, t1);
-	vec3 tmax3 = max(t0, t1);
-	float tN = max(max(tmin3.x, tmin3.y), tmin3.z);
-	float tF = min(min(tmax3.x, tmax3.y), tmax3.z);
-	if (tN > tF || tN < 0.0) return -1.0;
-	// The entering face is the axis tN came from; its normal opposes the ray.
-	vec3 nLocal = -sign(d) * step(vec3(tN), tmin3);
+	// CYLINDER, upright in the buoy's own frame: the barrel is a quadratic
+	// in the xz plane, the caps two planes. The box this replaced showed
+	// as square corners on a round float — most visibly in refraction,
+	// where the whole silhouette is read through the water.
+	float a = dot(d.xz, d.xz);
+	float tBest = -1.0;
+	vec3 nLocal = vec3(0.0, 1.0, 0.0);
+	if (a > 1e-8) {
+		float b = dot(o.xz, d.xz);
+		float c = dot(o.xz, o.xz) - BUOY_R * BUOY_R;
+		float disc = b * b - a * c;
+		if (disc > 0.0) {
+			float sq = sqrt(disc);
+			// Near root first; the far one covers a ray starting inside.
+			for (int k = 0; k < 2; k++) {
+				float t = (-b + (k == 0 ? -sq : sq)) / a;
+				if (t > 0.0 && abs(o.y + d.y * t) <= BUOY_HALF.y) {
+					tBest = t;
+					vec3 p = o + d * t;
+					nLocal = normalize(vec3(p.x, 0.0, p.z));
+					break;
+				}
+			}
+		}
+	}
+	// Caps: whichever plane the ray reaches first inside the radius.
+	if (abs(d.y) > 1e-8) {
+		for (int k = 0; k < 2; k++) {
+			float yPlane = k == 0 ? BUOY_HALF.y : -BUOY_HALF.y;
+			float t = (yPlane - o.y) / d.y;
+			if (t > 0.0 && (tBest < 0.0 || t < tBest)) {
+				vec3 p = o + d * t;
+				if (dot(p.xz, p.xz) <= BUOY_R * BUOY_R) {
+					tBest = t;
+					nLocal = vec3(0.0, yPlane > 0.0 ? 1.0 : -1.0, 0.0);
+				}
+			}
+		}
+	}
+	if (tBest < 0.0) return -1.0;
 	// Rigid transform: v * mat3(inv) == transpose(mat3(inv)) * v == R * v.
 	nWorld = normalize(nLocal * mat3(inv));
-	return tN;
+	return tBest;
 }
 
 // The hybrid analytic leg (prototyped in the shared underwater chunk):
@@ -2678,12 +2715,125 @@ void main() {
 	toonGradient.magFilter = THREE.NearestFilter;
 	toonGradient.needsUpdate = true;
 
-	const buoyGeometry = new THREE.BoxGeometry(0.5, 0.9, 0.5);
-	const buoyMaterial = new THREE.MeshToonMaterial({
-		color: '#d95f43',
+	/**
+	 * THE MAP: a GRID x GRID grid of TILE-metre tiles, one marker buoy at
+	 * each tile's centre, columns lettered A.. and rows numbered 0..
+	 * Centred on the origin, so the world runs -500..500 on both axes.
+	 *
+	 * The point is navigational: open water gives nothing to judge speed,
+	 * heading or scale against, which makes every wave feature hard to
+	 * test twice the same way. A labelled grid turns "over there" into
+	 * "D7".
+	 */
+	const MAP = { grid: 10, tile: 100 };
+	const MAP_HALF = (MAP.grid * MAP.tile) / 2;
+	const tileLabel = (col: number, row: number) =>
+		String.fromCharCode(65 + col) + row;
+	const tileCentre = (col: number, row: number) => ({
+		x: -MAP_HALF + MAP.tile * (col + 0.5),
+		z: -MAP_HALF + MAP.tile * (row + 0.5)
+	});
+	// Twice the original and cylindrical: navigation markers, meant to be
+	// picked out at range and to read the same from every heading.
+	//
+	// The occluders stay BOXES. BUOY_HALF in foam.ts, caustics.ts and the
+	// water shader is this cylinder's bounding box — a square shadow on a
+	// round float is a smaller error than the cost of a second primitive
+	// in three shaders, and at this size it is not readable.
+	const buoyGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1.8, 24);
+	const buoyGeometries = Array.from({ length: MAP.grid * MAP.grid }, (_, i) =>
+		buoyGeometryFor(i, buoyGeometry)
+	);
+	/**
+	 * TILE LABELS, painted into the buoy's own skin.
+	 *
+	 * One atlas, one cell per tile. Each cell is a full wrap of the
+	 * cylinder's side — background in the buoy's colour, the label in
+	 * white at the angle that faces EAST — and each buoy gets its own
+	 * geometry with UVs remapped into its cell. So the text is paint on
+	 * the barrel: it curves with the surface, lights with it, and turns
+	 * out of view as you pass, instead of hanging beside it.
+	 *
+	 * EAST is not +x. compass(deg) maps a bearing to (cos t, sin t) with
+	 * t = UNIFIED_NORTH_DEG + deg, and north is 315 — so +x is bearing 45
+	 * (northeast, which is where the first attempt put the label) and east
+	 * is 46 degrees round from it.
+	 */
+	const BUOY_COLOUR = '#d95f43';
+	const EAST_BEARING = 90;
+	// Cylinder side UVs run u = 0 at +z, increasing toward +x, so the
+	// angle that matters is atan2(x, z) of the east direction.
+	const EAST_U = (() => {
+		const th = ((UNIFIED_NORTH_DEG + EAST_BEARING) * Math.PI) / 180;
+		const a = Math.atan2(Math.cos(th), Math.sin(th));
+		return ((a / (Math.PI * 2)) % 1 + 1) % 1;
+	})();
+
+	const labelAtlas = (() => {
+		const cell = 256;
+		const cv = document.createElement('canvas');
+		cv.width = cv.height = cell * MAP.grid;
+		const g = cv.getContext('2d')!;
+		g.fillStyle = BUOY_COLOUR;
+		g.fillRect(0, 0, cv.width, cv.height);
+		g.font = `bold ${Math.round(cell * 0.3)}px ui-monospace, Menlo, monospace`;
+		g.textAlign = 'center';
+		g.textBaseline = 'middle';
+		g.fillStyle = '#ffffff';
+		for (let row = 0; row < MAP.grid; row++) {
+			for (let col = 0; col < MAP.grid; col++) {
+				g.fillText(
+					tileLabel(col, row),
+					(col + EAST_U) * cell,
+					(row + 0.5) * cell
+				);
+			}
+		}
+		const tex = new THREE.CanvasTexture(cv);
+		tex.colorSpace = THREE.SRGBColorSpace;
+		tex.anisotropy = 4;
+		return tex;
+	})();
+
+	/** One geometry per buoy: the shared cylinder with its UVs folded into
+	 *  that tile's atlas cell. Tiny meshes, and it keeps a single
+	 *  material and a single texture across all hundred. */
+	function buoyGeometryFor(index: number, base: THREE.BufferGeometry) {
+		const col = index % MAP.grid;
+		const row = Math.floor(index / MAP.grid);
+		const geo = base.clone();
+		const uv = geo.attributes.uv as THREE.BufferAttribute;
+		for (let i = 0; i < uv.count; i++) {
+			const u = uv.getX(i);
+			const v = uv.getY(i);
+			// v flips: canvas rows run down, texture rows run up.
+			uv.setXY(i, (col + u) / MAP.grid, 1 - (row + 1 - v) / MAP.grid);
+		}
+		uv.needsUpdate = true;
+		return geo;
+	}
+
+
+	// SIDE takes the atlas, caps take flat colour. CylinderGeometry emits
+	// three groups in that order, so an array material splits them with
+	// no geometry work — and the label stays paint on the barrel instead
+	// of smearing across the lid, where the cap's disc UVs would drag it
+	// into a pinwheel.
+	const buoySideMaterial = new THREE.MeshToonMaterial({
+		// White base so the atlas supplies the colour, label included.
+		color: '#ffffff',
+		map: labelAtlas,
 		gradientMap: toonGradient
 	});
-	injectSceneFog(buoyMaterial);
+	const buoyCapMaterial = new THREE.MeshToonMaterial({
+		color: BUOY_COLOUR,
+		gradientMap: toonGradient
+	});
+	const buoyMaterial = [buoySideMaterial, buoyCapMaterial, buoyCapMaterial];
+	// Both halves need the scene fog, or the caps stay clear while the
+	// barrel hazes with distance.
+	injectSceneFog(buoySideMaterial);
+	injectSceneFog(buoyCapMaterial);
 
 	// Ballistic spray droplets (spray.ts) as POINT SPRITES — one vertex
 	// each instead of an instanced octahedron, matching how the foam
@@ -3729,11 +3879,57 @@ void main() {
 	// last directional tip splash (throttle).
 	// rest: the tracked rest-space point under this buoy, carried across
 	// frames so the surface sampler follows one sheet (sampleSurfaceTracked).
-	const buoys = [
-		{ x: 4, z: -3, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, wet: false, rest: { u: 4, v: -3 } },
-		{ x: -7, z: 5, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, wet: false, rest: { u: -7, v: 5 } },
-		{ x: 9, z: 8, y: 0, vy: 0, tx: 0, tz: 0, wx: 0, wz: 0, pw: 0, lt: -10, wet: false, rest: { u: 9, v: 8 } }
-	];
+	const buoys = Array.from({ length: MAP.grid * MAP.grid }, (_, n) => {
+		const col = n % MAP.grid;
+		const row = Math.floor(n / MAP.grid);
+		const c = tileCentre(col, row);
+		return {
+			x: c.x,
+			z: c.z,
+			y: 0,
+			vy: 0,
+			tx: 0,
+			tz: 0,
+			wx: 0,
+			wz: 0,
+			pw: 0,
+			lt: -10,
+			wet: false,
+			rest: { u: c.x, v: c.z },
+			label: tileLabel(col, row)
+		};
+	});
+	/**
+	 * Buoys close enough to the boat to be worth spending on. The water
+	 * shader, the foam field and the caustic splat all take exactly THREE
+	 * buoy occluders — a hard limit in their GLSL, not a tunable — so
+	 * with a hundred buoys the question becomes which three. Nearest to
+	 * the boat, recomputed each frame: shadows, collars and refraction
+	 * only read as wrong where the player is looking.
+	 */
+	const BUOY_SLOTS = 3;
+	const buoyNear: number[] = [];
+	function pickNearBuoys() {
+		buoyNear.length = 0;
+		for (let i = 0; i < buoys.length; i++) {
+			const dx = buoys[i].x - boat.x;
+			const dz = buoys[i].z - boat.z;
+			const d2 = dx * dx + dz * dz;
+			// Insertion into a list this short beats sorting a hundred.
+			let at = buoyNear.length;
+			while (at > 0) {
+				const j = buoyNear[at - 1];
+				const ex = buoys[j].x - boat.x;
+				const ez = buoys[j].z - boat.z;
+				if (ex * ex + ez * ez <= d2) break;
+				at--;
+			}
+			if (at < BUOY_SLOTS) {
+				buoyNear.splice(at, 0, i);
+				if (buoyNear.length > BUOY_SLOTS) buoyNear.length = BUOY_SLOTS;
+			}
+		}
+	}
 	// Scratch for the tracked sample; consumed within each buoy's block.
 	const buoySurf = { height: 0, swayX: 0, swayZ: 0, jacobian: 1 };
 	let buoyMeshes = $state<(THREE.Mesh | undefined)[]>([]);
@@ -3762,19 +3958,19 @@ void main() {
 	 * downward pull above equilibrium is clamped at gravity because a hull
 	 * out of the water is simply falling.
 	 */
-	const BUOY_BOB_PERIOD = 1.2; // s — natural heave period of the float
-	const BUOY_BOB_ZETA = 0.15; // damping ratio; < 1 so it visibly rings
-	const BUOY_W0 = (2 * Math.PI) / BUOY_BOB_PERIOD;
-	const BUOY_SPRING = BUOY_W0 * BUOY_W0; // accel per metre of submersion
-	const BUOY_DAMP = 2 * BUOY_BOB_ZETA * BUOY_W0;
-	/** Submersion past which extra depth adds no more push (hull volume). */
-	const BUOY_MAX_SUBMERSION = 0.8;
-	/**
-	 * Where water contact ends: the depth at which the spring's pull-down
-	 * exactly equals gravity. Below it the buoy is airborne — undamped,
-	 * falling at g — and the force law is continuous across the boundary.
-	 */
-	const BUOY_CONTACT_DISP = -BUOY_GRAVITY / BUOY_SPRING;
+	// Derived from the BUOY group each frame (it is live), not baked:
+	// buoyancy and ballast are exactly the numbers you want to drag while
+	// watching a float in a sea.
+	const buoyDyn = { spring: 0, damp: 0, contact: 0, drag: 0 };
+	function refreshBuoyDynamics() {
+		const w0 = (2 * Math.PI) / Math.max(BUOY.bobPeriodS, 0.05);
+		buoyDyn.spring = w0 * w0;
+		buoyDyn.damp = 2 * BUOY.bobZeta * w0;
+		// Where the spring's pull-down exactly equals gravity: below this
+		// the float is airborne and the force law stays continuous.
+		buoyDyn.contact = -BUOY_GRAVITY / buoyDyn.spring;
+		buoyDyn.drag = 2 * BUOY.swingZeta * Math.sqrt(Math.max(BUOY.righting, 0));
+	}
 	/**
 	 * Waterline rate above which a frame is treated as a SHEET STEP, m/s.
 	 * When a fold ends the sheet the tracked sampler rides, the sampled
@@ -3789,13 +3985,10 @@ void main() {
 	// Bottom-heavy pendulum tilt: the ballast is a righting spring toward
 	// the water-slope target, and angular momentum makes the buoy swing past
 	// and rock back instead of easing to a stop.
-	const BUOY_TILT = 1.2; // slope exaggeration so tilt reads at ortho distance
 	// Righting strength (spring, 1/s^2). sqrt of this is the rock frequency:
 	// 30 = ~1.1s per full rock, a small ballasted float.
-	const BUOY_RIGHTING = 60;
 	// Damping ratio: < 1 is underdamped. 0.25 = swings past and rocks 2-3
 	// times before settling; raise toward 1 for a heavier, deader float.
-	const BUOY_SWING_DAMPING = 0.25;
 	// Airborne there is no water to push against: momentum carries the tilt,
 	// trimmed only by this light air drag (1/s).
 	const BUOY_AIR_DRAG = 0.5;
@@ -3820,7 +4013,12 @@ void main() {
 	const SPHERE_CR = 5;
 
 	function depositContactFoam(t: number) {
-		for (const b of buoys) {
+		// NEAR BUOYS ONLY. Each lays six deposits and the field consumes
+		// 24 a step, so a hundred buoys would queue 600 and starve
+		// everything else, the boat's wake included. Distant collars are
+		// invisible anyway; the near three are the ones being looked at.
+		for (const bi of buoyNear) {
+			const b = buoys[bi];
 			// THREE iterations, not one: addFoam works in REST space, so
 			// every deposit subtracts the Gerstner sway, and that sway is
 			// a fixed-point inversion. One pass converges while the
@@ -4269,7 +4467,7 @@ void main() {
 		const tickMat = mat('#e8eef2');
 		const minorMat = mat('#5a6a78');
 		for (let i = 0; i < 8; i++) {
-			const az = ((316 + i * 45) * Math.PI) / 180;
+			const az = ((UNIFIED_NORTH_DEG + i * 45) * Math.PI) / 180;
 			const major = i % 2 === 0;
 			const r = 1.28;
 			let m: THREE.Mesh;
@@ -4616,6 +4814,28 @@ void main() {
 		if (game.knots > 0.4) boat.course = Math.atan2(boat.vz, boat.vx);
 		boat.x += boat.vx * dt;
 		boat.z += boat.vz * dt;
+		// INVISIBLE WALLS at the map border. Absorb rather than bounce:
+		// the hull is held at the edge and only the velocity INTO the wall
+		// is cancelled, so running along the border still works and a
+		// glancing approach slides instead of ricocheting. Bouncing a boat
+		// carrying this much momentum off nothing visible reads as a bug.
+		{
+			const lim = MAP_HALF - BOAT.wallMarginM;
+			if (boat.x > lim) {
+				boat.x = lim;
+				boat.vx = Math.min(boat.vx, 0);
+			} else if (boat.x < -lim) {
+				boat.x = -lim;
+				boat.vx = Math.max(boat.vx, 0);
+			}
+			if (boat.z > lim) {
+				boat.z = lim;
+				boat.vz = Math.min(boat.vz, 0);
+			} else if (boat.z < -lim) {
+				boat.z = -lim;
+				boat.vz = Math.max(boat.vz, 0);
+			}
+		}
 		// Surge, low-passed: drives the lean-back-under-power trim. Only
 		// tracked with the hull in the water — an airborne spin swings the
 		// forward PROJECTION without any real surge.
@@ -5494,6 +5714,11 @@ void main() {
 
 			// Clamped so a background-tab hiccup can't integrate a huge fall.
 			const buoyDt = Math.min(delta, 0.1);
+			// Which three buoys get occluder slots and collar foam this
+			// frame. Without this call buoyNear stays empty and every buoy
+			// silently loses its shadow, its refraction and its collar.
+			pickNearBuoys();
+			refreshBuoyDynamics();
 			for (let i = 0; i < buoys.length; i++) {
 				const mesh = buoyMeshes[i];
 				if (!mesh) continue;
@@ -5504,7 +5729,7 @@ void main() {
 				// sampleOcean includes whitecap crumble: a breaking crest
 				// passing under a float drops it with the collapsing water.
 				const surface = sampleOceanTracked(buoySurf, b.rest, x, z, waveTime);
-				const waterline = surface.height + 0.15;
+				const waterline = surface.height + BUOY.freeboardM;
 				// How fast the surface itself is moving vertically, clamped
 				// against first-frame garbage.
 				const rawRate = buoyDt > 0 ? (waterline - b.pw) / buoyDt : 0;
@@ -5533,17 +5758,17 @@ void main() {
 
 				// Heave: submersion relative to the equilibrium ride height.
 				const disp = waterline - b.y;
-				const airborne = disp <= BUOY_CONTACT_DISP;
+				const airborne = disp <= buoyDyn.contact;
 				// Buoyancy pushes up with submersion (capped once the hull is
 				// fully under); the pull-down above equilibrium can never
 				// exceed gravity, because a hull out of the water is just a
 				// falling object. Damping is against the WATER, not the air,
 				// so a wave sweeping up under the buoy drags it along.
 				let accel = Math.max(
-					BUOY_SPRING * Math.min(disp, BUOY_MAX_SUBMERSION),
+					buoyDyn.spring * Math.min(disp, BUOY.maxSubmersionM),
 					-BUOY_GRAVITY
 				);
-				if (!airborne) accel -= BUOY_DAMP * (b.vy - riseRate);
+				if (!airborne) accel -= buoyDyn.damp * (b.vy - riseRate);
 				// Semi-implicit Euler: velocity first, then position — the
 				// stable order for an oscillator at fixed steps.
 				b.vy += accel * buoyDt;
@@ -5613,13 +5838,11 @@ void main() {
 						(sampleOcean(x, z + 0.6, waveTime, 1, 1).height -
 							sampleOcean(x, z - 0.6, waveTime, 1, 1).height) /
 						1.2;
-					targetX = -gradX * BUOY_TILT;
-					targetZ = -gradZ * BUOY_TILT;
+					targetX = -gradX * BUOY.slopeFollow;
+					targetZ = -gradZ * BUOY.slopeFollow;
 				}
-				const spring = airborne ? 0 : BUOY_RIGHTING;
-				const drag = airborne
-					? BUOY_AIR_DRAG
-					: 2 * BUOY_SWING_DAMPING * Math.sqrt(BUOY_RIGHTING);
+				const spring = airborne ? 0 : BUOY.righting;
+				const drag = airborne ? BUOY_AIR_DRAG : buoyDyn.drag;
 				b.wx += (spring * (targetX - b.tx) - drag * b.wx) * buoyDt;
 				b.wz += (spring * (targetZ - b.tz) - drag * b.wz) * buoyDt;
 				b.tx = THREE.MathUtils.clamp(b.tx + b.wx * buoyDt, -1.4, 1.4);
@@ -5632,7 +5855,9 @@ void main() {
 				// world matrix later in the frame; do it now so the raytraced
 				// half can't lag the rasterized half).
 				mesh.updateMatrixWorld();
-				waterUniforms.uBuoyInv.value[i].copy(mesh.matrixWorld).invert();
+				const slot = buoyNear.indexOf(i);
+				if (slot >= 0)
+					waterUniforms.uBuoyInv.value[slot].copy(mesh.matrixWorld).invert();
 
 				// Directional tip splash: swinging hard means the rim digs
 				// into the water on the side the buoy is rotating toward, so
@@ -5729,7 +5954,12 @@ void main() {
 		sphereGeometry.dispose();
 		sphereMaterial.dispose();
 		buoyGeometry.dispose();
-		buoyMaterial.dispose();
+		// One geometry per buoy now (UVs baked into its atlas cell), so
+		// the whole set has to go, not just the template.
+		for (const g of buoyGeometries) g.dispose();
+		buoySideMaterial.dispose();
+		buoyCapMaterial.dispose();
+		labelAtlas.dispose();
 		sprayGeometry.dispose();
 		sprayMaterial.dispose();
 		frothGeometry.dispose();
@@ -5804,7 +6034,7 @@ void main() {
 	<T.Mesh
 		bind:ref={buoyMeshes[i]}
 		position={[buoy.x, 0, buoy.z]}
-		geometry={buoyGeometry}
+		geometry={buoyGeometries[i]}
 		material={buoyMaterial}
 	/>
 {/each}

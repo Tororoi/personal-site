@@ -73,7 +73,7 @@ export const ENABLE = {
    */
   turbDissipation: true,
   /** Foam from the ripple field's steepness — the shaped wake. */
-  rippleWakeFoam: true,
+  rippleWakeFoam: false,
   /** Foam left by landing droplets. Switch OFF to see the crest trail
    * on its own — the two sources are otherwise hard to tell apart. */
   dropletFoam: true,
@@ -2841,6 +2841,12 @@ export const BOAT = {
   liftPerSpeed: 0.018,
   liftMax: 0.26,
   /** Wake: continuous ripple poke, per step at full speed. */
+  /**
+   * Metres the hull is held back from the map border. The walls absorb
+   * rather than bounce — only velocity INTO the wall is cancelled — so
+   * running the edge still works and a glancing approach slides.
+   */
+  wallMarginM: 3,
   wakeAmp: 0.05,
   /**
    * How much the MOTOR adds to the ripple wake, on top of the speed
@@ -2892,7 +2898,9 @@ export const BOAT = {
  * inversion valid and lets one edit reach every consumer.
  */
 export const FUNNEL = applyOverrides('FUNNEL', {
-  enabled: true,
+  // Off by default: a 3m bowl in the sea is an experiment, not a
+  // baseline, and a reset should not conjure one.
+  enabled: false,
   /** Centre, world metres. The sphere sits at (3, 2), radius 5. */
   x: 16,
   z: 12,
@@ -2959,7 +2967,13 @@ export const BREAKER = applyOverrides('BREAKER', {
    * degenerate accident; a bend with a monotone angle is injective up to
    * ~180 degrees, so the lip overhangs without ever self-crossing.
    */
-  bendDeg: 100,
+  // OFF by default. The water vertex still carries the SHEAR version of
+  // this — the one that self-intersects — while the profile is being
+  // shaped on /wave. Worse, it is vertex-only, so the CPU surface the
+  // boat and buoys float on does not move with it and floats sit at the
+  // wrong height against the water being drawn. An experiment should not
+  // be what a reset restores.
+  bendDeg: 0,
   /**
    * How sharply the bend concentrates at the top, as an exponent on
    * height. 1 bends the whole face like a bowing column; higher leaves
@@ -2978,8 +2992,50 @@ export const BREAKER = applyOverrides('BREAKER', {
   jFull: 0,
 })
 
+/**
+ * The marker BUOYS: how high they ride and how hard they stand up.
+ *
+ * These were module constants in Scene, tuned when the buoy was half its
+ * present height — so doubling the box quietly made it ride LOWER in
+ * proportion (the freeboard is an absolute offset, not a fraction of the
+ * hull) and rock more, since the same righting spring now fights twice
+ * the lever.
+ */
+export const BUOY = applyOverrides('BUOY', {
+  /**
+   * Metres the buoy's CENTRE rides above the water at rest. With a
+   * half-height of 0.9 this is what decides how much stands clear: 0.3
+   * puts two thirds of the hull in the air.
+   */
+  freeboardM: 0.35,
+  /** Natural heave period, seconds — mass over waterplane area in
+   *  disguise. Shorter reads as a lighter, perkier float. */
+  bobPeriodS: 2,
+  /** Heave damping ratio. Below 1 it visibly rings after a wave. */
+  bobZeta: 0.15,
+  /** Submersion past which extra depth adds no more push, metres. */
+  maxSubmersionM: 0.8,
+  /**
+   * How far the buoy leans to match the water's SLOPE, 0..1+. This is the
+   * ballast dial: a bottom-weighted float barely follows the surface, it
+   * stays upright and lets the water tilt under it. 1.2 was the old
+   * exaggeration, chosen so tilt read at ortho distance on a small buoy.
+   */
+  slopeFollow: 0.95,
+  /**
+   * Righting spring, 1/s^2 — the weight in the base. sqrt is the rock
+   * frequency, so 110 is roughly a 0.6s rock: stiff, like a keeled
+   * marker rather than a floating box.
+   */
+  righting: 60,
+  /** Rock damping ratio. Below 1 it swings past and settles over a few
+   *  rocks; toward 1 it is dead and heavy. */
+  swingZeta: 0.25,
+})
+
 const GROUPS = {
   ENABLE,
+  BUOY,
   BREAKER,
   FUNNEL,
   BOAT,
@@ -3032,6 +3088,10 @@ export const TUNING_GROUPS: Record<string, Record<string, Knob>> = GROUPS
  * which is worse than asking for a reload.
  */
 export const LIVE_GROUPS = new Set([
+  // Read fresh inside the per-frame buoy integration: buoyancy and
+  // ballast are exactly the numbers you want to drag while watching a
+  // float in a sea.
+  'BUOY',
   'SPECULAR',
   'SEA',
   // overcast reaches the scene through the sea-rebuild key, turbidity

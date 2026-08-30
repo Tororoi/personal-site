@@ -322,7 +322,8 @@ uniform vec2 uCurrent;
 // Must match Scene.svelte's water shader and caustics.ts.
 uniform vec3 SPHERE_C;
 const float SPHERE_R = 5.0;
-const vec3 BUOY_HALF = vec3(0.25, 0.45, 0.25);
+const vec3 BUOY_HALF = vec3(0.5, 0.9, 0.5);
+const float BUOY_R = 0.5;
 /** Same accumulated carry the water fragment uses, so the cell a parcel
  *  of foam is standing in travels WITH it. Without this the stubborn
  *  cells are fixed places in the sea and the foam drifts through them. */
@@ -638,8 +639,10 @@ void main() {
 		// Buoys: 2D footprint, with height only fading the strength.
 		for (int i = 0; i < 3; i++) {
 			vec3 lp = (uBuoyInv[i] * vec4(surfXZ.x, surfY, surfXZ.y, 1.0)).xyz;
-			vec2 qb = abs(lp.xz) - BUOY_HALF.xz;
-			float db = length(max(qb, vec2(0.0))) + min(max(qb.x, qb.y), 0.0);
+			// Radial distance to the barrel. The box SDF this replaced put
+			// a square collar on a round buoy — and a collar is the one
+			// place the shape is read edge-on at close range.
+			float db = length(lp.xz) - BUOY_R;
 			float vk = (1.0 - smoothstep(0.0, ${FOAM.contactOverwash.toFixed(3)}, max(lp.y - BUOY_HALF.y, 0.0)))
 				* (1.0 - smoothstep(0.0, ${FOAM.contactLift.toFixed(3)}, max(-BUOY_HALF.y - lp.y, 0.0)));
 			// Same windward bias, with the flow carried into the box's own
