@@ -3033,8 +3033,36 @@ export const BUOY = applyOverrides('BUOY', {
   swingZeta: 0.25,
 })
 
+/**
+ * ISLAND: one tile raised out of the water, with the seabed ramping up
+ * to meet it.
+ *
+ * A single profile does the whole thing. Chebyshev distance from the
+ * tile's centre — max(|dx|, |dz|), the natural metric on a square grid —
+ * gives a square shoal that lines up with the tiles, and one slope
+ * carries from the flat seabed all the way to the summit: the island is
+ * not a separate object sitting on a ramp, it is the ramp continuing
+ * past the waterline. So the apex height equals the seabed depth, and
+ * shore and slope can never disagree.
+ *
+ * Staged: the profile bakes into the shaders as literals.
+ */
+export const ISLAND = applyOverrides('ISLAND', {
+  enabled: true,
+  /** Tile column (0 = A) and row. E3 by default. */
+  col: 4,
+  row: 3,
+  /** Half-width of the flat-topped shore, metres from the tile centre.
+   *  50 is exactly the tile edge. */
+  edgeM: 50,
+  /** Where the seabed reaches its normal depth again — half a tile out
+   *  into the neighbours. Between this and edgeM the floor ramps. */
+  rampM: 100,
+})
+
 const GROUPS = {
   ENABLE,
+  ISLAND,
   BUOY,
   BREAKER,
   FUNNEL,

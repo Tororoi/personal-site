@@ -21,7 +21,7 @@
  */
 
 import * as THREE from 'three'
-import { FUNNEL, WEATHER, WIND, CURRENT, INSPECT, SEA } from './tuning'
+import { ISLAND, FUNNEL, WEATHER, WIND, CURRENT, INSPECT, SEA } from './tuning'
 
 export type WaveParams = {
   /** Unit direction of travel. */
@@ -1580,6 +1580,31 @@ export function sampleHeight(
  * GLSL twin of displace(). Same formulas, term for term, and the uniforms
  * are uploaded from the same `waves` array (see the uniform setup in Scene).
  */
+/** World centre of the island tile. Map layout mirrors Scene's. */
+export const ISLAND_C = {
+  x: -500 + 100 * (ISLAND.col + 0.5),
+  z: -500 + 100 * (ISLAND.row + 0.5),
+}
+
+/**
+ * Seabed height at a world position, given the flat depth. Returns a
+ * NEGATIVE value out at sea and rises through 0 at the shore to a
+ * positive summit — one continuous profile, so the island above water is
+ * literally the seabed carrying on.
+ *
+ * Chebyshev distance: square shoal, aligned to the tile grid.
+ */
+export function seabedHeightAt(x: number, z: number, depth: number): number {
+  if (!ISLAND.enabled) return -depth
+  const d = Math.max(Math.abs(x - ISLAND_C.x), Math.abs(z - ISLAND_C.z))
+  const edge = Math.max(ISLAND.edgeM, 0.001)
+  const ramp = Math.max(ISLAND.rampM, edge + 0.001)
+  if (d >= ramp) return -depth
+  // One slope for both halves: depth over the ramp's run.
+  const slope = depth / (ramp - edge)
+  return (edge - d) * slope
+}
+
 export function wavesGlsl(): string {
   return `
 #define WAVE_COUNT ${waves.length}
@@ -1606,6 +1631,47 @@ ${
     ? `	vec2 r = w - vec2(${FUNNEL.x.toFixed(3)}, ${FUNNEL.z.toFixed(3)});
 	return -funnelAt(w) * r / ${Math.max(FUNNEL.sigmaM * FUNNEL.sigmaM, 0.0001).toFixed(4)};`
     : '	return vec2(0.0);'
+}
+}
+
+// Seabed height, twin of seabedHeightAt() on the CPU.
+//
+// The flat depth is a PARAMETER, not a uniform. wavesGlsl is included in
+// ten shaders and most never declare the underwater block's depth
+// uniform, so reaching for it here fails to compile in all of them — and
+// a material that fails to compile simply does not draw, which is how
+// the sea, the sphere and the island all vanished at once.
+//
+// The profile rises through 0 at the shore and keeps climbing, so the
+// island above water is this same function continued.
+float seabedHeightAt(vec2 w, float depth) {
+${
+  ISLAND.enabled
+    ? `	float d = max(
+		abs(w.x - ${ISLAND_C.x.toFixed(2)}),
+		abs(w.y - ${ISLAND_C.z.toFixed(2)}));
+	if (d >= ${ISLAND.rampM.toFixed(2)}) return -depth;
+	return (${ISLAND.edgeM.toFixed(2)} - d)
+		* (depth / ${Math.max(ISLAND.rampM - ISLAND.edgeM, 0.001).toFixed(2)});`
+    : '	return -depth;'
+}
+}
+
+// Analytic normal of that profile. Each Chebyshev face is planar, so the
+// gradient is the slope along whichever axis dominates — no finite
+// differencing, and no seam beyond the crease the shape genuinely has.
+vec3 seabedNormalAt(vec2 w, float depth) {
+${
+  ISLAND.enabled
+    ? `	vec2 r = vec2(w.x - ${ISLAND_C.x.toFixed(2)}, w.y - ${ISLAND_C.z.toFixed(2)});
+	float d = max(abs(r.x), abs(r.y));
+	if (d >= ${ISLAND.rampM.toFixed(2)} || d < 0.001) return vec3(0.0, 1.0, 0.0);
+	float slope = depth / ${Math.max(ISLAND.rampM - ISLAND.edgeM, 0.001).toFixed(2)};
+	vec2 g = abs(r.x) >= abs(r.y)
+		? vec2(-sign(r.x) * slope, 0.0)
+		: vec2(0.0, -sign(r.y) * slope);
+	return normalize(vec3(-g.x, 1.0, -g.y));`
+    : '	return vec3(0.0, 1.0, 0.0);'
 }
 }
 

@@ -315,6 +315,10 @@
 		'FUNNEL.depthM': { min: -6, max: 12, step: 0.25 },
 		'FUNNEL.sigmaM': { min: 1, max: 30, step: 0.5 },
 		'FUNNEL.tilt': { min: 0, max: 1, step: 0.02 },
+		'ISLAND.col': { min: 0, max: 9, step: 1 },
+		'ISLAND.row': { min: 0, max: 9, step: 1 },
+		'ISLAND.edgeM': { min: 5, max: 90, step: 1 },
+		'ISLAND.rampM': { min: 20, max: 300, step: 5 },
 		'BUOY.freeboardM': { min: -0.5, max: 1.2, step: 0.01 },
 		'BUOY.bobPeriodS': { min: 0.3, max: 3, step: 0.05 },
 		'BUOY.bobZeta': { min: 0, max: 1, step: 0.01 },
@@ -442,6 +446,7 @@
 			['seabed', ['seabed', 'seabedDepthM']],
 			['testing', ['sphereDepth', 'rainbowCard', 'whale', 'whaleY', 'whaleX', 'whaleZ']]
 		],
+		ISLAND: [['shape', ['enabled', 'col', 'row', 'edgeM', 'rampM']]],
 		BUOY: [
 			['float', ['freeboardM', 'bobPeriodS', 'bobZeta', 'maxSubmersionM']],
 			['ballast', ['slopeFollow', 'righting', 'swingZeta']]

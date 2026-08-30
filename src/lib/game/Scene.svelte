@@ -23,7 +23,9 @@
 		filteredSlopeInto,
 		onFieldChange
 	,
-		UNIFIED_NORTH_DEG
+		UNIFIED_NORTH_DEG,
+		ISLAND_C,
+		seabedHeightAt
 	} from './waves';
 	import {
 		events,
@@ -65,6 +67,7 @@
 		CAUSTICS,
 		BOAT,
 		BUOY,
+		ISLAND,
 		BREAKER,
 		DROPLET,
 		ENABLE,
@@ -2056,9 +2059,22 @@ void main() {
 	// clipping a shallow seabed used to render through the ground,
 	// because objects won unconditionally and the floor only ran when
 	// nothing was hit at all).
-	float tSeabed = (uUwSeabedOn > 0.5 && refr.y < -0.001)
-		? (-uUwSeabedD - pEntry.y) / refr.y
-		: -1.0;
+	// SEABED, now a height FIELD rather than a plane. The ray is solved by
+	// fixed-point iteration: guess a t from the current height, resample
+	// the height where that lands, repeat. The floor's slope is gentle
+	// (depth over half a tile), so three passes are far past convergence
+	// — and unlike a march it costs the same everywhere, including the
+	// nine tenths of the sea that are still flat.
+	float tSeabed = -1.0;
+	if (uUwSeabedOn > 0.5 && refr.y < -0.001) {
+		tSeabed = (-uUwSeabedD - pEntry.y) / refr.y;
+		for (int i = 0; i < 3; i++) {
+			vec2 hxz = pEntry.xz + refr.xz * tSeabed;
+			tSeabed = (seabedHeightAt(hxz, uUwSeabedD) - pEntry.y) / refr.y;
+			if (tSeabed <= 0.0) break;
+		}
+		if (tSeabed <= 0.0) tSeabed = -1.0;
+	}
 	if (tHit > 0.0 && (tSeabed <= 0.0 || tHit < tSeabed)) {
 		vec3 P = pEntry + refr * tHit;
 		waterPath = tHit;
@@ -2087,7 +2103,7 @@ void main() {
 		vec3 sb = (sbFade < 0.001 || turbOdAt(tSeabed, pEntry.y, refr.y) > TURB_OD_CUT)
 			? vec3(0.0)
 			: shadeUnderwater(
-					Pf, vec3(0.0, 1.0, 0.0), uFloorColor, tSeabed, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0, cloudM);
+					Pf, seabedNormalAt(Pf.xz, uUwSeabedD), uFloorColor, tSeabed, max(pEntry.y - Pf.y, 0.0), abs(refr.y), 0.0, cloudM);
 		transmitted = sbFade > 0.999 ? sb : mix(uwVolume(), sb, sbFade);
 	} else {
 		// Seabed off, total internal reflection, or a grazing ray with no
@@ -2740,6 +2756,37 @@ void main() {
 	// water shader is this cylinder's bounding box — a square shadow on a
 	// round float is a smaller error than the cost of a second primitive
 	// in three shaders, and at this size it is not readable.
+	/**
+	 * THE ISLAND. Not a model placed on the ramp — the ramp itself,
+	 * continued past the waterline. One profile (seabedHeightAt) owns the
+	 * whole shape, so the shore line is wherever it crosses zero and the
+	 * two can never drift apart.
+	 *
+	 * Built as a square frustum from the summit down to the ramp's outer
+	 * edge, which puts its skirt below the seabed everywhere and hides
+	 * the join. Cheap: eight triangles.
+	 */
+	const islandGeometry = (() => {
+		const D = UNDERWATER.seabedDepthM;
+		const apex = seabedHeightAt(ISLAND_C.x, ISLAND_C.z, D);
+		const skirt = ISLAND.rampM;
+		const skirtY = seabedHeightAt(ISLAND_C.x + skirt, ISLAND_C.z, D) - 1;
+		const v: number[] = [ISLAND_C.x, apex, ISLAND_C.z];
+		const idx: number[] = [];
+		for (let k = 0; k < 4; k++) {
+			const sx = k === 0 || k === 3 ? -1 : 1;
+			const sz = k < 2 ? -1 : 1;
+			v.push(ISLAND_C.x + sx * skirt, skirtY, ISLAND_C.z + sz * skirt);
+		}
+		// Fan from the summit; winding chosen so the outward faces front.
+		for (let k = 0; k < 4; k++) idx.push(0, 1 + ((k + 1) % 4), 1 + k);
+		const geo = new THREE.BufferGeometry();
+		geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+		geo.setIndex(idx);
+		geo.computeVertexNormals();
+		return geo;
+	})();
+
 	const buoyGeometry = new THREE.CylinderGeometry(0.5, 0.5, 1.8, 24);
 	const buoyGeometries = Array.from({ length: MAP.grid * MAP.grid }, (_, i) =>
 		buoyGeometryFor(i, buoyGeometry)
@@ -6027,6 +6074,9 @@ void main() {
 	<T.Mesh bind:ref={waterMeshRef} geometry={waterGeometry} material={waterMaterial} frustumCulled={false} />
 {/if}
 <T is={boatMesh} />
+{#if ISLAND.enabled && !PROFILE.hideObjects}
+	<T.Mesh geometry={islandGeometry} material={sphereMaterial} frustumCulled={false} />
+{/if}
 <T is={hudCompass.group} />
 <T is={rainbowMesh} />
 
