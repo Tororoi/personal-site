@@ -492,7 +492,16 @@ void main() {
 	// whale at 8m over a 12m floor cast nothing. The map is EVALUATED at
 	// the plane, but its occlusion must cover the full column its one
 	// real reader (the seabed) sits under.
-	float tOcc = (vEntry.y - uSeabedY) / max(-normalize(vRefr).y, 0.05);
+	// Truncate at the LOCAL seabed, not a global plane. Over a shoal the
+	// floor rises metres above uSeabedY, so a flat truncation ran the
+	// occluder leg on past the sand and shadowed water that has none —
+	// which is the hard line where caustics stop at the island. One
+	// resample at the flat estimate is enough: the ramp is gentle and
+	// this only sets how far the leg is allowed to reach.
+	vec3 rN = normalize(vRefr);
+	float tFlat = (vEntry.y - uSeabedY) / max(-rN.y, 0.05);
+	float bedY = seabedHeightAt(vEntry.xz + rN.xz * tFlat, -uSeabedY);
+	float tOcc = (vEntry.y - bedY) / max(-rN.y, 0.05);
 	float deepV = min(sphereRayVis(vEntry, -inc, 1e5), sphereRayVis(vEntry, normalize(vRefr), tOcc))
 		* cardShadowVis(vEntry, normalize(vRefr), tOcc)
 		* whaleRayVis(vEntry, normalize(vRefr), tOcc);

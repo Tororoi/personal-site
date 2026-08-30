@@ -374,6 +374,84 @@
 		return { y: env * Math.cos(p.kk * (x - p.c * age)), env };
 	}
 
+	/**
+	 * RAY LAB — wave packets refracting over the island's shoal, seen
+	 * from above.
+	 *
+	 * This is the step that plane waves cannot do. A Gerstner wave's
+	 * phase is k.x - wt with k CONSTANT; to bend it you need k to vary
+	 * with position, and then phase is no longer k.x but the integral of
+	 * k along the path. Vary k per-position without that integral and the
+	 * phase tears. Refraction is not a missing feature of plane waves, it
+	 * is incompatible with what a plane wave is.
+	 *
+	 * A packet is somewhere, so it can carry its own k and have it bent.
+	 * Nothing here implements refraction: it integrates the ray equations
+	 * and refraction is what comes out.
+	 */
+	const ray = $state({
+		/** Incoming bearing, degrees, in the game's compass. */
+		bearing: 250,
+		/** Wave period, seconds. Sets omega, which is conserved along a
+		 *  ray — depth then decides k, and the gradient of k does the
+		 *  bending. */
+		periodS: 8,
+		count: 24,
+		/** Integration step, seconds of packet time. */
+		stepS: 0.4,
+		steps: 260,
+		/** Depth in open water, metres. */
+		depthM: 10,
+		showCrests: true,
+		showDepth: true
+	});
+
+	const RAY_ROWS: [keyof typeof ray, number, number, number][] = [
+		['bearing', 0, 359, 1],
+		['periodS', 2, 20, 0.5],
+		['count', 4, 60, 1],
+		['stepS', 0.05, 1.5, 0.05],
+		['steps', 40, 600, 20],
+		['depthM', 2, 40, 1]
+	];
+
+	/** The island's shoal, in the ray lab's own local frame: the tile
+	 *  centre is the origin. Chebyshev, matching the game. */
+	function rayDepth(x: number, z: number) {
+		const d = Math.max(Math.abs(x), Math.abs(z));
+		const edge = 50;
+		const rampTo = 100;
+		const f = Math.min(Math.max((d - edge) / (rampTo - edge), 0), 1);
+		// Never exactly zero: k diverges as depth does, and a ray that
+		// reaches dry land has nothing left to integrate.
+		return Math.max(f * ray.depthM, 0.15);
+	}
+
+	/**
+	 * Solve the dispersion relation w^2 = g k tanh(k d) for k, given w
+	 * and depth. Newton from the deep-water guess; three passes is exact
+	 * to well under a pixel here.
+	 */
+	function waveNumber(omega: number, depth: number) {
+		let k = (omega * omega) / G;
+		for (let i = 0; i < 6; i++) {
+			const th = Math.tanh(k * depth);
+			const f = G * k * th - omega * omega;
+			const df = G * th + G * k * depth * (1 - th * th);
+			k -= f / df;
+			if (k < 1e-6) k = 1e-6;
+		}
+		return k;
+	}
+
+	/** Group velocity: dw/dk of the same relation. */
+	function groupSpeed(omega: number, k: number, depth: number) {
+		const kd = k * depth;
+		const sh = Math.sinh(2 * kd);
+		const n = 0.5 * (1 + (2 * kd) / (sh === 0 ? 1e-6 : sh));
+		return (omega / k) * n;
+	}
+
 	const slice = new FlipSlice();
 	let t = 0;
 	let seededAt = { lambda: 0, amplitude: 0, depth: 0, slopeStart: 0, gridNx: 0 };
@@ -381,14 +459,18 @@
 	let bcanvas: HTMLCanvasElement | undefined = $state();
 	let scanvas: HTMLCanvasElement | undefined = $state();
 	let pcanvas: HTMLCanvasElement | undefined = $state();
+	let rcanvas: HTMLCanvasElement | undefined = $state();
 	let stats = $state({ c: 0, particles: 0, ms: 0 });
 	let bstats = $state({ maxB: 0, minJ: 1, amp: 0, peak: 0 });
 	let sstats = $state({ ratio: 1, amp: 0 });
 	let pstats = $state({ c: 0, cg: 0, sigma: 0 });
+	let rstats = $state({ bendDeg: 0, kDeep: 0, kShore: 0 });
+	// Mirrors waves.ts; the lab is standalone so it keeps its own copy.
+	const UNIFIED_NORTH_DEG_LOCAL = 315;
 	/** Which graph is on screen. Only the visible one is stepped or drawn:
 	 *  a hidden canvas has zero client size, and sizing to that would
 	 *  leave it blank when it came back. */
-	let tab: 'tank' | 'bend' | 'stokes' | 'packet' = $state('bend');
+	let tab: 'tank' | 'bend' | 'stokes' | 'packet' | 'rays' = $state('bend');
 
 	function flipParams() {
 		return {
@@ -676,11 +758,121 @@
 		pstats.sigma = now.sigma;
 	}
 
+	function drawRays(ctx: CanvasRenderingContext2D) {
+		if (!rcanvas) return;
+		const dpr = window.devicePixelRatio || 1;
+		const W = rcanvas.clientWidth;
+		const H = rcanvas.clientHeight;
+		if (rcanvas.width !== W * dpr || rcanvas.height !== H * dpr) {
+			rcanvas.width = W * dpr;
+			rcanvas.height = H * dpr;
+		}
+		const PW = rcanvas.width;
+		const PH = rcanvas.height;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.fillStyle = '#0d1319';
+		ctx.fillRect(0, 0, PW, PH);
+
+		// Top-down, 320m across, shoal centred.
+		const span = 320;
+		const sc = Math.min(PW, PH) / span;
+		const px = (x: number) => PW / 2 + x * sc;
+		const py = (z: number) => PH / 2 + z * sc;
+
+		// Depth, as bands. The shoal is what the rays are reacting to, so
+		// it has to be visible or the bending looks arbitrary.
+		if (ray.showDepth) {
+			const step = 4;
+			for (let sy = 0; sy < PH; sy += step) {
+				for (let sx = 0; sx < PW; sx += step) {
+					const wx = (sx - PW / 2) / sc;
+					const wz = (sy - PH / 2) / sc;
+					const f = rayDepth(wx, wz) / ray.depthM;
+					const v = Math.round(18 + 26 * f);
+					ctx.fillStyle = `rgb(${v},${v + 8},${v + 16})`;
+					ctx.fillRect(sx, sy, step, step);
+				}
+			}
+			// The shore itself.
+			ctx.strokeStyle = '#4a5c6b';
+			ctx.lineWidth = dpr;
+			ctx.strokeRect(px(-50), py(-50), 100 * sc, 100 * sc);
+		}
+
+		const omega = (2 * Math.PI) / Math.max(ray.periodS, 0.1);
+		const th0 = ((UNIFIED_NORTH_DEG_LOCAL + ray.bearing) * Math.PI) / 180;
+		const dirX = Math.cos(th0);
+		const dirZ = Math.sin(th0);
+		// Start the rays on a line square to the incoming direction, well
+		// clear of the shoal.
+		const nx = -dirZ;
+		const nz = dirX;
+		let bent = 0;
+
+		for (let r = 0; r < ray.count; r++) {
+			const u = (r / Math.max(ray.count - 1, 1) - 0.5) * span * 0.95;
+			let x = -dirX * span * 0.55 + nx * u;
+			let z = -dirZ * span * 0.55 + nz * u;
+			let theta = Math.atan2(dirZ, dirX);
+			const theta0 = theta;
+
+			ctx.beginPath();
+			ctx.moveTo(px(x), py(z));
+			for (let i = 0; i < ray.steps; i++) {
+				const d = rayDepth(x, z);
+				const k = waveNumber(omega, d);
+				const cg = groupSpeed(omega, k, d);
+				// Ray equation: rays bend TOWARD higher k, exactly as light
+				// bends toward higher refractive index. The turning rate is
+				// the component of grad(k) normal to the ray, over k.
+				const e = 1.5;
+				const kx =
+					(waveNumber(omega, rayDepth(x + e, z)) -
+						waveNumber(omega, rayDepth(x - e, z))) /
+					(2 * e);
+				const kz =
+					(waveNumber(omega, rayDepth(x, z + e)) -
+						waveNumber(omega, rayDepth(x, z - e))) /
+					(2 * e);
+				const ct = Math.cos(theta);
+				const st = Math.sin(theta);
+				// Left normal of the ray.
+				const dTheta = -((-st * kx + ct * kz) / k) * cg * ray.stepS;
+				theta += dTheta;
+				x += Math.cos(theta) * cg * ray.stepS;
+				z += Math.sin(theta) * cg * ray.stepS;
+				ctx.lineTo(px(x), py(z));
+				if (Math.abs(x) > span || Math.abs(z) > span) break;
+			}
+			ctx.strokeStyle = 'rgba(95, 214, 230, 0.55)';
+			ctx.lineWidth = dpr;
+			ctx.stroke();
+
+			// Crest segment at the ray's end: perpendicular to travel, so
+			// a row of them reads as a wavefront.
+			if (ray.showCrests) {
+				const cx = Math.cos(theta + Math.PI / 2) * 9;
+				const cz = Math.sin(theta + Math.PI / 2) * 9;
+				ctx.strokeStyle = '#e0a33e';
+				ctx.lineWidth = 2 * dpr;
+				ctx.beginPath();
+				ctx.moveTo(px(x - cx), py(z - cz));
+				ctx.lineTo(px(x + cx), py(z + cz));
+				ctx.stroke();
+			}
+			bent = Math.max(bent, Math.abs(theta - theta0));
+		}
+		rstats.bendDeg = (bent * 180) / Math.PI;
+		rstats.kDeep = waveNumber(omega, ray.depthM);
+		rstats.kShore = waveNumber(omega, 0.5);
+	}
+
 	onMount(() => {
 		const ctx = canvas.getContext('2d')!;
 		const bctx = bcanvas?.getContext('2d') ?? null;
 		const sctx = scanvas?.getContext('2d') ?? null;
 		const pctx = pcanvas?.getContext('2d') ?? null;
+		const rctx = rcanvas?.getContext('2d') ?? null;
 		reseed();
 		let raf = 0;
 		function frame() {
@@ -704,7 +896,9 @@
 					if (bctx) drawBreaker(bctx);
 				} else if (tab === 'stokes') {
 					if (sctx) drawStokes(sctx);
-				} else if (pctx) drawPacket(pctx);
+				} else if (tab === 'packet') {
+					if (pctx) drawPacket(pctx);
+				} else if (rctx) drawRays(rctx);
 			}
 		}
 		frame();
@@ -850,6 +1044,38 @@
 		<div class="row"><span class="name">phase c</span><span class="val">{stats.c.toFixed(2)} m/s</span></div>
 		<div class="row"><span class="name">particles</span><span class="val">{stats.particles}</span></div>
 		<div class="row"><span class="name">step</span><span class="val">{stats.ms.toFixed(1)} ms</span></div>
+		{:else if tab === 'rays'}
+		<div class="group">rays (refraction)</div>
+		{#each RAY_ROWS as [key, min, max, step] (key)}
+			<div class="row">
+				<span class="name">{key}</span>
+				<input type="range" {min} {max} {step} bind:value={ray[key] as number} />
+				<span class="val">{(ray[key] as number).toFixed(2)}</span>
+			</div>
+		{/each}
+		<div class="head">
+			<label><input type="checkbox" bind:checked={ray.showCrests} /> crests</label>
+			<label><input type="checkbox" bind:checked={ray.showDepth} /> depth</label>
+		</div>
+		<div class="row"><span class="name">max bend</span><span class="val">{rstats.bendDeg.toFixed(1)}&deg;</span></div>
+		<div class="row"><span class="name">k deep</span><span class="val">{rstats.kDeep.toFixed(3)} /m</span></div>
+		<div class="row"><span class="name">k @0.5m</span><span class="val">{rstats.kShore.toFixed(3)} /m</span></div>
+		<p class="note">
+			Wave packets crossing the island's shoal, from above. Cyan are
+			the ray paths, amber the crest at each ray's end — a row of
+			them IS the wavefront, and watching it turn to line up with the
+			shore is the whole point.
+			Nothing here implements refraction. Each packet carries omega,
+			which is conserved; depth sets k through w&sup2; = gk&middot;tanh(kd);
+			and the ray turns toward higher k exactly as light turns toward
+			higher refractive index. Bending is what falls out. The k
+			readouts show the same wave going short and slow as it shoals —
+			that difference across a crest is what makes it turn.
+			This is what a Gerstner wave cannot do: its phase is k&middot;x
+			with k constant, and varying k per-position tears the phase
+			unless you carry the integral along the path. A packet is
+			somewhere, so it can carry it.
+		</p>
 		{:else if tab === 'packet'}
 		<div class="group">packet (Lagrangian)</div>
 		{#each PACKET_ROWS as [key, min, max, step] (key)}
@@ -962,11 +1188,13 @@
 			<button class:on={tab === 'bend'} onclick={() => (tab = 'bend')}>wave bend</button>
 			<button class:on={tab === 'stokes'} onclick={() => (tab = 'stokes')}>nonlinear</button>
 			<button class:on={tab === 'packet'} onclick={() => (tab = 'packet')}>packet</button>
+			<button class:on={tab === 'rays'} onclick={() => (tab = 'rays')}>rays</button>
 		</div>
 		<canvas bind:this={canvas} hidden={tab !== 'tank'}></canvas>
 		<canvas bind:this={bcanvas} hidden={tab !== 'bend'}></canvas>
 		<canvas bind:this={scanvas} hidden={tab !== 'stokes'}></canvas>
 		<canvas bind:this={pcanvas} hidden={tab !== 'packet'}></canvas>
+		<canvas bind:this={rcanvas} hidden={tab !== 'rays'}></canvas>
 	</div>
 </div>
 

@@ -2095,7 +2095,12 @@ void main() {
 		// open-water volume, gone by 80m — the slider's top now IS
 		// "no seabed" instead of an abrupt toggle. The waterPath blends
 		// with it so extinction and the turbidity fog stay continuous.
-		float sbFade = 1.0 - smoothstep(40.0, 80.0, uUwSeabedD);
+		// LOCAL depth, not the global one: over a shoal the floor is
+		// metres shallower, and dissolving it by the open-sea depth
+		// dissolved sand you can nearly touch — which is the band of
+		// missing seabed around the island's edge.
+		float bedD = -seabedHeightAt(Pf.xz, uUwSeabedD);
+		float sbFade = 1.0 - smoothstep(40.0, 80.0, bedD);
 		waterPath = mix(60.0, tSeabed, sbFade);
 		// sbFade 0 (depth at the slider's 80m top) skips the shading too:
 		// a fully dissolved seabed costs the GPU nothing, exactly like

@@ -1605,6 +1605,24 @@ export function seabedHeightAt(x: number, z: number, depth: number): number {
   return (edge - d) * slope
 }
 
+/**
+ * Normalised depth: 1 in open water, 0 at the island's shore. The flat
+ * depth cancels, so both shoaling and shelter are pure functions of
+ * position and need no depth uniform — which is what lets them live in
+ * this shared chunk at all.
+ */
+/**
+ * Normalised depth: 1 in open water, 0 at the island's shore. Kept for
+ * the packet prototype; nothing in the game reads it yet.
+ */
+export function depthFracAt(x: number, z: number): number {
+  if (!ISLAND.enabled) return 1
+  const d = Math.max(Math.abs(x - ISLAND_C.x), Math.abs(z - ISLAND_C.z))
+  const edge = Math.max(ISLAND.edgeM, 0.001)
+  const ramp = Math.max(ISLAND.rampM, edge + 0.001)
+  return Math.min(Math.max((d - edge) / (ramp - edge), 0), 1)
+}
+
 export function wavesGlsl(): string {
   return `
 #define WAVE_COUNT ${waves.length}
