@@ -452,6 +452,200 @@
 		return (omega / k) * n;
 	}
 
+	/**
+	 * HEIGHTFIELD BREAK state — standalone, no lifecycle, no scrub. A
+	 * steady train crosses a beach and everything is a function of
+	 * position: the decay starts the instant the wave breaks, exactly as
+	 * the wavepool's saturation cap does it.
+	 */
+	const hf = $state({
+		periodS: 4,
+		ampM: 1.1,
+		deepM: 6,
+		/** Breaker index: H may not exceed gamma x depth. Literature:
+		 *  0.63-0.71 spilling, 0.73-0.81 plunging. */
+		gamma: 0.78,
+		/** Front-face skew at breaking. Bonmarin's ensembles: crest-front
+		 *  steepness roughly doubles in the last two periods. */
+		skewMax: 0.55,
+		/** Roller area coefficient for the MATURE bore: A_r ~ this x H^2.
+		 *  Duncan/Svendsen and the LiDAR follow-ups land near 0.9. */
+		rollerA: 0.9,
+		/** Ballistic reach multiplier on the lip's parabola: the jet
+		 *  leaves the crest at ~the phase speed and free-falls, so its
+		 *  natural reach is c*sqrt(2H/g); this scales it. */
+		lipReach: 1,
+		/** How deeply the barrel face hollows under the lip, as a
+		 *  fraction of amplitude — Bonmarin's concave front face. */
+		hollowK: 0.35,
+		/** Splash-up bump at the jet's touchdown, fraction of amplitude. */
+		splashK: 0.3
+	});
+	const HF_ROWS: [keyof typeof hf, number, number, number][] = [
+		['periodS', 2, 10, 0.1],
+		['ampM', 0.2, 3, 0.05],
+		['deepM', 2, 10, 0.25],
+		['gamma', 0.5, 1.1, 0.01],
+		['skewMax', 0, 1, 0.02]
+	];
+	/**
+	 * AUTHORED KEYFRAMES. Three stages of the break, each a crest-centred
+	 * profile over one wavelength: u in [-0.5, 0.5] (phase fraction,
+	 * crest at 0), v in amplitude units. The system's only job is to
+	 * carry them: a profile rides the wave's phase, scales with its
+	 * decaying amplitude, and the stages blend by break progression —
+	 * stage 0 fades in at the break line, stage 2 is the mature bore.
+	 * Catmull-Rom through the points; endpoints pinned at u = +-0.5 and
+	 * sharing one height so the profile tiles periodically.
+	 */
+	const KF_STAGES = 3;
+	const KF_DEFAULT: number[][][] = [
+		[
+			[-0.5, -0.62], [-0.35, -0.45], [-0.18, 0.05], [-0.06, 0.75],
+			[0, 1.0], [0.06, 0.72], [0.16, 0.0], [0.32, -0.5], [0.5, -0.62]
+		],
+		[
+			[-0.5, -0.62], [-0.33, -0.42], [-0.15, 0.12], [-0.04, 0.85],
+			[0, 1.0], [0.1, 0.97], [0.16, 0.55], [0.24, -0.35], [0.5, -0.62]
+		],
+		[
+			[-0.5, -0.55], [-0.3, -0.35], [-0.12, -0.05], [0, 0.45],
+			[0.06, 0.6], [0.12, 0.62], [0.18, 0.3], [0.26, -0.3], [0.5, -0.55]
+		]
+	];
+	const KF_LS = 'hfbreak-keyframes-v1';
+	function kfLoad(): number[][][] {
+		try {
+			const raw = localStorage.getItem(KF_LS);
+			if (raw) {
+				const p = JSON.parse(raw);
+				if (Array.isArray(p) && p.length === KF_STAGES) return p;
+			}
+		} catch {
+			/* fresh */
+		}
+		return JSON.parse(JSON.stringify(KF_DEFAULT));
+	}
+	let kfData: number[][][] = kfLoad();
+	let kfSel = $state(0);
+	function kfSave() {
+		try {
+			localStorage.setItem(KF_LS, JSON.stringify(kfData));
+		} catch {
+			/* storage blocked; authoring just won't persist */
+		}
+	}
+	function kfReset() {
+		kfData = JSON.parse(JSON.stringify(KF_DEFAULT));
+		kfSave();
+	}
+	function kfLog() {
+		console.log('hfbreak keyframes:', JSON.stringify(kfData));
+	}
+	/** Catmull-Rom through a stage's points at phase fraction u. */
+	function kfEval(stage: number[][], u: number): number {
+		const n = stage.length;
+		if (u <= stage[0][0]) return stage[0][1];
+		if (u >= stage[n - 1][0]) return stage[n - 1][1];
+		let i = 0;
+		while (i < n - 2 && stage[i + 1][0] < u) i++;
+		const p0 = stage[Math.max(i - 1, 0)];
+		const p1 = stage[i];
+		const p2 = stage[i + 1];
+		const p3 = stage[Math.min(i + 2, n - 1)];
+		const span = Math.max(p2[0] - p1[0], 1e-4);
+		const tt = (u - p1[0]) / span;
+		const t2 = tt * tt;
+		const t3 = t2 * tt;
+		// Standard CR weights on v; u spacing treated uniform per segment,
+		// fine at editor scale.
+		return (
+			0.5 *
+			(2 * p1[1] +
+				(-p0[1] + p2[1]) * tt +
+				(2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 +
+				(-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+		);
+	}
+
+	/** Beach domain, metres: flat deep section, ramp, dry sand. */
+	const HF_L = 140;
+	const HF_RAMP = 50;
+	function hfBed(x: number) {
+		const slope = (hf.deepM + 1) / (130 - HF_RAMP);
+		return x <= HF_RAMP ? -hf.deepM : Math.min(-hf.deepM + (x - HF_RAMP) * slope, 1);
+	}
+	function hfWaveNumber(omega: number, depth: number) {
+		let kk = (omega * omega) / G;
+		for (let i = 0; i < 5; i++) {
+			const th = Math.tanh(kk * depth);
+			const fv = G * kk * th - omega * omega;
+			const dfv = G * th + G * kk * depth * (1 - th * th);
+			kk -= fv / dfv;
+			if (kk < 1e-6) kk = 1e-6;
+		}
+		return kk;
+	}
+	function hfGroupSpeed(omega: number, kk: number, depth: number) {
+		const kd = kk * depth;
+		const sh = Math.sinh(2 * kd);
+		return (omega / kk) * 0.5 * (1 + (2 * kd) / (sh === 0 ? 1e-6 : sh));
+	}
+	/** Everything static per knob-set, cached: phase integral, local k,
+	 *  shoaled and capped amplitudes, spent fraction, break onset. */
+	const HF_NB = 520;
+	let hfKey = '';
+
+	const hfC = {
+		cum: new Float64Array(HF_NB),
+		kL: new Float64Array(HF_NB),
+		aFree: new Float64Array(HF_NB),
+		aCap: new Float64Array(HF_NB),
+		spent: new Float64Array(HF_NB),
+		dep: new Float64Array(HF_NB),
+		onset: new Float64Array(HF_NB),
+		omega: 1,
+		maxA: 1,
+		breakX: 0
+	};
+	function hfRebuild() {
+		const omega = (2 * Math.PI) / Math.max(hf.periodS, 0.1);
+		hfC.omega = omega;
+		const dx = HF_L / HF_NB;
+		const d0 = Math.max(hf.deepM, 0.2);
+		const cg0 = hfGroupSpeed(omega, hfWaveNumber(omega, d0), d0);
+		let cum = 0;
+		let maxA = 0;
+		hfC.breakX = HF_L;
+		for (let j = 0; j < HF_NB; j++) {
+			const x = (j + 0.5) * dx;
+			const d = Math.max(-hfBed(x), 0.12);
+			const kk = hfWaveNumber(omega, d);
+			const cg = hfGroupSpeed(omega, kk, d);
+			cum += kk * dx;
+			hfC.cum[j] = cum;
+			hfC.kL[j] = kk;
+			hfC.dep[j] = d;
+			// Free (unbroken) amplitude from energy flux; capped by the
+			// breaker index. spent = the fraction breaking has removed —
+			// nonzero from the FIRST capped column: decay begins at the
+			// break, not after a pose.
+			const aFree = hf.ampM * Math.sqrt(cg0 / Math.max(cg, 0.05));
+			const aCap = Math.min(aFree, (hf.gamma * d) / 2);
+			hfC.aFree[j] = aFree;
+			hfC.aCap[j] = aCap;
+			hfC.spent[j] = aFree > 1e-6 ? 1 - aCap / aFree : 0;
+			// Onset eases in over the last stretch before the cap bites
+			// (Bonmarin: the face rebuilds itself in under two periods).
+			const br = (2 * aFree) / (hf.gamma * d);
+			const on = Math.min(Math.max((br - 0.88) / 0.12, 0), 1);
+			hfC.onset[j] = on * on * (3 - 2 * on);
+			if (hfC.breakX === HF_L && aFree > aCap + 1e-6) hfC.breakX = x;
+			if (aCap > maxA) maxA = aCap;
+		}
+		hfC.maxA = Math.max(maxA, 0.2);
+	}
+
 	const slice = new FlipSlice();
 	let t = 0;
 	let seededAt = { lambda: 0, amplitude: 0, depth: 0, slopeStart: 0, gridNx: 0 };
@@ -460,17 +654,19 @@
 	let scanvas: HTMLCanvasElement | undefined = $state();
 	let pcanvas: HTMLCanvasElement | undefined = $state();
 	let rcanvas: HTMLCanvasElement | undefined = $state();
+	let hcanvas: HTMLCanvasElement | undefined = $state();
 	let stats = $state({ c: 0, particles: 0, ms: 0 });
 	let bstats = $state({ maxB: 0, minJ: 1, amp: 0, peak: 0 });
 	let sstats = $state({ ratio: 1, amp: 0 });
 	let pstats = $state({ c: 0, cg: 0, sigma: 0 });
 	let rstats = $state({ bendDeg: 0, kDeep: 0, kShore: 0 });
+	let hstats = $state({ tubeH: 0, tubeL: 0 });
 	// Mirrors waves.ts; the lab is standalone so it keeps its own copy.
 	const UNIFIED_NORTH_DEG_LOCAL = 315;
 	/** Which graph is on screen. Only the visible one is stepped or drawn:
 	 *  a hidden canvas has zero client size, and sizing to that would
 	 *  leave it blank when it came back. */
-	let tab: 'tank' | 'bend' | 'stokes' | 'packet' | 'rays' = $state('bend');
+	let tab: 'tank' | 'bend' | 'stokes' | 'packet' | 'rays' | 'hfbreak' = $state('bend');
 
 	function flipParams() {
 		return {
@@ -758,6 +954,186 @@
 		pstats.sigma = now.sigma;
 	}
 
+	/**
+	 * HEIGHTFIELD BREAK — authored. The top strip is the EDITOR: the
+	 * selected keyframe's profile with draggable control points. The
+	 * lower area is the live beach: a steady train whose shape, inside
+	 * the surf zone, is the authored keyframes blended by break
+	 * progression and scaled by the decaying amplitude. The machine
+	 * carries the shape; the shape is yours.
+	 */
+	const kfEditor = { x0: 0, y0: 0, w: 0, h: 0, drag: -1 };
+	function kfEdU(pxX: number) {
+		return ((pxX - kfEditor.x0) / kfEditor.w) * 1.1 - 0.55;
+	}
+	function kfEdX(u: number) {
+		return kfEditor.x0 + ((u + 0.55) / 1.1) * kfEditor.w;
+	}
+	function kfEdV(pxY: number) {
+		return (kfEditor.y0 + kfEditor.h * 0.62 - pxY) / (kfEditor.h * 0.3);
+	}
+	function kfEdY(v: number) {
+		return kfEditor.y0 + kfEditor.h * 0.62 - v * (kfEditor.h * 0.3);
+	}
+
+	function drawHfBreak(ctx: CanvasRenderingContext2D) {
+		if (!hcanvas) return;
+		const key = `${hf.periodS},${hf.ampM},${hf.deepM},${hf.gamma}`;
+		if (key !== hfKey) {
+			hfKey = key;
+			hfRebuild();
+		}
+		const dpr = window.devicePixelRatio || 1;
+		const W = hcanvas.clientWidth;
+		const H = hcanvas.clientHeight;
+		if (hcanvas.width !== W * dpr || hcanvas.height !== H * dpr) {
+			hcanvas.width = W * dpr;
+			hcanvas.height = H * dpr;
+		}
+		const PW = hcanvas.width;
+		const PH = hcanvas.height;
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.fillStyle = '#0d1319';
+		ctx.fillRect(0, 0, PW, PH);
+
+		// ---- editor strip ----
+		kfEditor.x0 = 16 * dpr;
+		kfEditor.y0 = 6 * dpr;
+		kfEditor.w = PW - 32 * dpr;
+		kfEditor.h = PH * 0.36;
+		ctx.strokeStyle = '#22303e';
+		ctx.lineWidth = dpr;
+		ctx.strokeRect(kfEditor.x0, kfEditor.y0, kfEditor.w, kfEditor.h);
+		ctx.beginPath();
+		ctx.moveTo(kfEditor.x0, kfEdY(0));
+		ctx.lineTo(kfEditor.x0 + kfEditor.w, kfEdY(0));
+		ctx.stroke();
+		const stage = kfData[kfSel];
+		ctx.strokeStyle = '#e0a33e';
+		ctx.lineWidth = 2 * dpr;
+		ctx.beginPath();
+		for (let i = 0; i <= 200; i++) {
+			const u = -0.55 + (i / 200) * 1.1;
+			const X = kfEdX(u);
+			const Y = kfEdY(kfEval(stage, u));
+			if (i === 0) ctx.moveTo(X, Y);
+			else ctx.lineTo(X, Y);
+		}
+		ctx.stroke();
+		for (let i = 0; i < stage.length; i++) {
+			ctx.fillStyle = i === kfEditor.drag ? '#ffffff' : '#5fd6e6';
+			ctx.beginPath();
+			ctx.arc(kfEdX(stage[i][0]), kfEdY(stage[i][1]), 5 * dpr, 0, Math.PI * 2);
+			ctx.fill();
+		}
+		ctx.fillStyle = '#8fa2b3';
+		ctx.font = `${10 * dpr}px ui-monospace, Menlo, monospace`;
+		ctx.fillText(
+			`stage ${kfSel + 1}/${KF_STAGES} — drag points; crest at centre`,
+			kfEditor.x0 + 6 * dpr,
+			kfEditor.y0 + 14 * dpr
+		);
+
+		// ---- live beach ----
+		const aY0 = kfEditor.y0 + kfEditor.h + 8 * dpr;
+		const aH = PH - aY0;
+		const sxs = PW / HF_L;
+		const sy = Math.min(sxs * 3, (aH * 0.3) / hfC.maxA);
+		const y0 = aY0 + aH * 0.45;
+		const px = (wx: number) => wx * sxs;
+		const py = (wy: number) => y0 - wy * sy;
+		ctx.strokeStyle = '#22303e';
+		ctx.lineWidth = dpr;
+		ctx.beginPath();
+		ctx.moveTo(0, py(0));
+		ctx.lineTo(PW, py(0));
+		ctx.stroke();
+		ctx.strokeStyle = '#3a4652';
+		ctx.beginPath();
+		for (let j = 0; j <= 120; j++) {
+			const x = (j / 120) * HF_L;
+			const Y = Math.min(py(hfBed(x)), PH - 2);
+			if (j === 0) ctx.moveTo(px(x), Y);
+			else ctx.lineTo(px(x), Y);
+		}
+		ctx.stroke();
+		ctx.strokeStyle = '#7a5a30';
+		ctx.beginPath();
+		ctx.moveTo(px(hfC.breakX), aY0);
+		ctx.lineTo(px(hfC.breakX), PH - 2);
+		ctx.stroke();
+
+		const NB = HF_NB;
+		const dx = HF_L / NB;
+		ctx.lineWidth = 1.6 * dpr;
+		ctx.beginPath();
+		let wasAuthored = false;
+		for (let j = 0; j < NB; j++) {
+			const A = hfC.aCap[j];
+			const th = hfC.cum[j] - hfC.omega * t;
+			const prox = Math.min((2 * hfC.aFree[j]) / (hf.gamma * hfC.dep[j]), 1);
+			const skew = hf.skewMax * prox * prox;
+			const m = th / (2 * Math.PI);
+			const thw = 2 * Math.PI * (m - Math.round(m));
+			const thd = thw + skew * Math.sin(thw);
+			const md = thd / (2 * Math.PI);
+			const frac = md - Math.round(md);
+			const carrier = Math.cos(thd);
+			// The authored blend: break onset fades stage 1 in over the
+			// carrier; deeper into the surf zone the stages cross-fade by
+			// spent — the same progression clock as everywhere else.
+			const on = hfC.onset[j];
+			let yv = carrier;
+			if (on > 0.003) {
+				const sPos = Math.min(hfC.spent[j] * 2.5, 1) * (KF_STAGES - 1);
+				const i0 = Math.min(Math.floor(sPos), KF_STAGES - 2);
+				const bl = sPos - i0;
+				const authored =
+					kfEval(kfData[i0], frac) * (1 - bl) + kfEval(kfData[i0 + 1], frac) * bl;
+				yv = carrier * (1 - on) + authored * on;
+				wasAuthored = true;
+			}
+			const X = px((j + 0.5) * dx);
+			const Y = py(A * yv);
+			ctx.strokeStyle = wasAuthored && on > 0.003 ? '#e0a33e' : '#5fd6e6';
+			if (j === 0) ctx.moveTo(X, Y);
+			else ctx.lineTo(X, Y);
+		}
+		ctx.strokeStyle = '#5fd6e6';
+		ctx.stroke();
+		// Amber overlay for the authored zone, drawn as its own pass so
+		// the colour split is clean.
+		ctx.strokeStyle = '#e0a33e';
+		ctx.beginPath();
+		let open = false;
+		for (let j = 0; j < NB; j++) {
+			if (hfC.onset[j] > 0.003) {
+				const A = hfC.aCap[j];
+				const th = hfC.cum[j] - hfC.omega * t;
+				const prox = Math.min((2 * hfC.aFree[j]) / (hf.gamma * hfC.dep[j]), 1);
+				const skew = hf.skewMax * prox * prox;
+				const m = th / (2 * Math.PI);
+				const thw = 2 * Math.PI * (m - Math.round(m));
+				const thd = thw + skew * Math.sin(thw);
+				const md = thd / (2 * Math.PI);
+				const frac = md - Math.round(md);
+				const on = hfC.onset[j];
+				const sPos = Math.min(hfC.spent[j] * 2.5, 1) * (KF_STAGES - 1);
+				const i0 = Math.min(Math.floor(sPos), KF_STAGES - 2);
+				const bl = sPos - i0;
+				const authored =
+					kfEval(kfData[i0], frac) * (1 - bl) + kfEval(kfData[i0 + 1], frac) * bl;
+				const yv = Math.cos(thd) * (1 - on) + authored * on;
+				const X = px((j + 0.5) * dx);
+				const Y = py(A * yv);
+				if (!open) ctx.moveTo(X, Y);
+				else ctx.lineTo(X, Y);
+				open = true;
+			} else open = false;
+		}
+		ctx.stroke();
+	}
+
 	function drawRays(ctx: CanvasRenderingContext2D) {
 		if (!rcanvas) return;
 		const dpr = window.devicePixelRatio || 1;
@@ -867,12 +1243,56 @@
 		rstats.kShore = waveNumber(omega, 0.5);
 	}
 
+	/** Keyframe editing: drag control points in the editor strip.
+	 *  Endpoints stay pinned at u = +-0.5 and share one height so the
+	 *  profile always tiles; interior points stay ordered. */
+	function kfPointer(ev: PointerEvent) {
+		if (tab !== 'hfbreak' || !hcanvas) return;
+		const r = hcanvas.getBoundingClientRect();
+		const dpr2 = window.devicePixelRatio || 1;
+		const mx = (ev.clientX - r.left) * dpr2;
+		const my = (ev.clientY - r.top) * dpr2;
+		const stage = kfData[kfSel];
+		if (ev.type === 'pointerdown') {
+			let bi = -1;
+			let bd = 18 * dpr2;
+			for (let i = 0; i < stage.length; i++) {
+				const d = Math.hypot(mx - kfEdX(stage[i][0]), my - kfEdY(stage[i][1]));
+				if (d < bd) {
+					bd = d;
+					bi = i;
+				}
+			}
+			kfEditor.drag = bi;
+			if (bi >= 0) hcanvas.setPointerCapture(ev.pointerId);
+		} else if (ev.type === 'pointermove' && kfEditor.drag >= 0) {
+			const i = kfEditor.drag;
+			const n = stage.length;
+			let u = kfEdU(mx);
+			const v = Math.min(Math.max(kfEdV(my), -1.4), 1.6);
+			if (i === 0 || i === n - 1) {
+				// Pinned ends: height only, shared — periodicity survives
+				// any authoring.
+				stage[0][1] = v;
+				stage[n - 1][1] = v;
+			} else {
+				u = Math.min(Math.max(u, stage[i - 1][0] + 0.02), stage[i + 1][0] - 0.02);
+				stage[i][0] = u;
+				stage[i][1] = v;
+			}
+		} else if (ev.type === 'pointerup' && kfEditor.drag >= 0) {
+			kfEditor.drag = -1;
+			kfSave();
+		}
+	}
+
 	onMount(() => {
 		const ctx = canvas.getContext('2d')!;
 		const bctx = bcanvas?.getContext('2d') ?? null;
 		const sctx = scanvas?.getContext('2d') ?? null;
 		const pctx = pcanvas?.getContext('2d') ?? null;
 		const rctx = rcanvas?.getContext('2d') ?? null;
+		const hctx = hcanvas?.getContext('2d') ?? null;
 		reseed();
 		let raf = 0;
 		function frame() {
@@ -898,11 +1318,21 @@
 					if (sctx) drawStokes(sctx);
 				} else if (tab === 'packet') {
 					if (pctx) drawPacket(pctx);
-				} else if (rctx) drawRays(rctx);
+				} else if (tab === 'rays') {
+					if (rctx) drawRays(rctx);
+				} else if (hctx) drawHfBreak(hctx);
 			}
 		}
+		window.addEventListener('pointerdown', kfPointer);
+		window.addEventListener('pointermove', kfPointer);
+		window.addEventListener('pointerup', kfPointer);
 		frame();
-		return () => cancelAnimationFrame(raf);
+		return () => {
+			cancelAnimationFrame(raf);
+			window.removeEventListener('pointerdown', kfPointer);
+			window.removeEventListener('pointermove', kfPointer);
+			window.removeEventListener('pointerup', kfPointer);
+		};
 	});
 
 	function draw(ctx: CanvasRenderingContext2D) {
@@ -1044,6 +1474,36 @@
 		<div class="row"><span class="name">phase c</span><span class="val">{stats.c.toFixed(2)} m/s</span></div>
 		<div class="row"><span class="name">particles</span><span class="val">{stats.particles}</span></div>
 		<div class="row"><span class="name">step</span><span class="val">{stats.ms.toFixed(1)} ms</span></div>
+		{:else if tab === 'hfbreak'}
+		<div class="group">heightfield break</div>
+		<div class="head">
+			{#each Array(KF_STAGES) as _, i (i)}
+				<button class:on={kfSel === i} onclick={() => (kfSel = i)}>stage {i + 1}</button>
+			{/each}
+		</div>
+		<div class="head">
+			<button onclick={kfReset}>reset</button>
+			<button onclick={kfLog}>log points</button>
+		</div>
+		{#each HF_ROWS as [key, min, max, step] (key)}
+			<div class="row">
+				<span class="name">{key}</span>
+				<input type="range" {min} {max} {step} bind:value={hf[key] as number} />
+				<span class="val">{(hf[key] as number).toFixed(2)}</span>
+			</div>
+		{/each}
+		<p class="note">
+			AUTHORED break. The top strip is the editor: the selected
+			stage's profile over one wavelength, crest at centre, drag the
+			points (ends are pinned and share a height so the profile
+			tiles). The beach below carries your shapes: stage 1 fades in
+			over the carrier at the break line, the stages cross-fade
+			shoreward on the same spent clock as everything else, and the
+			whole profile scales with the decaying gamma-capped amplitude
+			— so you author SHAPE and the physics keeps owning size and
+			timing. Shapes persist in this browser; log points prints the
+			JSON for porting into the game.
+		</p>
 		{:else if tab === 'rays'}
 		<div class="group">rays (refraction)</div>
 		{#each RAY_ROWS as [key, min, max, step] (key)}
@@ -1189,12 +1649,14 @@
 			<button class:on={tab === 'stokes'} onclick={() => (tab = 'stokes')}>nonlinear</button>
 			<button class:on={tab === 'packet'} onclick={() => (tab = 'packet')}>packet</button>
 			<button class:on={tab === 'rays'} onclick={() => (tab = 'rays')}>rays</button>
+			<button class:on={tab === 'hfbreak'} onclick={() => (tab = 'hfbreak')}>heightfield break</button>
 		</div>
 		<canvas bind:this={canvas} hidden={tab !== 'tank'}></canvas>
 		<canvas bind:this={bcanvas} hidden={tab !== 'bend'}></canvas>
 		<canvas bind:this={scanvas} hidden={tab !== 'stokes'}></canvas>
 		<canvas bind:this={pcanvas} hidden={tab !== 'packet'}></canvas>
 		<canvas bind:this={rcanvas} hidden={tab !== 'rays'}></canvas>
+		<canvas bind:this={hcanvas} hidden={tab !== 'hfbreak'}></canvas>
 	</div>
 </div>
 

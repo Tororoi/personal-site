@@ -34,9 +34,17 @@
 		/** Wave period of a stroke, seconds. Deep-water wavelength is
 		 *  g*T^2/2pi — T=3 is ~14m, a good fit for a 60m pool. */
 		periodS: 3,
-		amp: 0.35,
+		amp: 1,
 		/** Packets per stroke, tiled across the pool's width. */
-		packets: 26,
+		packets: 8,
+		/** Gerstner steepness: the horizontal trochoid displacement that
+		 *  crowds material toward crests — sharp peaks, flat troughs. The
+		 *  pool's carriers were pure sinusoids, but the surf lab's curl
+		 *  was TUNED against trochoidal crests (its 2D curve carried the
+		 *  q·a·cos term), so without this the same 235 degrees was being
+		 *  asked to make a soft sine hump look like a pitching Gerstner
+		 *  lip. 1 matches the lab's q. */
+		steep: 1,
 		/** Envelope length along travel, metres (the stroke's thickness
 		 *  in DEEP water; it compresses with cg from there).
 		 *
@@ -67,6 +75,30 @@
 		 *  the way to the sand (only the floor-contact drain retires it).
 		 */
 		breakLoss: true,
+		/** The surf lab's crest curl, ported: a rigid rotation of each
+		 *  crest about a hinge below it, driven by the SAME breaking
+		 *  criterion as the red bars and the dissipation — so the lip
+		 *  appears exactly where the physics says the wave is going over,
+		 *  instead of where a scrub slider said so. */
+		curl: true,
+		/**
+		 * GENERIC DECAY RIG for retuning against live waves. Pick a knob
+		 * (dcVar); its effective value then decays PER PACKET as that
+		 * packet is spent. The driver is spent = 1 - decay — the pool's
+		 * own lifecycle clock, which only advances once breaking or the
+		 * floor is actually eating the wave. dcStart is the spent
+		 * fraction where decay begins, dcRate how fast it falls past
+		 * that, dcLimit the floor (fraction of the knob's value) it can
+		 * never fall below. mult = clamp(1 - rate*(spent-start), limit, 1)
+		 */
+		dcVar: 'none' as 'none' | 'steep' | 'curlDeg' | 'curlPow' | 'curlPivot' | 'curlWindow',
+		dcStart: 0,
+		dcRate: 1,
+		dcLimit: 0,
+		curlDeg: 235,
+		curlPow: 5,
+		curlPivot: 1,
+		curlWindow: 3.14,
 		/**
 		 * Fire a stroke every period, like a real wavemaker. One pulse's
 		 * crests die at its front (they outrun their own group — deep
@@ -85,13 +117,21 @@
 
 	const ROWS: [keyof typeof k, number, number, number][] = [
 		['periodS', 1, 8, 0.1],
-		['amp', 0.05, 1, 0.01],
+		['amp', 0.05, 2.5, 0.05],
 		['packets', 4, 60, 1],
+		['steep', 0, 1.3, 0.02],
 		['pulseM', 1, 24, 0.25],
 		['deepM', 2, 8, 0.25],
 		['rampStartM', 15, 45, 1],
 		['headJutM', 0, 26, 0.5],
 		['headWideM', 2, 16, 0.25],
+		['curlDeg', 0, 360, 5],
+		['curlPow', 0.5, 8, 0.1],
+		['curlPivot', 0, 3, 0.05],
+		['curlWindow', 0.2, 3.14, 0.02],
+		['dcStart', 0, 1, 0.01],
+		['dcRate', 0, 8, 0.05],
+		['dcLimit', 0, 1, 0.01],
 		['simSpeed', 0, 3, 0.05]
 	];
 
@@ -361,7 +401,8 @@
 			// mechanism now. A mild floor-contact term retires the tiny
 			// remnants too small to ever break, and running off the pool's
 			// end is a hard stop.
-			let breakEat = 0;
+			// FLOOR drain and pool-end runoff: retire what is grinding on
+			// the sand or has left the water entirely.
 			let floorEat = 0;
 			let wTot = 0;
 			for (let j = -2; j <= 2; j++) {
@@ -369,23 +410,31 @@
 				const w = Math.exp(-(sOff * sOff) / (2 * p.sigS * p.sigS));
 				wTot += w;
 				const dj = depthAt(p.x + ct2 * sOff, p.z + st2 * sOff);
-				// This packet's own local height at the sample.
-				const Hj = 2 * p.a * w;
-				const rB = Math.min(Math.max((Hj / dj - 0.55) / 0.35, 0), 1);
-				const rF = 1 - Math.min(Math.max((dj - 0.16) / 0.1, 0), 1);
-				breakEat += w * rB * rB * (3 - 2 * rB);
-				floorEat += w * rF;
+				floorEat += w * (1 - Math.min(Math.max((dj - 0.16) / 0.1, 0), 1));
 			}
-			let rate = ((k.breakLoss ? 6 * breakEat : 0) + 1.5 * floorEat) / wTot;
+			let rate = (1.5 * floorEat) / wTot;
 			if (p.x > POOL_L) rate = 6;
 			p.decay *= Math.exp(-rate * dt);
-			// Amplitude = conserved energy x accumulated dissipation. Two
-			// channels, multiplied at the end, so neither can overwrite
-			// the other: compression and focusing raise the base (the
-			// reef's bright patch is that term), the beach only ever takes.
 			const base = k.shoal
 				? p.a0 * Math.sqrt((p.sig0 * p.sigQ0) / (p.sigS * p.sigQ))
 				: p.a0;
+			// BREAKING IS A CAP, NOT A RATE. A broken wave is a bore, and a
+			// bore's height is slaved to the depth: it rides the beach at
+			// H ~ 0.78 d, shedding exactly the energy turbulence must eat
+			// to hold it on that line — deflating as the water shallows.
+			// The old fixed drain raced shoaling and lost, leaving
+			// "breaking" waves tall and red indefinitely. Relaxing decay
+			// toward the saturation line gets all three regimes from one
+			// rule: deflation down the beach, reform behind a bar (cap
+			// lifts where depth returns, loss stops, the survivor is a
+			// smaller unbroken wave), and permanence (decay never rises —
+			// energy spent is spent).
+			if (k.breakLoss) {
+				const aSat = 0.39 * depthAt(p.x, p.z);
+				const cap = aSat / Math.max(base, 1e-4);
+				if (p.decay > cap)
+					p.decay += (cap - p.decay) * Math.min(4 * dt, 1);
+			}
 			p.a = base * p.decay;
 			if (p.a < 0.004) packets.splice(i, 1);
 		}
@@ -417,11 +466,13 @@
 	 * jumpiness. Writes into `surf` to keep the per-vertex loop
 	 * allocation-free.
 	 */
-	const surf = { y: 0, gx: 0, gz: 0 };
+	const surf = { y: 0, gx: 0, gz: 0, dx: 0, dz: 0 };
 	function surfaceAt(x: number, z: number) {
 		surf.y = 0;
 		surf.gx = 0;
 		surf.gz = 0;
+		surf.dx = 0;
+		surf.dz = 0;
 		for (const p of packets) {
 			const dx = x - p.x;
 			const dz = z - p.z;
@@ -462,7 +513,92 @@
 			const ph = kk * sc + p.phase;
 			const co = Math.cos(ph);
 			const si = Math.sin(ph);
-			surf.y += p.a * es * eq * co;
+			// The decay rig: this packet's multiplier for whichever knob is
+			// under tuning, driven by how spent the packet is.
+			const dm =
+				k.dcVar === 'none'
+					? 1
+					: Math.min(
+							Math.max(1 - k.dcRate * Math.max(1 - p.decay - k.dcStart, 0), k.dcLimit),
+							1
+						);
+			const sEff = k.steep * (k.dcVar === 'steep' ? dm : 1);
+			const cDegEff = k.curlDeg * (k.dcVar === 'curlDeg' ? dm : 1);
+			const cPowEff = k.curlPow * (k.dcVar === 'curlPow' ? dm : 1);
+			const cPivEff = k.curlPivot * (k.dcVar === 'curlPivot' ? dm : 1);
+			const cWinEff = Math.max(k.curlWindow * (k.dcVar === 'curlWindow' ? dm : 1), 0.05);
+			const aEnv = p.a * es * eq;
+			const etaP = aEnv * co;
+			// The trochoid: material at this phase is displaced down-wave
+			// by -steep a sin(ph), same convention as classic Gerstner
+			// (y = a cos, x-shift = -Q a sin). This is what sharpens the
+			// peaks; the curl below rotates the SWAYED point, as the lab
+			// did.
+			const dsG = -sEff * aEnv * si;
+			if (k.curl) {
+				// THE SURF LAB'S CURL, fed by physics instead of a scrub.
+				// psi: signed phase from the nearest crest. The crest region
+				// within curlWindow rotates rigidly about a hinge curlPivot
+				// local-amplitudes below the crest — rigid, so it cannot
+				// self-intersect; hinged low, so the TIP travels furthest
+				// and comes down ahead of the face (the lab's hard-won
+				// lessons, verbatim). The break amount is the local H/d
+				// ramp — the same number the bars flag and the beach eats
+				// by, so all three agree about where waves are going over.
+				const m = ph / (2 * Math.PI);
+				const psi = 2 * Math.PI * (m - Math.round(m));
+				if (Math.abs(psi) < cWinEff) {
+					const aLoc = aEnv;
+					const dLoc = depthAt(x, z);
+					const bRaw = Math.min(
+						Math.max(((2 * aLoc) / dLoc - 0.55) / 0.35, 0),
+						1
+					);
+					if (bRaw > 0.002) {
+						// The lab's unwind, restored. There, bend was
+						// bThrow x (1 - collapse): structurally impossible to
+						// have a hard bend on a collapsed wave, which is why
+						// 235 degrees was safe. The pool's H/d criterion
+						// broke that — depth shrinks as fast as a dying wave
+						// does, so wisps kept curling at full angle. decay IS
+						// this pool's collapse, so it takes the lab's role:
+						// the bend unwinds exactly as the beach drains the
+						// wave. With breakLoss off, decay holds ~1 and the
+						// full tuned curl stands — the lab's held-scrub
+						// tuning mode, recovered for free.
+						const bAmt = bRaw * bRaw * (3 - 2 * bRaw) * p.decay;
+						const wf = Math.cos((psi / cWinEff) * (Math.PI / 2));
+						const phi =
+							((cDegEff * Math.PI) / 180) * bAmt * Math.pow(wf, cPowEff);
+						// Crest-relative frame: sample sits du down-wave of
+						// the crest, hinge below the crest tip.
+						const du = psi / kk;
+						const hy = aLoc * (1 - cPivEff);
+						const rx = du + dsG;
+						const ry = etaP - hy;
+						const cs = Math.cos(phi);
+						const sf = Math.sin(phi);
+						const duR = rx * cs + ry * sf;
+						const yR = hy + (-rx * sf + ry * cs);
+						const dShift = duR - du;
+						surf.dx += dShift * ct;
+						surf.dz += dShift * st;
+						surf.y += yR;
+					} else {
+						surf.y += etaP;
+						surf.dx += dsG * ct;
+						surf.dz += dsG * st;
+					}
+				} else {
+					surf.y += etaP;
+					surf.dx += dsG * ct;
+					surf.dz += dsG * st;
+				}
+			} else {
+				surf.y += etaP;
+				surf.dx += dsG * ct;
+				surf.dz += dsG * st;
+			}
 			// Full chain rule through sc(s, qb(s, q)) and qb(s, q):
 			//   dqb/ds = -pathK s   dqb/dq = 1
 			//   dsc/ds = 1 + 2 kap qb dqb/ds   dsc/dq = 2 kap qb
@@ -644,6 +780,16 @@
 		});
 		const water = new THREE.Mesh(waterGeo, waterMat);
 		scene.add(water);
+		// Rest coordinates, captured once: the curl displaces vertices
+		// HORIZONTALLY (an overturning lip is not a heightfield), so the
+		// live position attribute can no longer serve as its own sample
+		// grid.
+		const waterBaseX = new Float32Array(waterGeo.attributes.position.count);
+		const waterBaseZ = new Float32Array(waterGeo.attributes.position.count);
+		for (let i = 0; i < waterBaseX.length; i++) {
+			waterBaseX[i] = waterGeo.attributes.position.getX(i);
+			waterBaseZ[i] = waterGeo.attributes.position.getZ(i);
+		}
 
 		// -- Packet markers: one bar per packet, perpendicular to travel --
 		const MAXP = 400;
@@ -804,8 +950,9 @@
 			g.fillRect(0, 0, PW, PH);
 			const PAD = 78 * dpr;
 			const tau = labT - strokeT0;
-			const sumH = Math.round(PH * 0.3);
-			const rowH = (PH - sumH) / NCOMP;
+			const liveH = Math.round(PH * 0.3);
+			const sumH = Math.round(PH * 0.2);
+			const rowH = (PH - liveH - sumH) / NCOMP;
 			const sx = (x: number) => PAD + (x / POOL_L) * (PW - PAD - 8 * dpr);
 			const shoreSx = sx(shoreX());
 
@@ -846,8 +993,108 @@
 				g.fillText(label, 8 * dpr, y0 + h / 2 + 3 * dpr);
 			};
 
+			// TUNING WAVE: a synthetic STEADY TRAIN, always running — like
+			// the spectral rows below, it needs no stroke. Every formula is
+			// the packet code's, applied to the steady-state train instead
+			// of a fired group: amplitude from flux conservation, capped by
+			// the same 0.39d saturation, spent = how much the cap has
+			// eaten, the decay rig riding spent, trochoid and curl
+			// verbatim. Parametric, so the lip draws as a loop. What this
+			// row deliberately lacks is the envelope — no group structure —
+			// which is exactly why it can run forever: it is the wave the
+			// train would carry at every x simultaneously, the ideal
+			// subject for tuning shape against progression without firing.
+			{
+				const mid = liveH * 0.55;
+				g.strokeStyle = '#1c2833';
+				g.lineWidth = dpr;
+				g.beginPath();
+				g.moveTo(PAD, mid);
+				g.lineTo(PW, mid);
+				g.stroke();
+				g.strokeStyle = '#33424f';
+				g.beginPath();
+				g.moveTo(shoreSx, 2);
+				g.lineTo(shoreSx, liveH - 2);
+				g.stroke();
+				const cc = comps[(NCOMP - 1) / 2];
+				if (cc) {
+					const omega = cc.omega;
+					const kD0 = waveNumber(omega, k.deepM);
+					const cg0 = groupSpeed(omega, kD0, k.deepM);
+					const scaleY = (liveH * 0.38) / Math.max(1.6 * k.amp, 0.4);
+					g.strokeStyle = '#9fd8ea';
+					g.lineWidth = 1.6 * dpr;
+					g.beginPath();
+					const NL = 340;
+					for (let i = 0; i <= NL; i++) {
+						const xw = (i / NL) * POOL_L;
+						const d = depthAt(xw, 0);
+						const kL = waveNumber(omega, d);
+						const cg = groupSpeed(omega, kL, d);
+						const A0x = k.shoal
+							? k.amp * Math.sqrt(cg0 / Math.max(cg, 0.05))
+							: k.amp;
+						const Ax = k.breakLoss ? Math.min(A0x, 0.39 * d) : A0x;
+						const spent = A0x > 1e-6 ? 1 - Ax / A0x : 0;
+						const dm =
+							k.dcVar === 'none'
+								? 1
+								: Math.min(
+										Math.max(
+											1 - k.dcRate * Math.max(spent - k.dcStart, 0),
+											k.dcLimit
+										),
+										1
+									);
+						const sEff = k.steep * (k.dcVar === 'steep' ? dm : 1);
+						const cDegEff = k.curlDeg * (k.dcVar === 'curlDeg' ? dm : 1);
+						const cPowEff = k.curlPow * (k.dcVar === 'curlPow' ? dm : 1);
+						const cPivEff = k.curlPivot * (k.dcVar === 'curlPivot' ? dm : 1);
+						const cWinEff = Math.max(
+							k.curlWindow * (k.dcVar === 'curlWindow' ? dm : 1),
+							0.05
+						);
+						const ph = compPhase(cc, xw, labT);
+						const m2 = ph / (2 * Math.PI);
+						const psi = 2 * Math.PI * (m2 - Math.round(m2));
+						const co = Math.cos(ph);
+						const si = Math.sin(ph);
+						let y = Ax * co;
+						let dxp = -sEff * Ax * si;
+						if (k.curl && Math.abs(psi) < cWinEff) {
+							const bRaw = Math.min(
+								Math.max(((2 * Ax) / d - 0.55) / 0.35, 0),
+								1
+							);
+							const bAmt = bRaw * bRaw * (3 - 2 * bRaw) * (1 - spent);
+							if (bAmt > 0.002) {
+								const wf = Math.cos((psi / cWinEff) * (Math.PI / 2));
+								const phi =
+									((cDegEff * Math.PI) / 180) * bAmt * Math.pow(wf, cPowEff);
+								const du = psi / kL;
+								const hy = Ax * (1 - cPivEff);
+								const rx = du + dxp;
+								const ry = y - hy;
+								const cs = Math.cos(phi);
+								const sf = Math.sin(phi);
+								y = hy + (-rx * sf + ry * cs);
+								dxp = rx * cs + ry * sf - du;
+							}
+						}
+						const px2 = sx(xw + dxp);
+						const py2 = mid - y * scaleY;
+						if (i === 0) g.moveTo(px2, py2);
+						else g.lineTo(px2, py2);
+					}
+					g.stroke();
+				}
+				g.fillStyle = '#8fa2b3';
+				g.font = `${10 * dpr}px ui-monospace, Menlo, monospace`;
+				g.fillText('tuning wave · steady train', 8 * dpr, mid + 3 * dpr);
+			}
 			row(
-				0,
+				liveH,
 				sumH,
 				(x) => {
 					let e = 0;
@@ -860,7 +1107,7 @@
 			for (let i = 0; i < comps.length; i++) {
 				const c = comps[i];
 				row(
-					sumH + i * rowH,
+					liveH + sumH + i * rowH,
 					rowH,
 					(x) => c.w * Math.cos(compPhase(c, x, tau)),
 					i === (NCOMP - 1) / 2 ? '#7fd4a5' : '#5fd6e6',
@@ -909,10 +1156,12 @@
 				const pos = waterGeo.attributes.position;
 				const nrm = waterGeo.attributes.normal;
 				for (let i = 0; i < pos.count; i++) {
-					surfaceAt(pos.getX(i), pos.getZ(i));
-					pos.setY(i, surf.y);
-					// Analytic normal, unnormalised is fine for lighting
-					// after the material normalises: (-dh/dx, 1, -dh/dz).
+					surfaceAt(waterBaseX[i], waterBaseZ[i]);
+					pos.setXYZ(i, waterBaseX[i] + surf.dx, surf.y, waterBaseZ[i] + surf.dz);
+					// Analytic normal from the UNBENT field. The curl's
+					// rotation is not chain-ruled through the lighting — a
+					// curling crest shades slightly as though still upright.
+					// Accepted for the lab: the silhouette is the point here.
 					const inv = 1 / Math.hypot(surf.gx, 1, surf.gz);
 					nrm.setXYZ(i, -surf.gx * inv, inv, -surf.gz * inv);
 				}
@@ -985,6 +1234,18 @@
 			<label><input type="checkbox" bind:checked={k.shoal} /> shoal</label>
 			<label><input type="checkbox" bind:checked={k.spreadEnergy} /> focus</label>
 			<label><input type="checkbox" bind:checked={k.breakLoss} /> break</label>
+			<label><input type="checkbox" bind:checked={k.curl} /> curl</label>
+			<label>
+				decay
+				<select bind:value={k.dcVar}>
+					<option value="none">none</option>
+					<option value="steep">steep</option>
+					<option value="curlDeg">curlDeg</option>
+					<option value="curlPow">curlPow</option>
+					<option value="curlPivot">curlPivot</option>
+					<option value="curlWindow">curlWindow</option>
+				</select>
+			</label>
 			<label><input type="checkbox" bind:checked={k.autoFire} /> train</label>
 			<label><input type="checkbox" bind:checked={k.reflectWalls} /> walls</label>
 			<label><input type="checkbox" bind:checked={k.showPackets} /> packets</label>
@@ -1105,6 +1366,12 @@
 	.head button.on {
 		color: #e0a33e;
 		border-color: #e0a33e;
+	}
+	.head select {
+		background: #1d2833;
+		border: 1px solid #33445a;
+		color: #cfd8e0;
+		font: inherit;
 	}
 	.group {
 		margin: 12px 0 4px;
